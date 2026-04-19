@@ -174,14 +174,14 @@ mixin RtcRenderMixin<T extends StatefulWidget> on State<T> {
 @immutable
 class RtcRenderer extends StatefulWidget {
   const RtcRenderer({
-    Key? key,
+    super.key,
     required this.canvas,
     this.connection,
     required this.viewType,
     this.extraParams = const <String, Object?>{},
     this.onPlatformViewCreated,
     this.gestureRecognizers,
-  }) : super(key: key);
+  });
   final PlatformViewCreatedCallback? onPlatformViewCreated;
 
   final Set<Factory<OneSequenceGestureRecognizer>>? gestureRecognizers;

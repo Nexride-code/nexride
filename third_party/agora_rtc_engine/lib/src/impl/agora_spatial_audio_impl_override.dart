@@ -9,8 +9,7 @@ import 'package:iris_method_channel/iris_method_channel.dart';
 
 class LocalSpatialAudioEngineImpl extends spatial_audio_binding
     .LocalSpatialAudioEngineImpl with ScopedDisposableObjectMixin {
-  LocalSpatialAudioEngineImpl._(IrisMethodChannel irisMethodChannel)
-      : super(irisMethodChannel);
+  LocalSpatialAudioEngineImpl._(super.irisMethodChannel);
 
   factory LocalSpatialAudioEngineImpl.create(
       IrisMethodChannel irisMethodChannel) {

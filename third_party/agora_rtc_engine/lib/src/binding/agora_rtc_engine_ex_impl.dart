@@ -7,8 +7,7 @@ import '/src/binding/impl_forward_export.dart';
 import 'package:iris_method_channel/iris_method_channel.dart';
 
 class RtcEngineExImpl extends RtcEngineImpl implements RtcEngineEx {
-  RtcEngineExImpl(IrisMethodChannel irisMethodChannel)
-      : super(irisMethodChannel);
+  RtcEngineExImpl(super.irisMethodChannel);
 
   @override
   @protected

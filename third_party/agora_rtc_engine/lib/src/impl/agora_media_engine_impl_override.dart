@@ -11,8 +11,7 @@ import 'package:iris_method_channel/iris_method_channel.dart';
 
 class MediaEngineImpl extends media_engine_impl_binding.MediaEngineImpl
     with ScopedDisposableObjectMixin {
-  MediaEngineImpl._(IrisMethodChannel irisMethodChannel)
-      : super(irisMethodChannel);
+  MediaEngineImpl._(super.irisMethodChannel);
 
   factory MediaEngineImpl.create(IrisMethodChannel irisMethodChannel) {
     return MediaEngineImpl._(irisMethodChannel);

@@ -4,7 +4,6 @@ import '/src/impl/agora_rtc_engine_impl.dart';
 import '/src/impl/platform/global_video_view_controller.dart';
 import '/src/render/video_view_controller.dart';
 import 'package:flutter/foundation.dart';
-import 'package:meta/meta.dart';
 
 // ignore_for_file: public_member_api_docs
 

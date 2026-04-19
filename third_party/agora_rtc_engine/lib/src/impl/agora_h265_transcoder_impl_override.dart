@@ -6,8 +6,7 @@ import '/src/binding/agora_h265_transcoder_event_impl.dart';
 import 'package:iris_method_channel/iris_method_channel.dart';
 
 class H265TranscoderImplOverride extends impl_binding.H265TranscoderImpl {
-  H265TranscoderImplOverride(IrisMethodChannel irisMethodChannel)
-      : super(irisMethodChannel);
+  H265TranscoderImplOverride(super.irisMethodChannel);
 
   final _observerScopedKey = const TypedScopedKey(H265TranscoderImplOverride);
 

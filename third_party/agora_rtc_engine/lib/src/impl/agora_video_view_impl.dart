@@ -59,10 +59,10 @@ class AgoraVideoViewState extends State<AgoraVideoView> {
 
 class AgoraRtcRenderPlatformView extends StatefulWidget {
   const AgoraRtcRenderPlatformView({
-    Key? key,
+    super.key,
     required this.controller,
     this.onAgoraVideoViewCreated,
-  }) : super(key: key);
+  });
 
   final VideoViewControllerBase controller;
 
@@ -278,10 +278,10 @@ class _VideoViewControllerInternal with VideoViewControllerBaseMixin {
 
 class AgoraRtcRenderTexture extends StatefulWidget {
   const AgoraRtcRenderTexture({
-    Key? key,
+    super.key,
     required this.controller,
     this.onAgoraVideoViewCreated,
-  }) : super(key: key);
+  });
 
   final VideoViewControllerBase controller;
   final AgoraVideoViewCreatedCallback? onAgoraVideoViewCreated;

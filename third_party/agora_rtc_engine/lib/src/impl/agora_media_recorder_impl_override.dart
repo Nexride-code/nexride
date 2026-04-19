@@ -46,7 +46,7 @@ class MediaRecorderObserverWrapperOverride
 }
 
 class _MediaRecorderScopedKey extends TypedScopedKey {
-  const _MediaRecorderScopedKey(Type type, this.strNativeHandle) : super(type);
+  const _MediaRecorderScopedKey(super.type, this.strNativeHandle);
   final String strNativeHandle;
 
   @override
@@ -65,8 +65,7 @@ class _MediaRecorderScopedKey extends TypedScopedKey {
 
 class MediaRecorderImpl extends media_recorder_impl_binding.MediaRecorderImpl
     with ScopedDisposableObjectMixin {
-  MediaRecorderImpl._(IrisMethodChannel irisMethodChannel, this.strNativeHandle)
-      : super(irisMethodChannel) {
+  MediaRecorderImpl._(super.irisMethodChannel, this.strNativeHandle) {
     _mediaRecorderScopedKey =
         _MediaRecorderScopedKey(MediaRecorderImpl, strNativeHandle);
   }

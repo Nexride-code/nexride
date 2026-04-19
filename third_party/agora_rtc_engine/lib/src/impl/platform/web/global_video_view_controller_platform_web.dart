@@ -47,8 +47,7 @@ final Map<int, _View> _viewMap = {};
 
 class GlobalVideoViewControllerWeb extends GlobalVideoViewControllerPlatfrom {
   GlobalVideoViewControllerWeb(
-      IrisMethodChannel irisMethodChannel, RtcEngine rtcEngine)
-      : super(irisMethodChannel, rtcEngine) {
+      super.irisMethodChannel, super.rtcEngine) {
     ui_web.platformViewRegistry.registerViewFactory(_platformRendererViewType,
         (int viewId) {
       final view = _View(viewId);

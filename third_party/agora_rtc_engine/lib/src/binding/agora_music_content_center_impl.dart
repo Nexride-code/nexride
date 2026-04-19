@@ -154,8 +154,7 @@ class MusicCollectionImpl implements MusicCollection {
 }
 
 class MusicPlayerImpl extends MediaPlayerImpl implements MusicPlayer {
-  MusicPlayerImpl(IrisMethodChannel irisMethodChannel)
-      : super(irisMethodChannel);
+  MusicPlayerImpl(super.irisMethodChannel);
 
   @override
   @protected

@@ -5,6 +5,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../services/auth_service.dart';
 
 class SignupScreen extends StatefulWidget {
+  const SignupScreen({super.key});
+
   @override
   _SignupScreenState createState() => _SignupScreenState();
 }
@@ -24,7 +26,7 @@ class _SignupScreenState extends State<SignupScreen> {
 
     if(emailController.text.isEmpty || passwordController.text.isEmpty){
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Please fill all fields"))
+        const SnackBar(content: Text("Please fill all fields"))
       );
       return;
     }
@@ -54,7 +56,7 @@ class _SignupScreenState extends State<SignupScreen> {
 
       // ✅ SUCCESS
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Account Created Successfully ✅"))
+        const SnackBar(content: Text("Account Created Successfully ✅"))
       );
 
       Navigator.pop(context);
@@ -93,37 +95,37 @@ class _SignupScreenState extends State<SignupScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text("NexRide Sign Up"),
+        title: const Text("NexRide Sign Up"),
       ),
 
       body: Padding(
-        padding: EdgeInsets.all(20),
+        padding: const EdgeInsets.all(20),
 
         child: Column(
           children: [
 
             TextField(
               controller: emailController,
-              decoration: InputDecoration(
+              decoration: const InputDecoration(
                 labelText: "Email",
               ),
             ),
 
             TextField(
               controller: passwordController,
-              decoration: InputDecoration(
+              decoration: const InputDecoration(
                 labelText: "Password",
               ),
               obscureText: true,
             ),
 
-            SizedBox(height:20),
+            const SizedBox(height:20),
 
             isLoading
-                ? CircularProgressIndicator()
+                ? const CircularProgressIndicator()
                 : ElevatedButton(
                     onPressed: signUp,
-                    child: Text("Create Account"),
+                    child: const Text("Create Account"),
                   )
 
           ],
