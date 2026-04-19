@@ -1,0 +1,38 @@
+{
+  "buildFiles": [
+    "/Users/lexemm/nexride/third_party/agora_rtc_engine/android/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/Users/lexemm/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/Users/lexemm/nexride/third_party/agora_rtc_engine/android/.cxx/Debug/3t4l445x/x86_64",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/Users/lexemm/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/Users/lexemm/nexride/third_party/agora_rtc_engine/android/.cxx/Debug/3t4l445x/x86_64",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "iris_rendering_android::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "x86_64",
+      "artifactName": "iris_rendering_android",
+      "output": "/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86_64/libiris_rendering_android.so",
+      "runtimeFiles": []
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "/Users/lexemm/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang.lld",
+      "cppCompilerExecutable": "/Users/lexemm/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++.lld"
+    }
+  },
+  "cFileExtensions": [],
+  "cppFileExtensions": [
+    "cc"
+  ]
+}

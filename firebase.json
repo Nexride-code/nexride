@@ -1,0 +1,91 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "nexride-8d5bc",
+          "appId": "1:684231437366:android:b0729b7486025abcec3c97",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "ios": {
+        "default": {
+          "projectId": "nexride-8d5bc",
+          "appId": "1:684231437366:ios:90c8c38db39a5e91ec3c97",
+          "uploadDebugSymbols": false,
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "nexride-8d5bc",
+          "configurations": {
+            "android": "1:684231437366:android:b0729b7486025abcec3c97",
+            "ios": "1:684231437366:ios:90c8c38db39a5e91ec3c97"
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "hosting": {
+    "public": "public",
+    "predeploy": [
+      "zsh tools/build_hosted_web.sh"
+    ],
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "redirects": [
+      {
+        "source": "/",
+        "destination": "/admin/login",
+        "type": 302
+      },
+      {
+        "source": "/track",
+        "destination": "/ride",
+        "type": 301
+      },
+      {
+        "source": "/track.html",
+        "destination": "/ride",
+        "type": 301
+      },
+      {
+        "source": "/ride/",
+        "destination": "/ride",
+        "type": 301
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "/admin",
+        "destination": "/admin/index.html"
+      },
+      {
+        "source": "/admin/**",
+        "destination": "/admin/index.html"
+      },
+      {
+        "source": "/support",
+        "destination": "/support/index.html"
+      },
+      {
+        "source": "/support/**",
+        "destination": "/support/index.html"
+      },
+      {
+        "source": "/ride",
+        "destination": "/track.html"
+      }
+    ]
+  },
+  "database": {
+    "rules": "database.rules.json"
+  }
+}

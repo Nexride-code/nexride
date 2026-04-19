@@ -1,0 +1,27 @@
+{
+  "buildFiles": [
+    "/Users/lexemm/nexride/third_party/agora_rtc_engine/android/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/Users/lexemm/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/Users/lexemm/nexride/third_party/agora_rtc_engine/android/.cxx/Debug/351l2g4p/x86",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/Users/lexemm/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/Users/lexemm/nexride/third_party/agora_rtc_engine/android/.cxx/Debug/351l2g4p/x86",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "iris_rendering_android::@6890427a1f51a3e7e1df": {
+      "artifactName": "iris_rendering_android",
+      "abi": "x86",
+      "output": "/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so",
+      "runtimeFiles": []
+    }
+  }
+}

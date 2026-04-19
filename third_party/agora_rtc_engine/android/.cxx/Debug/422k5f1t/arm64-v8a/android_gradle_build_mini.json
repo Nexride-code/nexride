@@ -1,0 +1,27 @@
+{
+  "buildFiles": [
+    "/Volumes/T7/Projects/nexride/third_party/agora_rtc_engine/android/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/Users/lexemm/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/Volumes/T7/Projects/nexride/third_party/agora_rtc_engine/android/.cxx/Debug/422k5f1t/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/Users/lexemm/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/Volumes/T7/Projects/nexride/third_party/agora_rtc_engine/android/.cxx/Debug/422k5f1t/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "iris_rendering_android::@6890427a1f51a3e7e1df": {
+      "artifactName": "iris_rendering_android",
+      "abi": "arm64-v8a",
+      "output": "/Volumes/T7/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/422k5f1t/obj/arm64-v8a/libiris_rendering_android.so",
+      "runtimeFiles": []
+    }
+  }
+}

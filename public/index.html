@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0f1723" />
+  <meta
+    name="description"
+    content="NexRide is a modern ride-hailing platform built for dependable city movement, live trip visibility, and rider and driver support."
+  />
+  <title>NexRide | Official Website</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap"
+    rel="stylesheet"
+  />
+  <style>
+    :root {
+      --brand-gold: #b8892d;
+      --brand-gold-strong: #d0a24f;
+      --brand-gold-soft: rgba(184, 137, 45, 0.14);
+      --brand-ink: #0f1723;
+      --brand-ink-2: #1f2a37;
+      --brand-muted: #687585;
+      --brand-line: rgba(15, 23, 35, 0.08);
+      --brand-surface: #ffffff;
+      --brand-surface-soft: #fbf7f0;
+      --brand-success: #1c8a57;
+      --brand-shadow: 0 24px 60px rgba(15, 23, 35, 0.14);
+      --brand-radius: 28px;
+      --page-width: 1180px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Manrope", sans-serif;
+      color: var(--brand-ink);
+      background:
+        radial-gradient(circle at top left, rgba(184, 137, 45, 0.15), transparent 30%),
+        radial-gradient(circle at top right, rgba(27, 138, 87, 0.08), transparent 26%),
+        linear-gradient(180deg, #fffdfa 0%, #f6efe6 42%, #fffdf8 100%);
+    }
+
+    img {
+      max-width: 100%;
+      display: block;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .shell {
+      width: min(100% - 32px, var(--page-width));
+      margin: 0 auto;
+    }
+
+    .site-header {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      backdrop-filter: blur(18px);
+      background: rgba(255, 250, 244, 0.84);
+      border-bottom: 1px solid rgba(15, 23, 35, 0.04);
+    }
+
+    .header-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      min-height: 76px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      font-family: "Space Grotesk", sans-serif;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-mark {
+      position: relative;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--brand-gold-strong), var(--brand-gold));
+      box-shadow: 0 0 0 7px rgba(184, 137, 45, 0.14);
+    }
+
+    .brand-copy {
+      display: grid;
+      gap: 2px;
+    }
+
+    .brand-title {
+      font-size: 1.05rem;
+    }
+
+    .brand-subtitle {
+      font-family: "Manrope", sans-serif;
+      font-size: 0.7rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--brand-muted);
+    }
+
+    .nav {
+      display: none;
+      align-items: center;
+      gap: 18px;
+      color: var(--brand-ink-2);
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .nav a {
+      position: relative;
+      padding: 8px 0;
+    }
+
+    .nav a::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--brand-gold), transparent);
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 180ms ease;
+    }
+
+    .nav a:hover::after,
+    .nav a:focus-visible::after {
+      transform: scaleX(1);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .menu-toggle {
+      width: 46px;
+      height: 46px;
+      border: 1px solid var(--brand-line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.74);
+      color: var(--brand-ink);
+      display: inline-grid;
+      place-items: center;
+      cursor: pointer;
+    }
+
+    .menu-toggle span,
+    .menu-toggle span::before,
+    .menu-toggle span::after {
+      width: 18px;
+      height: 2px;
+      border-radius: 999px;
+      background: currentColor;
+      display: block;
+      content: "";
+      transition: transform 180ms ease, opacity 180ms ease;
+    }
+
+    .menu-toggle span::before {
+      transform: translateY(-6px);
+    }
+
+    .menu-toggle span::after {
+      transform: translateY(4px);
+    }
+
+    .menu-toggle[aria-expanded="true"] span {
+      background: transparent;
+    }
+
+    .menu-toggle[aria-expanded="true"] span::before {
+      transform: translateY(0) rotate(45deg);
+    }
+
+    .menu-toggle[aria-expanded="true"] span::after {
+      transform: translateY(-2px) rotate(-45deg);
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      min-height: 52px;
+      padding: 0 20px;
+      border-radius: 16px;
+      border: 1px solid transparent;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease, background 180ms ease;
+    }
+
+    .button:hover,
+    .button:focus-visible {
+      transform: translateY(-1px);
+    }
+
+    .button-primary {
+      color: #fff;
+      background: linear-gradient(135deg, #111b2a, #233349);
+      box-shadow: 0 20px 34px rgba(17, 27, 42, 0.18);
+    }
+
+    .button-secondary {
+      color: var(--brand-ink);
+      background: rgba(255, 255, 255, 0.78);
+      border-color: rgba(15, 23, 35, 0.1);
+    }
+
+    .button-gold {
+      color: #fff;
+      background: linear-gradient(135deg, var(--brand-gold-strong), var(--brand-gold));
+      box-shadow: 0 20px 34px rgba(184, 137, 45, 0.22);
+    }
+
+    .mobile-menu {
+      display: grid;
+      gap: 12px;
+      padding: 0 0 18px;
+      overflow: hidden;
+      max-height: 0;
+      opacity: 0;
+      transition: max-height 220ms ease, opacity 220ms ease;
+    }
+
+    .mobile-menu.open {
+      max-height: 420px;
+      opacity: 1;
+    }
+
+    .mobile-menu a,
+    .mobile-menu .button {
+      width: 100%;
+    }
+
+    .hero {
+      padding: 42px 0 28px;
+    }
+
+    .hero-grid {
+      display: grid;
+      gap: 28px;
+      align-items: center;
+    }
+
+    .hero-copy {
+      position: relative;
+      z-index: 1;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid rgba(15, 23, 35, 0.08);
+      color: var(--brand-ink-2);
+      font-size: 0.8rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--brand-gold-strong), var(--brand-gold));
+      box-shadow: 0 0 0 6px rgba(184, 137, 45, 0.12);
+    }
+
+    .hero h1 {
+      margin: 0;
+      max-width: 12ch;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: clamp(2.8rem, 7vw, 5.5rem);
+      line-height: 0.95;
+      letter-spacing: -0.06em;
+    }
+
+    .hero h1 span {
+      color: var(--brand-gold);
+    }
+
+    .hero p {
+      margin: 22px 0 0;
+      max-width: 60ch;
+      font-size: 1.06rem;
+      line-height: 1.75;
+      color: var(--brand-muted);
+    }
+
+    .hero-actions,
+    .download-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .hero-stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .stat-card {
+      padding: 18px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.74);
+      border: 1px solid rgba(15, 23, 35, 0.06);
+      box-shadow: var(--brand-shadow);
+    }
+
+    .stat-value {
+      display: block;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 1.7rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+    }
+
+    .stat-label {
+      margin-top: 8px;
+      font-size: 0.9rem;
+      line-height: 1.55;
+      color: var(--brand-muted);
+    }
+
+    .hero-visual {
+      position: relative;
+      padding: 12px 0 18px;
+    }
+
+    .orb {
+      position: absolute;
+      border-radius: 999px;
+      filter: blur(12px);
+      pointer-events: none;
+    }
+
+    .orb.one {
+      top: 18px;
+      right: 0;
+      width: 140px;
+      height: 140px;
+      background: rgba(184, 137, 45, 0.22);
+    }
+
+    .orb.two {
+      left: 10px;
+      bottom: 22px;
+      width: 110px;
+      height: 110px;
+      background: rgba(27, 138, 87, 0.14);
+    }
+
+    .showcase {
+      position: relative;
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero-panel {
+      border-radius: 28px;
+      background: rgba(255, 255, 255, 0.86);
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      box-shadow: 0 30px 70px rgba(15, 23, 35, 0.16);
+      backdrop-filter: blur(18px);
+    }
+
+    .route-panel {
+      padding: 24px;
+      overflow: hidden;
+    }
+
+    .route-panel-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .route-chip {
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: var(--brand-gold-soft);
+      color: #8a6424;
+      font-size: 0.8rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .route-grid {
+      display: grid;
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .route-row {
+      display: grid;
+      grid-template-columns: 22px 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .route-dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 0.72rem;
+      font-weight: 800;
+    }
+
+    .route-dot.pickup {
+      background: #2f80ed;
+    }
+
+    .route-dot.stop {
+      background: var(--brand-gold);
+    }
+
+    .route-dot.destination {
+      background: #e14f47;
+    }
+
+    .route-row-label {
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--brand-muted);
+    }
+
+    .route-row-copy {
+      margin-top: 4px;
+      font-size: 0.96rem;
+      line-height: 1.6;
+      color: var(--brand-ink-2);
+    }
+
+    .route-graphic {
+      margin-top: 20px;
+      height: 180px;
+      border-radius: 22px;
+      background:
+        radial-gradient(circle at 12% 18%, rgba(47, 128, 237, 0.18), transparent 18%),
+        radial-gradient(circle at 87% 78%, rgba(225, 79, 71, 0.18), transparent 18%),
+        linear-gradient(180deg, rgba(15, 23, 35, 0.03), rgba(15, 23, 35, 0.08));
+      position: relative;
+      overflow: hidden;
+    }
+
+    .route-graphic::before {
+      content: "";
+      position: absolute;
+      inset: 34px 28px;
+      border-radius: 26px;
+      border: 2px dashed rgba(184, 137, 45, 0.45);
+    }
+
+    .route-graphic::after {
+      content: "";
+      position: absolute;
+      left: 20%;
+      top: 56%;
+      width: 60%;
+      height: 6px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #2f80ed, var(--brand-gold), #e14f47);
+      box-shadow: 0 14px 28px rgba(15, 23, 35, 0.1);
+      transform: rotate(-10deg);
+    }
+
+    .floating-card {
+      padding: 18px 20px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .floating-card strong {
+      font-size: 1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .floating-card p {
+      margin: 0;
+      color: var(--brand-muted);
+      line-height: 1.6;
+      font-size: 0.92rem;
+    }
+
+    .floating-card .mini-bar {
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(15, 23, 35, 0.08);
+      overflow: hidden;
+    }
+
+    .floating-card .mini-bar span {
+      display: block;
+      width: 68%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--brand-gold-strong), var(--brand-gold));
+    }
+
+    section {
+      padding: 32px 0;
+    }
+
+    .section-kicker {
+      margin: 0 0 12px;
+      font-size: 0.82rem;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--brand-gold);
+    }
+
+    .section-heading {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      letter-spacing: -0.05em;
+      line-height: 1;
+    }
+
+    .section-copy {
+      margin: 16px 0 0;
+      max-width: 64ch;
+      color: var(--brand-muted);
+      line-height: 1.8;
+      font-size: 1rem;
+    }
+
+    .split {
+      display: grid;
+      gap: 24px;
+      align-items: start;
+    }
+
+    .card-grid {
+      display: grid;
+      gap: 18px;
+      margin-top: 24px;
+    }
+
+    .feature-card,
+    .info-card,
+    .contact-card,
+    .download-card {
+      padding: 24px;
+      border-radius: var(--brand-radius);
+      background: rgba(255, 255, 255, 0.84);
+      border: 1px solid rgba(15, 23, 35, 0.07);
+      box-shadow: var(--brand-shadow);
+    }
+
+    .feature-icon {
+      width: 52px;
+      height: 52px;
+      border-radius: 18px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, rgba(184, 137, 45, 0.2), rgba(184, 137, 45, 0.08));
+      color: #8a6424;
+      font-size: 1.3rem;
+      font-weight: 900;
+    }
+
+    .feature-card h3,
+    .info-card h3,
+    .contact-card h3,
+    .download-card h3 {
+      margin: 16px 0 10px;
+      font-size: 1.18rem;
+      letter-spacing: -0.03em;
+    }
+
+    .feature-card p,
+    .info-card p,
+    .contact-card p,
+    .download-card p {
+      margin: 0;
+      color: var(--brand-muted);
+      line-height: 1.75;
+      font-size: 0.96rem;
+    }
+
+    .list {
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 12px;
+    }
+
+    .list li {
+      display: flex;
+      gap: 12px;
+      color: var(--brand-ink-2);
+      line-height: 1.65;
+    }
+
+    .list li::before {
+      content: "";
+      flex: 0 0 10px;
+      width: 10px;
+      height: 10px;
+      margin-top: 9px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--brand-gold-strong), var(--brand-gold));
+      box-shadow: 0 0 0 5px rgba(184, 137, 45, 0.12);
+    }
+
+    .accent-panel {
+      padding: 28px;
+      border-radius: 34px;
+      background: linear-gradient(135deg, #101924, #1d2b40);
+      color: #fff;
+      box-shadow: 0 30px 70px rgba(15, 23, 35, 0.2);
+    }
+
+    .accent-panel .section-kicker,
+    .accent-panel .section-copy,
+    .accent-panel .label {
+      color: rgba(255, 255, 255, 0.72);
+    }
+
+    .accent-panel .section-heading {
+      color: #fff;
+    }
+
+    .stack {
+      display: grid;
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    .stack-card {
+      padding: 18px 20px;
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .label {
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .stack-card strong {
+      display: block;
+      margin-top: 8px;
+      font-size: 1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .stack-card p {
+      margin: 6px 0 0;
+      line-height: 1.65;
+      color: rgba(255, 255, 255, 0.74);
+      font-size: 0.94rem;
+    }
+
+    .download-shell {
+      padding-bottom: 56px;
+    }
+
+    .download-card {
+      background:
+        radial-gradient(circle at top right, rgba(184, 137, 45, 0.18), transparent 26%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 243, 234, 0.96));
+    }
+
+    .download-note {
+      margin-top: 14px;
+      color: var(--brand-muted);
+      font-size: 0.9rem;
+    }
+
+    .contact-links {
+      display: grid;
+      gap: 12px;
+      margin-top: 22px;
+    }
+
+    .contact-link {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(15, 23, 35, 0.03);
+      border: 1px solid rgba(15, 23, 35, 0.06);
+      color: var(--brand-ink-2);
+      font-weight: 700;
+    }
+
+    .site-footer {
+      padding: 18px 0 42px;
+      color: var(--brand-muted);
+    }
+
+    .footer-inner {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding-top: 20px;
+      border-top: 1px solid rgba(15, 23, 35, 0.08);
+    }
+
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-weight: 700;
+    }
+
+    @media (min-width: 760px) {
+      .card-grid.features {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .card-grid.support-cards {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .footer-inner {
+        flex-direction: row;
+        justify-content: space-between;
+        align-items: center;
+      }
+    }
+
+    @media (min-width: 920px) {
+      .menu-toggle,
+      .mobile-menu {
+        display: none;
+      }
+
+      .nav {
+        display: flex;
+      }
+
+      .hero {
+        padding-top: 58px;
+      }
+
+      .hero-grid,
+      .split {
+        grid-template-columns: minmax(0, 1.08fr) minmax(360px, 0.92fr);
+      }
+
+      .card-grid.features {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .showcase {
+        transform: translateX(14px);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="shell header-inner">
+      <a class="brand" href="#top" aria-label="NexRide home">
+        <span class="brand-mark"></span>
+        <span class="brand-copy">
+          <span class="brand-title">NexRide</span>
+          <span class="brand-subtitle">Official Website</span>
+        </span>
+      </a>
+
+      <nav class="nav" aria-label="Primary">
+        <a href="#about">About</a>
+        <a href="#services">Services</a>
+        <a href="#rider">Rider App</a>
+        <a href="#driver">Driver App</a>
+        <a href="#safety">Safety</a>
+        <a href="#contact">Contact</a>
+      </nav>
+
+      <div class="header-actions">
+        <a class="button button-gold" href="#download">Get NexRide</a>
+        <button
+          id="menuToggle"
+          class="menu-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="mobileMenu"
+          aria-label="Toggle menu"
+        >
+          <span></span>
+        </button>
+      </div>
+    </div>
+
+    <div id="mobileMenu" class="shell mobile-menu" aria-label="Mobile navigation">
+      <a href="#about">About</a>
+      <a href="#services">Services</a>
+      <a href="#rider">Rider App</a>
+      <a href="#driver">Driver App</a>
+      <a href="#safety">Safety</a>
+      <a href="#contact">Contact</a>
+      <a class="button button-primary" href="#download">Get NexRide</a>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="shell hero-grid">
+        <div class="hero-copy">
+          <div class="eyebrow">Professional City Mobility</div>
+          <h1>Move your city with <span>NexRide</span>.</h1>
+          <p>
+            NexRide brings together dependable rider journeys, real-time trip visibility,
+            driver-first tools, and fast support in one polished ride-hailing experience.
+            Built for modern urban transport and ready for public deployment.
+          </p>
+
+          <div class="hero-actions">
+            <a class="button button-primary" href="#download">Download NexRide</a>
+            <a class="button button-secondary" href="#services">Explore Features</a>
+          </div>
+
+          <div class="hero-stats">
+            <article class="stat-card">
+              <span class="stat-value">Live</span>
+              <span class="stat-label">Real-time trip sharing and public tracking links.</span>
+            </article>
+            <article class="stat-card">
+              <span class="stat-value">Safer</span>
+              <span class="stat-label">Support flows, trip visibility, and rider-driver accountability.</span>
+            </article>
+            <article class="stat-card">
+              <span class="stat-value">Built</span>
+              <span class="stat-label">Responsive web presence ready to sit beside the apps and admin tools.</span>
+            </article>
+          </div>
+        </div>
+
+        <div class="hero-visual">
+          <div class="orb one"></div>
+          <div class="orb two"></div>
+          <div class="showcase">
+            <article class="hero-panel route-panel">
+              <div class="route-panel-top">
+                <div>
+                  <div class="section-kicker">Live Ride Experience</div>
+                  <h2 class="section-heading" style="font-size: 2rem;">Elegant from request to dropoff</h2>
+                </div>
+                <div class="route-chip">NexRide Tracking</div>
+              </div>
+
+              <div class="route-grid">
+                <div class="route-row">
+                  <div class="route-dot pickup">P</div>
+                  <div>
+                    <div class="route-row-label">Pickup</div>
+                    <div class="route-row-copy">12 Marina View, Lagos</div>
+                  </div>
+                </div>
+                <div class="route-row">
+                  <div class="route-dot stop">1</div>
+                  <div>
+                    <div class="route-row-label">Live Stop</div>
+                    <div class="route-row-copy">Driver approaching with location updates and status sync.</div>
+                  </div>
+                </div>
+                <div class="route-row">
+                  <div class="route-dot destination">D</div>
+                  <div>
+                    <div class="route-row-label">Destination</div>
+                    <div class="route-row-copy">Victoria Island business district</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="route-graphic"></div>
+            </article>
+
+            <article class="hero-panel floating-card">
+              <span class="label">Support-ready</span>
+              <strong>Trip sharing, statuses, and customer support stay in sync.</strong>
+              <p>
+                Riders, drivers, support staff, and admins each get the experience they need without
+                exposing internal systems to the public web.
+              </p>
+              <div class="mini-bar"><span></span></div>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="about">
+      <div class="shell split">
+        <div>
+          <p class="section-kicker">About NexRide</p>
+          <h2 class="section-heading">A modern ride-hailing platform with public trust built in.</h2>
+          <p class="section-copy">
+            NexRide is designed around the full transportation journey, from rider request and driver
+            assignment to trip sharing, issue reporting, and operational oversight. The public web presence
+            now matches that product maturity with a clean brand system and professional customer-facing experience.
+          </p>
+          <ul class="list">
+            <li>Clear rider booking flow with live trip status and visibility.</li>
+            <li>Driver tools built for active ride management, movement, and operational clarity.</li>
+            <li>Support and safety workflows that reinforce confidence across the trip lifecycle.</li>
+          </ul>
+        </div>
+
+        <div class="card-grid">
+          <article class="info-card">
+            <p class="section-kicker">Brand Promise</p>
+            <h3>Dependable movement, polished delivery.</h3>
+            <p>NexRide feels premium on the surface and practical underneath, with real-time transport data and clean operational structure.</p>
+          </article>
+          <article class="info-card">
+            <p class="section-kicker">Public Web</p>
+            <h3>Official landing experience at the root domain.</h3>
+            <p>The main site is responsive, mobile-first, and ready to represent the company publicly instead of exposing an internal test page.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="services">
+      <div class="shell">
+        <p class="section-kicker">Services and Features</p>
+        <h2 class="section-heading">Everything users expect from a serious mobility company.</h2>
+        <p class="section-copy">
+          The web presence reflects the same capabilities already growing inside the NexRide ecosystem.
+        </p>
+
+        <div class="card-grid features">
+          <article class="feature-card">
+            <div class="feature-icon">01</div>
+            <h3>Fast ride requests</h3>
+            <p>Simple rider journeys with clear request states, driver matching, and a polished handoff into active trip mode.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">02</div>
+            <h3>Live trip sharing</h3>
+            <p>Public token-based trip links make it easy to monitor a shared ride without exposing admin or private account data.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">03</div>
+            <h3>Driver operations</h3>
+            <p>Driver tools support ride acceptance, navigation updates, active-trip telemetry, and accountability signals.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">04</div>
+            <h3>Safety-first design</h3>
+            <p>Trip states, route logging, public share visibility, and support escalation work together as part of the product.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">05</div>
+            <h3>Support workflow</h3>
+            <p>Riders and drivers can report issues directly while support staff and admins manage the workflow behind the scenes.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">06</div>
+            <h3>Professional deployment</h3>
+            <p>The website and tracker are structured as customer-facing web assets ready to ship on Firebase Hosting.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="rider">
+      <div class="shell split">
+        <div class="accent-panel">
+          <p class="section-kicker">Rider App</p>
+          <h2 class="section-heading">Built for smooth booking and confident travel.</h2>
+          <p class="section-copy">
+            Riders get clear statuses, shared trip visibility, issue reporting, and better clarity from request through completion.
+          </p>
+          <div class="stack">
+            <article class="stack-card">
+              <span class="label">Booking clarity</span>
+              <strong>Pickup, destination, stops, and status all stay readable.</strong>
+              <p>The experience reduces friction while keeping riders informed in real time.</p>
+            </article>
+            <article class="stack-card">
+              <span class="label">Shareable safety</span>
+              <strong>Public trip links help trusted contacts follow the journey live.</strong>
+              <p>Token-based access keeps the public page focused on safe tracking data only.</p>
+            </article>
+          </div>
+        </div>
+
+        <div class="card-grid">
+          <article class="info-card">
+            <p class="section-kicker">What riders see</p>
+            <h3>Request status, driver movement, and support that actually connects.</h3>
+            <p>NexRide keeps the rider experience understandable at every step instead of hiding critical trip context.</p>
+          </article>
+          <article class="info-card">
+            <p class="section-kicker">Trip sharing</p>
+            <h3>Live public tracking without exposing internal data.</h3>
+            <p>The new tracker presents a refined map view, live location, trip state, and clean expired or not-found handling.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="driver">
+      <div class="shell split">
+        <div>
+          <p class="section-kicker">Driver App</p>
+          <h2 class="section-heading">Operational tools that help drivers stay focused on the road.</h2>
+          <p class="section-copy">
+            NexRide supports driver movement with live ride updates, telemetry, clearer trip states, and backend sync that keeps public ride sharing fresh.
+          </p>
+          <ul class="list">
+            <li>Ride acceptance, arrival, trip start, and completion states feed a cleaner live tracking story.</li>
+            <li>Checkpoint logging strengthens route continuity and share accuracy during active rides.</li>
+            <li>Driver-side updates now help keep public share pages fresh without weakening private-data access.</li>
+          </ul>
+        </div>
+
+        <div class="card-grid">
+          <article class="info-card">
+            <p class="section-kicker">Driver value</p>
+            <h3>Better sync between driver movement and what riders share publicly.</h3>
+            <p>That means fewer stale public pages and a more trustworthy customer-facing tracking experience.</p>
+          </article>
+          <article class="info-card">
+            <p class="section-kicker">Professional finish</p>
+            <h3>Consistent NexRide branding across rider, driver, admin, and web surfaces.</h3>
+            <p>The same gold and deep-ink palette now carries through the official site and shared trip pages.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="safety">
+      <div class="shell">
+        <p class="section-kicker">Safety and Support</p>
+        <h2 class="section-heading">Visibility, support, and accountability without exposing private systems.</h2>
+        <p class="section-copy">
+          Public pages show only the fields needed for safe trip sharing while admin, support, and account systems stay private.
+        </p>
+
+        <div class="card-grid support-cards">
+          <article class="feature-card">
+            <div class="feature-icon">S</div>
+            <h3>Secure live sharing</h3>
+            <p>Public pages resolve from share tokens and do not surface admin, support, or private account records.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">T</div>
+            <h3>Tracking that feels official</h3>
+            <p>Loading, reconnecting, completed, expired, and unavailable states are designed like a real customer product.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon">H</div>
+            <h3>Help when it matters</h3>
+            <p>Support and oversight workflows remain available to staff and admins without leaking those tools into public pages.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="contact">
+      <div class="shell split">
+        <div>
+          <p class="section-kicker">Contact</p>
+          <h2 class="section-heading">Talk to the NexRide team.</h2>
+          <p class="section-copy">
+            For launch coordination, partnerships, operations, or deployment handoff, the NexRide team can be reached through the operations desk.
+          </p>
+        </div>
+
+        <div class="contact-card">
+          <h3>Contact options</h3>
+          <p>Use the links below to route product, partnership, or onboarding requests.</p>
+          <div class="contact-links">
+            <a class="contact-link" href="mailto:admin@nexride.com?subject=NexRide%20General%20Inquiry">
+              <span>Operations Desk</span>
+              <span>admin@nexride.com</span>
+            </a>
+            <a class="contact-link" href="mailto:admin@nexride.com?subject=NexRide%20Driver%20Onboarding">
+              <span>Driver Onboarding</span>
+              <span>Apply to drive</span>
+            </a>
+            <a class="contact-link" href="mailto:admin@nexride.com?subject=NexRide%20Partnership%20Request">
+              <span>Partnerships</span>
+              <span>Business inquiries</span>
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="download" class="download-shell">
+      <div class="shell">
+        <article class="download-card">
+          <p class="section-kicker">Download and CTA</p>
+          <h2 class="section-heading">Launch-ready web presence. App store links next.</h2>
+          <p class="section-copy">
+            The site is now positioned to front the NexRide brand publicly. Rider and driver download buttons can be wired to final App Store and Play Store URLs during deployment.
+          </p>
+          <div class="download-actions">
+            <a class="button button-primary" href="mailto:admin@nexride.com?subject=NexRide%20Rider%20App%20Access">Get the Rider App</a>
+            <a class="button button-gold" href="mailto:admin@nexride.com?subject=Drive%20with%20NexRide">Drive with NexRide</a>
+          </div>
+          <p class="download-note">Final production launch still needs live store URLs and any approved public company copy updates.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-inner">
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <span class="brand-copy">
+          <span class="brand-title">NexRide</span>
+          <span class="brand-subtitle">Professional City Mobility</span>
+        </span>
+      </div>
+      <div class="footer-links">
+        <a href="#about">About</a>
+        <a href="#services">Services</a>
+        <a href="#safety">Safety</a>
+        <a href="#contact">Contact</a>
+      </div>
+      <div>Copyright <span id="year"></span> NexRide. All rights reserved.</div>
+    </div>
+  </footer>
+
+  <script>
+    const menuToggle = document.getElementById("menuToggle");
+    const mobileMenu = document.getElementById("mobileMenu");
+    const navLinks = mobileMenu.querySelectorAll("a");
+
+    if (menuToggle && mobileMenu) {
+      menuToggle.addEventListener("click", () => {
+        const isOpen = menuToggle.getAttribute("aria-expanded") === "true";
+        menuToggle.setAttribute("aria-expanded", String(!isOpen));
+        mobileMenu.classList.toggle("open", !isOpen);
+      });
+
+      navLinks.forEach((link) => {
+        link.addEventListener("click", () => {
+          menuToggle.setAttribute("aria-expanded", "false");
+          mobileMenu.classList.remove("open");
+        });
+      });
+    }
+
+    const yearNode = document.getElementById("year");
+    if (yearNode) {
+      yearNode.textContent = new Date().getFullYear();
+    }
+  </script>
+</body>
+</html>

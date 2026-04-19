@@ -1,0 +1,3 @@
+/Users/lexemm/.pub-cache/hosted/pub.dev/agora_rtc_engine-6.5.3/android/.cxx/Debug/622m5s3v/x86/CMakeFiles/iris_rendering_android.dir
+/Users/lexemm/.pub-cache/hosted/pub.dev/agora_rtc_engine-6.5.3/android/.cxx/Debug/622m5s3v/x86/CMakeFiles/edit_cache.dir
+/Users/lexemm/.pub-cache/hosted/pub.dev/agora_rtc_engine-6.5.3/android/.cxx/Debug/622m5s3v/x86/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,163 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function roleClaimMatches(roles) {
+      return signedIn() && (
+        request.auth.token.role in roles ||
+        request.auth.token.supportRole in roles
+      );
+    }
+
+    function isAdmin() {
+      return signedIn() && (
+        request.auth.token.admin == true ||
+        request.auth.token.super_admin == true ||
+        roleClaimMatches(['admin', 'super_admin'])
+      );
+    }
+
+    function isSupportClaim() {
+      return signedIn() && (
+        request.auth.token.support == true ||
+        request.auth.token.isSupport == true ||
+        roleClaimMatches([
+          'support',
+          'support_agent',
+          'support_manager',
+          'admin',
+          'super_admin',
+        ])
+      );
+    }
+
+    function isSupportDocument() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/support_staff/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/support_staff/$(request.auth.uid)).data.enabled != false &&
+        get(/databases/$(database)/documents/support_staff/$(request.auth.uid)).data.role in [
+          'support_agent',
+          'support_manager',
+          'admin',
+          'super_admin',
+        ];
+    }
+
+    function isSupport() {
+      return isAdmin() || isSupportClaim() || isSupportDocument();
+    }
+
+    function isTicketOwner() {
+      return signedIn() && resource.data.createdByUserId == request.auth.uid;
+    }
+
+    function ticketOwnerById(ticketId) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/support_tickets/$(ticketId)) &&
+        get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.createdByUserId == request.auth.uid;
+    }
+
+    function ticketRoleById(ticketId) {
+      return get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.createdByType;
+    }
+
+    function isValidUserTicketCreate() {
+      return signedIn() &&
+        request.resource.data.createdByUserId == request.auth.uid &&
+        request.resource.data.createdByType in ['rider', 'driver'] &&
+        request.resource.data.status == 'open' &&
+        request.resource.data.assignedToStaffId == '' &&
+        request.resource.data.assignedToStaffName == 'Unassigned' &&
+        request.resource.data.escalated == false &&
+        request.resource.data.resolution == '' &&
+        request.resource.data.replyCount == 1 &&
+        request.resource.data.internalNoteCount == 0 &&
+        request.resource.data.lastPublicSenderRole == request.resource.data.createdByType &&
+        request.resource.data.internalNotes.size() == 0 &&
+        request.resource.data.staffSeenAt.size() == 0;
+    }
+
+    function isValidUserTicketUpdate() {
+      return isTicketOwner() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'updatedAt',
+          'lastReplyAt',
+          'lastExternalReplyAt',
+          'requesterSeenAt',
+          'replyCount',
+          'lastPublicSenderRole',
+          'status',
+          'resolvedAt',
+          'closedAt',
+        ]) &&
+        request.resource.data.createdByUserId == resource.data.createdByUserId &&
+        request.resource.data.createdByType == resource.data.createdByType &&
+        request.resource.data.ticketId == resource.data.ticketId &&
+        request.resource.data.subject == resource.data.subject &&
+        request.resource.data.message == resource.data.message &&
+        request.resource.data.category == resource.data.category &&
+        request.resource.data.priority == resource.data.priority &&
+        request.resource.data.tripId == resource.data.tripId &&
+        request.resource.data.assignedToStaffId == resource.data.assignedToStaffId &&
+        request.resource.data.assignedToStaffName == resource.data.assignedToStaffName &&
+        request.resource.data.attachments == resource.data.attachments &&
+        request.resource.data.internalNotes == resource.data.internalNotes &&
+        request.resource.data.internalNoteCount == resource.data.internalNoteCount &&
+        request.resource.data.escalated == resource.data.escalated &&
+        request.resource.data.staffSeenAt == resource.data.staffSeenAt &&
+        request.resource.data.firstResponseAt == resource.data.firstResponseAt &&
+        request.resource.data.lastSupportReplyAt == resource.data.lastSupportReplyAt &&
+        request.resource.data.resolution == resource.data.resolution &&
+        request.resource.data.replyCount >= resource.data.replyCount &&
+        request.resource.data.lastPublicSenderRole in ['rider', 'driver'] &&
+        (
+          request.resource.data.status == resource.data.status ||
+          (
+            resource.data.status in ['pending_user', 'resolved', 'closed'] &&
+            request.resource.data.status == 'open'
+          )
+        );
+    }
+
+    function isValidUserMessageCreate(ticketId) {
+      return ticketOwnerById(ticketId) &&
+        request.resource.data.ticketDocumentId == ticketId &&
+        request.resource.data.senderId == request.auth.uid &&
+        request.resource.data.senderRole == ticketRoleById(ticketId) &&
+        request.resource.data.visibility == 'public';
+    }
+
+    match /support_staff/{staffUid} {
+      allow read: if isSupport();
+      allow create, update: if isAdmin() || (isSupport() && request.auth.uid == staffUid);
+      allow delete: if isAdmin();
+    }
+
+    match /support_tickets/{ticketId} {
+      allow read: if isAdmin() || isSupport() || isTicketOwner();
+      allow create: if isAdmin() || isSupport() || isValidUserTicketCreate();
+      allow update: if isAdmin() || isSupport() || isValidUserTicketUpdate();
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        allow read: if isAdmin() || isSupport() ||
+          (ticketOwnerById(ticketId) && resource.data.visibility != 'internal');
+        allow create: if isAdmin() || isSupport() || isValidUserMessageCreate(ticketId);
+        allow update, delete: if isAdmin() || isSupport();
+      }
+    }
+
+    match /support_logs/{logId} {
+      allow read, create: if isAdmin() || isSupport();
+      allow update, delete: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

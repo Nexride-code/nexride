@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/Users/lexemm/nexride/third_party/agora_rtc_engine/android/.cxx/Debug/351l2g4p/x86_64",
+  "command": "/Users/lexemm/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=x86_64-none-linux-android21 --sysroot=/Users/lexemm/Library/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Diris_rendering_android_EXPORTS -I/Users/lexemm/nexride/third_party/agora_rtc_engine/android/src/main/cpp/third_party/include/iris -I/Users/lexemm/nexride/third_party/agora_rtc_engine/android/src/main/cpp/third_party/include/agora_rtc -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -fno-limit-debug-info  -fPIC -o CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o -c /Users/lexemm/nexride/third_party/agora_rtc_engine/android/src/main/cpp/iris_rtc_rendering_android.cc",
+  "file": "/Users/lexemm/nexride/third_party/agora_rtc_engine/android/src/main/cpp/iris_rtc_rendering_android.cc"
+}
+]

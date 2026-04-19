@@ -1,0 +1,1966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0f1723" />
+  <meta
+    name="description"
+    content="Live public trip sharing for NexRide. Follow a trip in real time with a secure share token."
+  />
+  <title>NexRide | Live Trip Tracking</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap"
+    rel="stylesheet"
+  />
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDPk-B9EoqGsYkvxS5aiiTWl1S-cezWsos"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+  <style>
+    :root {
+      --gold: #b8892d;
+      --gold-strong: #d5a44a;
+      --gold-soft: rgba(184, 137, 45, 0.14);
+      --ink: #0f1723;
+      --ink-2: #1d2a39;
+      --muted: #6d7b8d;
+      --line: rgba(15, 23, 35, 0.08);
+      --surface: rgba(255, 255, 255, 0.94);
+      --surface-strong: #ffffff;
+      --pickup: #2f80ed;
+      --destination: #e14f47;
+      --success: #1c8a57;
+      --danger: #cb4436;
+      --shadow: 0 24px 60px rgba(15, 23, 35, 0.16);
+      --page-bg:
+        radial-gradient(circle at top left, rgba(184, 137, 45, 0.16), transparent 28%),
+        linear-gradient(180deg, #fffaf4 0%, #f6ecde 100%);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      font-family: "Manrope", sans-serif;
+      background: var(--page-bg);
+      color: var(--ink);
+    }
+
+    body {
+      overflow: hidden;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .page {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      background:
+        radial-gradient(circle at top left, rgba(184, 137, 45, 0.18), transparent 28%),
+        linear-gradient(180deg, #efe5d7 0%, #e6d8c6 100%);
+      transition: opacity 200ms ease;
+    }
+
+    #map.dimmed {
+      opacity: 0.2;
+    }
+
+    .map-wash {
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(180deg, rgba(255, 251, 244, 0.34) 0%, rgba(255, 251, 244, 0.02) 18%, rgba(255, 251, 244, 0) 100%),
+        radial-gradient(circle at top right, rgba(15, 23, 35, 0.06), transparent 28%);
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .topbar {
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      right: 18px;
+      z-index: 4;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      pointer-events: none;
+    }
+
+    .brand,
+    .signal,
+    .home-link {
+      pointer-events: auto;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border-radius: 999px;
+      background: rgba(17, 24, 39, 0.84);
+      color: #fff;
+      box-shadow: 0 16px 30px rgba(15, 23, 35, 0.18);
+      backdrop-filter: blur(14px);
+    }
+
+    .brand-mark {
+      width: 13px;
+      height: 13px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--gold-strong), var(--gold));
+      box-shadow: 0 0 0 5px rgba(213, 164, 74, 0.16);
+    }
+
+    .brand-copy {
+      display: grid;
+      gap: 2px;
+    }
+
+    .brand-title {
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 0.96rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-subtitle {
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .signal,
+    .home-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 0 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--ink);
+      border: 1px solid rgba(255, 255, 255, 0.88);
+      box-shadow: 0 14px 28px rgba(15, 23, 35, 0.1);
+      backdrop-filter: blur(14px);
+      font-size: 0.82rem;
+      font-weight: 800;
+      transition: opacity 180ms ease, transform 180ms ease;
+    }
+
+    .signal.hidden {
+      opacity: 0;
+      transform: translateY(-6px);
+      pointer-events: none;
+    }
+
+    .signal::before,
+    .home-link::before {
+      content: "";
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #f5a43c;
+      box-shadow: 0 0 0 5px rgba(245, 164, 60, 0.14);
+    }
+
+    .home-link::before {
+      background: var(--success);
+      box-shadow: 0 0 0 5px rgba(28, 138, 87, 0.12);
+    }
+
+    .panel-shell {
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      bottom: 16px;
+      z-index: 4;
+      display: grid;
+      justify-items: center;
+    }
+
+    .tracker-card,
+    .state-card {
+      width: min(100%, 500px);
+      border-radius: 28px;
+      background: var(--surface);
+      border: 1px solid rgba(255, 255, 255, 0.88);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      transition: opacity 220ms ease, transform 220ms ease;
+    }
+
+    .tracker-card.hidden,
+    .state-card.hidden {
+      opacity: 0;
+      transform: translateY(12px);
+      pointer-events: none;
+    }
+
+    .tracker-card {
+      padding: 18px 18px 20px;
+    }
+
+    .card-handle {
+      width: 48px;
+      height: 4px;
+      border-radius: 999px;
+      margin: 0 auto 14px;
+      background: rgba(109, 123, 141, 0.22);
+    }
+
+    .status-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .status-kicker {
+      margin: 0;
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--gold);
+    }
+
+    .status-title {
+      margin: 10px 0 0;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 2rem;
+      line-height: 0.98;
+      letter-spacing: -0.05em;
+    }
+
+    .status-meta {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.6;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 104px;
+      min-height: 40px;
+      padding: 0 12px;
+      border-radius: 999px;
+      background: rgba(184, 137, 45, 0.12);
+      color: #8a6424;
+      font-size: 0.78rem;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      text-align: center;
+    }
+
+    .status-pill.success {
+      background: rgba(28, 138, 87, 0.12);
+      color: var(--success);
+    }
+
+    .status-pill.danger {
+      background: rgba(203, 68, 54, 0.12);
+      color: var(--danger);
+    }
+
+    .metric-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .metric {
+      padding: 14px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid rgba(15, 23, 35, 0.05);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    }
+
+    .metric-label {
+      display: block;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .metric-value {
+      display: block;
+      margin-top: 8px;
+      font-size: 1rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      color: var(--ink-2);
+    }
+
+    .progress-card {
+      margin-top: 16px;
+      padding: 16px;
+      border-radius: 22px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(247, 241, 233, 0.96));
+      border: 1px solid var(--line);
+    }
+
+    .progress-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+    }
+
+    .progress-label {
+      font-size: 0.92rem;
+      color: var(--ink-2);
+    }
+
+    .progress-value {
+      color: #8a6424;
+      font-size: 0.94rem;
+    }
+
+    .progress-track {
+      height: 10px;
+      margin-top: 12px;
+      border-radius: 999px;
+      background: rgba(15, 23, 35, 0.07);
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      display: block;
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--gold-strong), var(--gold));
+      transition: width 260ms ease;
+    }
+
+    .progress-copy {
+      margin-top: 10px;
+      font-size: 0.9rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .section-divider {
+      height: 1px;
+      margin: 18px 0;
+      background: var(--line);
+    }
+
+    .driver-card {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      padding: 14px 16px;
+      border-radius: 22px;
+      background: rgba(15, 23, 35, 0.03);
+      border: 1px solid rgba(15, 23, 35, 0.05);
+    }
+
+    .driver-avatar-wrap {
+      width: 64px;
+      height: 64px;
+      flex: 0 0 64px;
+      padding: 2px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(184, 137, 45, 0.22));
+    }
+
+    .driver-avatar {
+      width: 100%;
+      height: 100%;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background: linear-gradient(135deg, var(--gold-strong), var(--gold));
+      color: #fff;
+      font-size: 1.25rem;
+      font-weight: 900;
+    }
+
+    .driver-avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .driver-main {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .driver-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .driver-name {
+      font-size: 1.08rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+    }
+
+    .driver-meta {
+      margin-top: 6px;
+      font-size: 0.9rem;
+      line-height: 1.55;
+      color: var(--muted);
+    }
+
+    .driver-rating {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(15, 23, 35, 0.04);
+      font-size: 0.82rem;
+      font-weight: 800;
+      color: var(--ink);
+    }
+
+    .driver-rating.hidden {
+      display: none;
+    }
+
+    .route-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .route-row {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .route-dot {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 0.72rem;
+      font-weight: 900;
+      box-shadow: 0 10px 20px rgba(15, 23, 35, 0.08);
+    }
+
+    .route-dot.pickup {
+      background: var(--pickup);
+    }
+
+    .route-dot.stop {
+      background: var(--gold);
+    }
+
+    .route-dot.destination {
+      background: var(--destination);
+    }
+
+    .route-label {
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .route-copy {
+      margin-top: 4px;
+      color: var(--ink-2);
+      line-height: 1.55;
+      font-size: 0.96rem;
+      word-break: break-word;
+    }
+
+    .state-card {
+      padding: 28px;
+      text-align: center;
+    }
+
+    .state-badge {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 16px;
+      border-radius: 20px;
+      display: grid;
+      place-items: center;
+      background: rgba(184, 137, 45, 0.12);
+      color: #8a6424;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 1.4rem;
+      font-weight: 700;
+    }
+
+    .state-title {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 2rem;
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
+
+    .state-copy {
+      margin: 14px auto 0;
+      max-width: 30ch;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1.75;
+    }
+
+    .state-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 22px;
+    }
+
+    .state-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 18px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #111b2a, #223248);
+      color: #fff;
+      font-size: 0.92rem;
+      font-weight: 800;
+      box-shadow: 0 18px 30px rgba(17, 27, 42, 0.18);
+    }
+
+    .state-button.secondary {
+      background: rgba(15, 23, 35, 0.05);
+      color: var(--ink);
+      box-shadow: none;
+      border: 1px solid rgba(15, 23, 35, 0.08);
+    }
+
+    .skeleton-circle,
+    .skeleton-line {
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(90deg, rgba(231, 235, 240, 0.78) 0%, rgba(244, 246, 248, 0.98) 50%, rgba(231, 235, 240, 0.78) 100%);
+      background-size: 220% 100%;
+      animation: shimmer 1.2s linear infinite;
+    }
+
+    .skeleton-circle {
+      width: 100%;
+      height: 100%;
+      border-radius: 999px;
+    }
+
+    .skeleton-line {
+      display: block;
+      height: 14px;
+      border-radius: 999px;
+    }
+
+    .skeleton-line.w-lg {
+      width: 160px;
+    }
+
+    .skeleton-line.w-md {
+      width: 112px;
+    }
+
+    .skeleton-line.w-sm {
+      width: 84px;
+      height: 18px;
+    }
+
+    @keyframes shimmer {
+      0% {
+        background-position: 100% 0;
+      }
+      100% {
+        background-position: -100% 0;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .topbar {
+        top: 14px;
+        left: 14px;
+        right: 14px;
+      }
+
+      .topbar-actions {
+        flex-direction: column;
+        align-items: flex-end;
+      }
+
+      .metric-strip {
+        grid-template-columns: 1fr;
+      }
+
+      .driver-top {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+
+    @media (min-width: 980px) {
+      .panel-shell {
+        left: auto;
+        right: 24px;
+        top: 96px;
+        bottom: 24px;
+        align-items: end;
+      }
+
+      .tracker-card,
+      .state-card {
+        width: 460px;
+        max-height: calc(100vh - 120px);
+        overflow: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div id="map" class="dimmed"></div>
+    <div class="map-wash"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <span class="brand-copy">
+          <span class="brand-title">NexRide</span>
+          <span class="brand-subtitle">Live Trip Tracking</span>
+        </span>
+      </div>
+
+      <div class="topbar-actions">
+        <div id="reconnectBadge" class="signal hidden">Reconnecting...</div>
+        <a class="home-link" href="/admin/login">Admin login</a>
+      </div>
+    </header>
+
+    <main class="panel-shell">
+      <section id="loadingState" class="state-card">
+        <div class="state-badge">NR</div>
+        <h1 class="state-title">Loading trip</h1>
+        <p class="state-copy">Connecting to live NexRide tracking updates.</p>
+      </section>
+
+      <section id="stateCard" class="state-card hidden">
+        <div id="stateBadge" class="state-badge">NR</div>
+        <h1 id="stateTitle" class="state-title">Trip not found</h1>
+        <p id="stateCopy" class="state-copy">This shared trip is unavailable or no longer active.</p>
+        <div class="state-actions">
+          <a class="state-button" href="/admin/login">Open admin login</a>
+          <a class="state-button secondary" href="javascript:window.location.reload();">Retry</a>
+        </div>
+      </section>
+
+      <section id="trackerCard" class="tracker-card hidden" aria-live="polite">
+        <div class="card-handle"></div>
+
+        <div class="status-head">
+          <div>
+            <p id="statusKicker" class="status-kicker">Secure share link</p>
+            <h1 id="statusTitle" class="status-title">Live trip</h1>
+            <div id="statusMeta" class="status-meta"></div>
+          </div>
+          <div id="statusPill" class="status-pill">Searching</div>
+        </div>
+
+        <div class="metric-strip">
+          <article class="metric">
+            <span class="metric-label">Current status</span>
+            <span id="metricPhase" class="metric-value">Searching</span>
+          </article>
+          <article class="metric">
+            <span class="metric-label">Trip progress</span>
+            <span id="metricProgress" class="metric-value">Waiting</span>
+          </article>
+          <article class="metric">
+            <span class="metric-label">Location update</span>
+            <span id="metricUpdated" class="metric-value">Connecting</span>
+          </article>
+        </div>
+
+        <div class="progress-card">
+          <div class="progress-head">
+            <span id="progressLabel" class="progress-label">Matching driver</span>
+            <span id="progressValue" class="progress-value">Searching</span>
+          </div>
+          <div class="progress-track">
+            <span id="progressBar" class="progress-bar"></span>
+          </div>
+          <div id="progressCopy" class="progress-copy">Waiting for the next trip update.</div>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <div id="driverCard" class="driver-card">
+          <div class="driver-avatar-wrap">
+            <div id="driverAvatar" class="driver-avatar"></div>
+          </div>
+          <div class="driver-main">
+            <div class="driver-top">
+              <div>
+                <div id="driverName" class="driver-name"></div>
+                <div id="driverMeta" class="driver-meta"></div>
+              </div>
+              <div id="driverRating" class="driver-rating hidden">
+                <span>Star</span>
+                <span id="driverRatingValue"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <div id="routeList" class="route-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyCy3eR2_3xjz25kWIdxyYcc514VMjhp5NQ",
+      authDomain: "nexride-8d5bc.firebaseapp.com",
+      databaseURL: "https://nexride-8d5bc-default-rtdb.firebaseio.com",
+      projectId: "nexride-8d5bc",
+      storageBucket: "nexride-8d5bc.firebasestorage.app",
+      messagingSenderId: "684231437366",
+      appId: "1:684231437366:web:6e1b737dee1c5457ec3c97",
+      measurementId: "G-5S1Y9JNRPG"
+    };
+
+    const CAR_SYMBOL_PATH =
+      "M -11 -4 L -7 -8 L 7 -8 L 11 -4 L 11 4 L 7 8 L -7 8 L -11 4 Z M -5 -6 L 5 -6 L 5 1 L -5 1 Z";
+    const DRIVER_ANIMATION_MS = 700;
+    const DRIVER_SNAP_DISTANCE_METERS = 180;
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const elements = {
+      map: document.getElementById("map"),
+      reconnectBadge: document.getElementById("reconnectBadge"),
+      loadingState: document.getElementById("loadingState"),
+      stateCard: document.getElementById("stateCard"),
+      stateBadge: document.getElementById("stateBadge"),
+      stateTitle: document.getElementById("stateTitle"),
+      stateCopy: document.getElementById("stateCopy"),
+      trackerCard: document.getElementById("trackerCard"),
+      statusKicker: document.getElementById("statusKicker"),
+      statusTitle: document.getElementById("statusTitle"),
+      statusMeta: document.getElementById("statusMeta"),
+      statusPill: document.getElementById("statusPill"),
+      metricPhase: document.getElementById("metricPhase"),
+      metricProgress: document.getElementById("metricProgress"),
+      metricUpdated: document.getElementById("metricUpdated"),
+      progressLabel: document.getElementById("progressLabel"),
+      progressValue: document.getElementById("progressValue"),
+      progressBar: document.getElementById("progressBar"),
+      progressCopy: document.getElementById("progressCopy"),
+      driverAvatar: document.getElementById("driverAvatar"),
+      driverName: document.getElementById("driverName"),
+      driverMeta: document.getElementById("driverMeta"),
+      driverRating: document.getElementById("driverRating"),
+      driverRatingValue: document.getElementById("driverRatingValue"),
+      routeList: document.getElementById("routeList")
+    };
+
+    const timeFormatter = new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit"
+    });
+
+    let map;
+    let sharedTripRef = null;
+    let connectionRef = null;
+    let sharedTripSnapshot = null;
+    let currentModel = null;
+    let currentToken = "";
+    let currentRideId = "";
+    let hasLoadedTrip = false;
+    let isConnected = true;
+
+    let routeBackdrop = null;
+    let routeTravelled = null;
+    let routeRemaining = null;
+    let pickupMarker = null;
+    let destinationMarker = null;
+    let stopMarkers = [];
+    let driverMarker = null;
+    let markerAnimationFrame = null;
+    let lastDriverBearing = 0;
+    let lastFitKey = "";
+
+    function asNumber(value) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+      }
+      if (typeof value === "string" && value.trim() !== "") {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+      return null;
+    }
+
+    function asInt(value) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return Math.trunc(value);
+      }
+      if (typeof value === "string" && value.trim() !== "") {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+      return null;
+    }
+
+    function asObject(value) {
+      return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    }
+
+    function firstNonEmpty(...values) {
+      for (const value of values) {
+        const text = value == null ? "" : String(value).trim();
+        if (text) {
+          return text;
+        }
+      }
+      return "";
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function isValidLocation(location) {
+      return Boolean(
+        location &&
+          typeof location.lat === "number" &&
+          Number.isFinite(location.lat) &&
+          typeof location.lng === "number" &&
+          Number.isFinite(location.lng)
+      );
+    }
+
+    function cloneLocation(location) {
+      return { lat: location.lat, lng: location.lng };
+    }
+
+    function locationKey(location) {
+      if (!isValidLocation(location)) {
+        return "";
+      }
+      return `${location.lat.toFixed(5)},${location.lng.toFixed(5)}`;
+    }
+
+    function formatCoordinateAddress(lat, lng) {
+      if (lat == null || lng == null) {
+        return "";
+      }
+      return `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    }
+
+    function locationFrom(rawLocation, fallbackAddress) {
+      const source = asObject(rawLocation);
+      const lat = asNumber(source && source.lat);
+      const lng = asNumber(source && source.lng);
+      const address = firstNonEmpty(source && source.address, fallbackAddress);
+      return {
+        lat,
+        lng,
+        address: address || formatCoordinateAddress(lat, lng)
+      };
+    }
+
+    function normalizeStops(rawStops) {
+      if (!Array.isArray(rawStops)) {
+        return [];
+      }
+      return rawStops
+        .map((rawStop, index) => {
+          const stop = asObject(rawStop);
+          if (!stop) {
+            return null;
+          }
+          const lat = asNumber(stop.lat);
+          const lng = asNumber(stop.lng);
+          if (lat == null || lng == null) {
+            return null;
+          }
+          return {
+            order: asInt(stop.order) || index + 1,
+            lat,
+            lng,
+            address: firstNonEmpty(stop.address) || formatCoordinateAddress(lat, lng)
+          };
+        })
+        .filter(Boolean)
+        .sort((first, second) => first.order - second.order);
+    }
+
+    function normalizePath(rawPath) {
+      if (!Array.isArray(rawPath)) {
+        return [];
+      }
+      return rawPath
+        .map((rawPoint) => {
+          const point = asObject(rawPoint);
+          if (!point) {
+            return null;
+          }
+          const lat = asNumber(point.lat);
+          const lng = asNumber(point.lng);
+          return lat == null || lng == null ? null : { lat, lng };
+        })
+        .filter(Boolean);
+    }
+
+    function distanceMeters(first, second) {
+      if (!isValidLocation(first) || !isValidLocation(second)) {
+        return 0;
+      }
+      const toRadians = (degrees) => degrees * Math.PI / 180;
+      const earthRadius = 6371000;
+      const deltaLat = toRadians(second.lat - first.lat);
+      const deltaLng = toRadians(second.lng - first.lng);
+      const startLat = toRadians(first.lat);
+      const endLat = toRadians(second.lat);
+      const a =
+        Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+        Math.cos(startLat) * Math.cos(endLat) *
+          Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
+      return 2 * earthRadius * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    function pathDistanceMeters(path) {
+      let total = 0;
+      for (let index = 1; index < path.length; index += 1) {
+        total += distanceMeters(path[index - 1], path[index]);
+      }
+      return total;
+    }
+
+    function normalizeAngle(angle) {
+      return ((angle % 360) + 360) % 360;
+    }
+
+    function shortestAngleDelta(from, to) {
+      return ((to - from + 540) % 360) - 180;
+    }
+
+    function interpolateAngle(from, to, progress) {
+      return normalizeAngle(from + shortestAngleDelta(from, to) * progress);
+    }
+
+    function easeInOut(progress) {
+      return progress < 0.5
+        ? 4 * progress * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+    }
+
+    function bearingBetween(start, end) {
+      if (!isValidLocation(start) || !isValidLocation(end)) {
+        return 0;
+      }
+      if (distanceMeters(start, end) < 1) {
+        return 0;
+      }
+      const startLat = start.lat * Math.PI / 180;
+      const endLat = end.lat * Math.PI / 180;
+      const deltaLng = (end.lng - start.lng) * Math.PI / 180;
+      const y = Math.sin(deltaLng) * Math.cos(endLat);
+      const x =
+        Math.cos(startLat) * Math.sin(endLat) -
+        Math.sin(startLat) * Math.cos(endLat) * Math.cos(deltaLng);
+      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    function normalizeStatus(status, tripState) {
+      const value = firstNonEmpty(status, tripState).toLowerCase();
+      if (!value) {
+        return "searching";
+      }
+      if (["driver_accepted", "accepted", "matched"].includes(value)) {
+        return "accepted";
+      }
+      if (["arriving", "driver_arriving"].includes(value)) {
+        return "arriving";
+      }
+      if (["arrived", "driver_arrived"].includes(value)) {
+        return "arrived";
+      }
+      if (["in_progress", "on_trip", "started", "trip_started"].includes(value)) {
+        return "in_progress";
+      }
+      if (["completed", "trip_completed"].includes(value)) {
+        return "completed";
+      }
+      if (["cancelled", "canceled", "expired", "rejected"].includes(value)) {
+        return "cancelled";
+      }
+      if (["searching", "pending", "waiting"].includes(value)) {
+        return "searching";
+      }
+      return value;
+    }
+
+    function phaseForStatus(status) {
+      switch (status) {
+        case "accepted":
+          return "accepted";
+        case "arriving":
+          return "arriving";
+        case "arrived":
+          return "arrived";
+        case "in_progress":
+          return "in_progress";
+        case "completed":
+          return "completed";
+        case "cancelled":
+          return "cancelled";
+        default:
+          return "searching";
+      }
+    }
+
+    function headlineForPhase(phase) {
+      switch (phase) {
+        case "accepted":
+          return "Driver accepted the trip";
+        case "arriving":
+          return "Driver is approaching pickup";
+        case "arrived":
+          return "Driver has arrived";
+        case "in_progress":
+          return "Trip is in progress";
+        case "completed":
+          return "Trip completed";
+        case "cancelled":
+          return "Trip unavailable";
+        default:
+          return "Searching for a driver";
+      }
+    }
+
+    function pillForPhase(phase) {
+      switch (phase) {
+        case "completed":
+          return { text: "Completed", className: "success" };
+        case "cancelled":
+          return { text: "Cancelled", className: "danger" };
+        case "accepted":
+          return { text: "Accepted", className: "" };
+        case "arriving":
+          return { text: "Arriving", className: "" };
+        case "arrived":
+          return { text: "Arrived", className: "" };
+        case "in_progress":
+          return { text: "In progress", className: "" };
+        default:
+          return { text: "Searching", className: "" };
+      }
+    }
+
+    function formatUpdatedAt(timestamp) {
+      if (!timestamp) {
+        return "Connecting";
+      }
+      return timeFormatter.format(new Date(timestamp));
+    }
+
+    function formatDistance(distanceInMeters) {
+      if (!distanceInMeters || distanceInMeters <= 0) {
+        return "";
+      }
+      if (distanceInMeters < 1000) {
+        return `${Math.round(distanceInMeters / 10) * 10} m`;
+      }
+      return `${(distanceInMeters / 1000).toFixed(distanceInMeters >= 10000 ? 0 : 1)} km`;
+    }
+
+    function etaMinutesFromDistance(distanceInMeters, speedKmh) {
+      if (!distanceInMeters || distanceInMeters <= 0) {
+        return null;
+      }
+      return Math.max(1, Math.round((distanceInMeters / 1000) / speedKmh * 60));
+    }
+
+    function avatarMarkup(driver) {
+      if (driver.photoUrl) {
+        return `<img src="${escapeHtml(driver.photoUrl)}" alt="Driver photo" />`;
+      }
+      const initials = firstNonEmpty(driver.name)
+        .split(/\s+/)
+        .slice(0, 2)
+        .map((part) => part.charAt(0).toUpperCase())
+        .join("")
+        .slice(0, 2);
+      return escapeHtml(initials || "NR");
+    }
+
+    function createCarIcon(rotation) {
+      return {
+        path: CAR_SYMBOL_PATH,
+        fillColor: "#0f1723",
+        fillOpacity: 1,
+        strokeColor: "#f8f3ea",
+        strokeWeight: 1.4,
+        scale: 1.38,
+        anchor: new google.maps.Point(0, 0),
+        rotation
+      };
+    }
+
+    function ensurePolylines() {
+      if (!routeBackdrop) {
+        routeBackdrop = new google.maps.Polyline({
+          map,
+          geodesic: true,
+          strokeColor: "#7c5b1e",
+          strokeOpacity: 0.2,
+          strokeWeight: 10,
+          zIndex: 1
+        });
+      }
+      if (!routeRemaining) {
+        routeRemaining = new google.maps.Polyline({
+          map,
+          geodesic: true,
+          strokeColor: "#B8892D",
+          strokeOpacity: 0.96,
+          strokeWeight: 7,
+          zIndex: 2
+        });
+      }
+      if (!routeTravelled) {
+        routeTravelled = new google.maps.Polyline({
+          map,
+          geodesic: true,
+          strokeColor: "#213246",
+          strokeOpacity: 0.92,
+          strokeWeight: 7,
+          zIndex: 3
+        });
+      }
+    }
+
+    function markerOptions(position, color, labelText) {
+      return {
+        position,
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          fillColor: color,
+          fillOpacity: 1,
+          strokeColor: "#ffffff",
+          strokeWeight: 3,
+          scale: 9
+        },
+        label: {
+          text: labelText,
+          color: "#ffffff",
+          fontWeight: "900",
+          fontSize: "12px"
+        },
+        zIndex: 4
+      };
+    }
+
+    function upsertMarker(existingMarker, options) {
+      if (!options.position) {
+        if (existingMarker) {
+          existingMarker.setMap(null);
+        }
+        return null;
+      }
+      if (!existingMarker) {
+        return new google.maps.Marker({
+          map,
+          ...options
+        });
+      }
+      existingMarker.setOptions(options);
+      return existingMarker;
+    }
+
+    function clearDriverMarker() {
+      if (markerAnimationFrame) {
+        cancelAnimationFrame(markerAnimationFrame);
+        markerAnimationFrame = null;
+      }
+      if (driverMarker) {
+        driverMarker.setMap(null);
+        driverMarker = null;
+      }
+    }
+
+    function clearMapDecorations() {
+      clearDriverMarker();
+      if (routeBackdrop) {
+        routeBackdrop.setPath([]);
+      }
+      if (routeTravelled) {
+        routeTravelled.setPath([]);
+      }
+      if (routeRemaining) {
+        routeRemaining.setPath([]);
+      }
+      if (pickupMarker) {
+        pickupMarker.setMap(null);
+        pickupMarker = null;
+      }
+      if (destinationMarker) {
+        destinationMarker.setMap(null);
+        destinationMarker = null;
+      }
+      stopMarkers.forEach((marker) => marker.setMap(null));
+      stopMarkers = [];
+      lastFitKey = "";
+    }
+
+    function buildFallbackPath(model) {
+      const path = [];
+      if (isValidLocation(model.pickup)) {
+        path.push(cloneLocation(model.pickup));
+      }
+      model.stops.filter(isValidLocation).forEach((stop) => path.push(cloneLocation(stop)));
+      if (isValidLocation(model.destination)) {
+        path.push(cloneLocation(model.destination));
+      }
+      return path;
+    }
+
+    function localPointMeters(origin, point) {
+      const earthRadius = 6371000;
+      const latFactor = Math.PI / 180;
+      const lngFactor = Math.PI / 180 * Math.cos(((origin.lat + point.lat) / 2) * Math.PI / 180);
+      return {
+        x: (point.lng - origin.lng) * lngFactor * earthRadius,
+        y: (point.lat - origin.lat) * latFactor * earthRadius
+      };
+    }
+
+    function projectLocationOnSegment(point, start, end) {
+      const segmentPoint = localPointMeters(start, end);
+      const pointVector = localPointMeters(start, point);
+      const segmentLengthSquared =
+        segmentPoint.x * segmentPoint.x + segmentPoint.y * segmentPoint.y;
+
+      if (segmentLengthSquared <= 0) {
+        return {
+          projectedPoint: cloneLocation(start),
+          alongMeters: 0,
+          distanceMeters: distanceMeters(point, start),
+          segmentMeters: 0
+        };
+      }
+
+      const rawT =
+        (pointVector.x * segmentPoint.x + pointVector.y * segmentPoint.y) /
+        segmentLengthSquared;
+      const t = Math.max(0, Math.min(1, rawT));
+      const projectedPoint = {
+        lat: start.lat + (end.lat - start.lat) * t,
+        lng: start.lng + (end.lng - start.lng) * t
+      };
+      const segmentMeters = distanceMeters(start, end);
+
+      return {
+        projectedPoint,
+        alongMeters: segmentMeters * t,
+        distanceMeters: distanceMeters(point, projectedPoint),
+        segmentMeters
+      };
+    }
+
+    function projectLocationOnPath(point, path) {
+      if (!isValidLocation(point) || !Array.isArray(path) || path.length < 2) {
+        return null;
+      }
+
+      let travelledBefore = 0;
+      let totalMeters = 0;
+      for (let index = 1; index < path.length; index += 1) {
+        totalMeters += distanceMeters(path[index - 1], path[index]);
+      }
+
+      let best = null;
+      for (let index = 1; index < path.length; index += 1) {
+        const start = path[index - 1];
+        const end = path[index];
+        const projection = projectLocationOnSegment(point, start, end);
+        const candidate = {
+          distanceMeters: projection.distanceMeters,
+          travelledMeters: travelledBefore + projection.alongMeters,
+          remainingMeters: Math.max(0, totalMeters - (travelledBefore + projection.alongMeters)),
+          projectedPoint: projection.projectedPoint,
+          segmentIndex: index - 1,
+          totalMeters
+        };
+        if (!best || candidate.distanceMeters < best.distanceMeters) {
+          best = candidate;
+        }
+        travelledBefore += projection.segmentMeters;
+      }
+
+      return best;
+    }
+
+    function splitPathAtProjection(path, projection) {
+      if (!projection || !Array.isArray(path) || path.length < 2) {
+        return { travelled: path, remaining: [] };
+      }
+
+      const travelled = path.slice(0, projection.segmentIndex + 1).map(cloneLocation);
+      const remaining = path.slice(projection.segmentIndex + 1).map(cloneLocation);
+      const projectedPoint = cloneLocation(projection.projectedPoint);
+
+      travelled.push(projectedPoint);
+      remaining.unshift(projectedPoint);
+
+      return { travelled, remaining };
+    }
+
+    function buildModel(sharedTrip) {
+      const share = asObject(sharedTrip);
+      if (!share) {
+        return null;
+      }
+
+      const route = asObject(share.route) || {};
+      const pickup = locationFrom(
+        asObject(share.pickup) || asObject(route.pickup),
+        firstNonEmpty(share.pickup && share.pickup.address, route.pickup && route.pickup.address)
+      );
+      const destination = locationFrom(
+        asObject(share.destination) || asObject(route.destination),
+        firstNonEmpty(
+          share.destination && share.destination.address,
+          route.destination && route.destination.address
+        )
+      );
+      const stops = normalizeStops(share.stops || route.stops);
+      const routePath = normalizePath(route.path);
+      const fallbackPath = buildFallbackPath({ pickup, stops, destination });
+      const driver = asObject(share.driver) || {};
+      const liveLocation = {
+        lat: asNumber(share.live_location && share.live_location.lat),
+        lng: asNumber(share.live_location && share.live_location.lng),
+        heading: asNumber(share.live_location && share.live_location.heading),
+        updatedAt:
+          asInt(share.live_location && share.live_location.updated_at) ||
+          asInt(share.updated_at) ||
+          Date.now()
+      };
+      const status = normalizeStatus(share.status, share.trip_state);
+      const phase = phaseForStatus(status);
+
+      return {
+        rideId: firstNonEmpty(share.ride_id),
+        status,
+        phase,
+        shareVersion: asInt(share.share_version) || 1,
+        pickup,
+        destination,
+        stops,
+        driver: {
+          id: firstNonEmpty(driver.id),
+          name: firstNonEmpty(driver.name),
+          car: firstNonEmpty(driver.car),
+          plate: firstNonEmpty(driver.plate),
+          rating: asNumber(driver.rating),
+          photoUrl: firstNonEmpty(driver.photo_url, driver.photoUrl)
+        },
+        liveLocation,
+        routePath: routePath.length > 1 ? routePath : fallbackPath,
+        routeDistanceKm: asNumber(route.distance_km),
+        updatedAt: asInt(share.updated_at) || liveLocation.updatedAt || Date.now(),
+        expiresAt: asInt(share.expires_at) || 0,
+        acceptedAt: asInt(share.accepted_at),
+        arrivingAt: asInt(share.arriving_at),
+        arrivedAt: asInt(share.arrived_at),
+        startedAt: asInt(share.started_at),
+        completedAt: asInt(share.completed_at),
+        cancelledAt: asInt(share.cancelled_at)
+      };
+    }
+
+    function approachDetails(model) {
+      if (!isValidLocation(model.liveLocation) || !isValidLocation(model.pickup)) {
+        return null;
+      }
+      const distance = distanceMeters(model.liveLocation, model.pickup);
+      const etaMinutes = etaMinutesFromDistance(distance, 24);
+      return {
+        distance,
+        etaMinutes,
+        percent: model.phase === "arrived" ? 100 : Math.max(12, Math.min(92, 100 - distance / 80))
+      };
+    }
+
+    function progressDetails(model) {
+      if (model.phase === "completed") {
+        const completedAt = model.completedAt || model.updatedAt;
+        return {
+          label: "Trip complete",
+          value: "100%",
+          percent: 100,
+          copy: `Completed at ${formatUpdatedAt(completedAt)}`
+        };
+      }
+
+      if (model.phase === "in_progress") {
+        const projection = projectLocationOnPath(model.liveLocation, model.routePath);
+        if (projection) {
+          const percent = Math.max(1, Math.min(99, Math.round((projection.travelledMeters / projection.totalMeters) * 100)));
+          const etaMinutes = etaMinutesFromDistance(projection.remainingMeters, 30);
+          const etaText = etaMinutes == null ? "Live trip update" : `Estimated ${etaMinutes} min to destination`;
+          return {
+            label: "Trip progress",
+            value: `${percent}%`,
+            percent,
+            copy: `${formatDistance(projection.remainingMeters)} remaining / ${etaText}`,
+            projection
+          };
+        }
+      }
+
+      if (["accepted", "arriving", "arrived"].includes(model.phase)) {
+        const approach = approachDetails(model);
+        if (approach) {
+          const etaText =
+            approach.etaMinutes == null
+              ? "Driver approaching pickup"
+              : `Driver about ${approach.etaMinutes} min away`;
+          return {
+            label: "Approaching pickup",
+            value: model.phase === "arrived" ? "Arrived" : formatDistance(approach.distance) || "Live",
+            percent: approach.percent,
+            copy: etaText
+          };
+        }
+        return {
+          label: "Approaching pickup",
+          value: "Live",
+          percent: model.phase === "arrived" ? 100 : 36,
+          copy: "Waiting for the next location update."
+        };
+      }
+
+      if (model.phase === "searching") {
+        return {
+          label: "Matching driver",
+          value: "Searching",
+          percent: 8,
+          copy: "NexRide is looking for an available driver."
+        };
+      }
+
+      return {
+        label: "Trip status",
+        value: "Unavailable",
+        percent: 0,
+        copy: "Tracking is not currently available."
+      };
+    }
+
+    function buildStatusMeta(model, progress) {
+      const rows = [];
+      if (model.rideId) {
+        rows.push(`Trip ${model.rideId.slice(-6).toUpperCase()}`);
+      }
+      if (progress && progress.copy) {
+        rows.push(progress.copy);
+      }
+      rows.push(`Updated ${formatUpdatedAt(model.updatedAt)}`);
+      return rows;
+    }
+
+    function routeRows(model) {
+      const rows = [];
+      if (firstNonEmpty(model.pickup.address)) {
+        rows.push({
+          type: "pickup",
+          badge: "P",
+          label: "Pickup",
+          copy: model.pickup.address
+        });
+      }
+      model.stops.forEach((stop) => {
+        rows.push({
+          type: "stop",
+          badge: String(stop.order),
+          label: `Stop ${stop.order}`,
+          copy: stop.address
+        });
+      });
+      if (firstNonEmpty(model.destination.address)) {
+        rows.push({
+          type: "destination",
+          badge: "D",
+          label: model.phase === "completed" ? "Dropoff complete" : "Destination",
+          copy: model.destination.address
+        });
+      }
+      return rows;
+    }
+
+    function renderDriver(model) {
+      const driver = model.driver;
+      const hasDriver = Boolean(firstNonEmpty(driver.id, driver.name, driver.car, driver.plate));
+
+      if (!hasDriver) {
+        elements.driverAvatar.innerHTML = '<span class="skeleton-circle"></span>';
+        elements.driverName.innerHTML = '<span class="skeleton-line w-lg"></span>';
+        elements.driverMeta.innerHTML = '<span class="skeleton-line w-md"></span>';
+        elements.driverRating.classList.add("hidden");
+        elements.driverRatingValue.textContent = "";
+        return;
+      }
+
+      elements.driverAvatar.innerHTML = avatarMarkup(driver);
+      elements.driverName.textContent = firstNonEmpty(driver.name, "Driver assigned");
+      elements.driverMeta.textContent = [driver.car, driver.plate].filter(Boolean).join(" / ");
+
+      if (driver.rating != null) {
+        elements.driverRating.classList.remove("hidden");
+        elements.driverRatingValue.textContent = driver.rating.toFixed(1);
+      } else {
+        elements.driverRating.classList.add("hidden");
+        elements.driverRatingValue.textContent = "";
+      }
+    }
+
+    function renderRouteList(model) {
+      elements.routeList.innerHTML = routeRows(model)
+        .map((row) => {
+          return `
+            <div class="route-row">
+              <div class="route-dot ${escapeHtml(row.type)}">${escapeHtml(row.badge)}</div>
+              <div>
+                <div class="route-label">${escapeHtml(row.label)}</div>
+                <div class="route-copy">${escapeHtml(row.copy)}</div>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+    }
+
+    function renderProgress(model, progress) {
+      elements.progressLabel.textContent = progress.label;
+      elements.progressValue.textContent = progress.value;
+      elements.progressCopy.textContent = progress.copy;
+      elements.progressBar.style.width = `${progress.percent}%`;
+      elements.metricProgress.textContent = progress.value;
+    }
+
+    function renderStatus(model, progress) {
+      const pill = pillForPhase(model.phase);
+      elements.statusKicker.textContent = model.shareVersion >= 2 ? "Secure live share" : "Live tracking";
+      elements.statusTitle.textContent = headlineForPhase(model.phase);
+      elements.statusMeta.textContent = buildStatusMeta(model, progress).join(" / ");
+      elements.statusPill.textContent = pill.text;
+      elements.statusPill.className = `status-pill ${pill.className}`.trim();
+      elements.metricPhase.textContent = pill.text;
+      elements.metricUpdated.textContent = formatUpdatedAt(model.updatedAt);
+    }
+
+    function renderStaticMarkers(model) {
+      pickupMarker = upsertMarker(
+        pickupMarker,
+        markerOptions(
+          isValidLocation(model.pickup) ? cloneLocation(model.pickup) : null,
+          "#2f80ed",
+          "P"
+        )
+      );
+      destinationMarker = upsertMarker(
+        destinationMarker,
+        markerOptions(
+          isValidLocation(model.destination) ? cloneLocation(model.destination) : null,
+          "#e14f47",
+          "D"
+        )
+      );
+
+      stopMarkers.forEach((marker) => marker.setMap(null));
+      stopMarkers = model.stops
+        .filter(isValidLocation)
+        .map((stop) => {
+          return new google.maps.Marker({
+            map,
+            ...markerOptions(cloneLocation(stop), "#B8892D", String(stop.order))
+          });
+        });
+    }
+
+    function animateDriverMarker(model) {
+      if (!isValidLocation(model.liveLocation)) {
+        clearDriverMarker();
+        return;
+      }
+
+      const position = cloneLocation(model.liveLocation);
+      const targetBearing =
+        asNumber(model.liveLocation.heading) != null
+          ? normalizeAngle(asNumber(model.liveLocation.heading))
+          : currentModel && isValidLocation(currentModel.liveLocation)
+            ? normalizeAngle(bearingBetween(currentModel.liveLocation, model.liveLocation) || lastDriverBearing)
+            : lastDriverBearing;
+
+      if (!driverMarker) {
+        lastDriverBearing = targetBearing;
+        driverMarker = new google.maps.Marker({
+          map,
+          position,
+          zIndex: 6,
+          icon: createCarIcon(targetBearing)
+        });
+        return;
+      }
+
+      const startPosition = driverMarker.getPosition();
+      if (!startPosition) {
+        lastDriverBearing = targetBearing;
+        driverMarker.setPosition(position);
+        driverMarker.setIcon(createCarIcon(targetBearing));
+        return;
+      }
+
+      const origin = { lat: startPosition.lat(), lng: startPosition.lng() };
+      const jumpDistance = distanceMeters(origin, position);
+
+      if (jumpDistance >= DRIVER_SNAP_DISTANCE_METERS) {
+        if (markerAnimationFrame) {
+          cancelAnimationFrame(markerAnimationFrame);
+          markerAnimationFrame = null;
+        }
+        lastDriverBearing = targetBearing;
+        driverMarker.setPosition(position);
+        driverMarker.setIcon(createCarIcon(targetBearing));
+        return;
+      }
+
+      if (markerAnimationFrame) {
+        cancelAnimationFrame(markerAnimationFrame);
+      }
+
+      const startedAt = performance.now();
+      const fromBearing = lastDriverBearing;
+
+      const animate = (frameTime) => {
+        const rawProgress = Math.min((frameTime - startedAt) / DRIVER_ANIMATION_MS, 1);
+        const progress = easeInOut(rawProgress);
+        const lat = origin.lat + (position.lat - origin.lat) * progress;
+        const lng = origin.lng + (position.lng - origin.lng) * progress;
+        const bearing = interpolateAngle(fromBearing, targetBearing, progress);
+
+        driverMarker.setPosition({ lat, lng });
+        driverMarker.setIcon(createCarIcon(bearing));
+
+        if (rawProgress < 1) {
+          markerAnimationFrame = requestAnimationFrame(animate);
+        } else {
+          lastDriverBearing = targetBearing;
+          markerAnimationFrame = null;
+        }
+      };
+
+      markerAnimationFrame = requestAnimationFrame(animate);
+    }
+
+    function renderRoutePolylines(model, progress) {
+      ensurePolylines();
+
+      const path = model.routePath.length > 1 ? model.routePath.map(cloneLocation) : [];
+      if (["accepted", "arriving", "arrived"].includes(model.phase) && isValidLocation(model.liveLocation) && isValidLocation(model.pickup)) {
+        const approachPath = [cloneLocation(model.liveLocation), cloneLocation(model.pickup)];
+        routeBackdrop.setPath(approachPath);
+        routeTravelled.setPath([]);
+        routeRemaining.setPath(approachPath);
+        return;
+      }
+
+      if (path.length < 2) {
+        routeBackdrop.setPath([]);
+        routeTravelled.setPath([]);
+        routeRemaining.setPath([]);
+        return;
+      }
+
+      routeBackdrop.setPath(path);
+
+      if (model.phase === "completed") {
+        routeTravelled.setPath(path);
+        routeRemaining.setPath([]);
+        return;
+      }
+
+      if (model.phase === "in_progress" && progress && progress.projection) {
+        const split = splitPathAtProjection(path, progress.projection);
+        routeTravelled.setPath(split.travelled);
+        routeRemaining.setPath(split.remaining);
+        return;
+      }
+
+      routeTravelled.setPath([]);
+      routeRemaining.setPath(path);
+    }
+
+    function fitMap(model) {
+      const fitKey = [
+        model.phase,
+        locationKey(model.pickup),
+        locationKey(model.destination),
+        model.stops.map((stop) => `${stop.order}:${locationKey(stop)}`).join("|")
+      ].join("||");
+
+      if (fitKey === lastFitKey) {
+        return;
+      }
+
+      lastFitKey = fitKey;
+      const bounds = new google.maps.LatLngBounds();
+      let hasPoint = false;
+
+      const extend = (point) => {
+        if (!isValidLocation(point)) {
+          return;
+        }
+        bounds.extend(point);
+        hasPoint = true;
+      };
+
+      extend(model.pickup);
+      extend(model.destination);
+      model.stops.forEach(extend);
+      extend(model.liveLocation);
+      model.routePath.forEach(extend);
+
+      if (!hasPoint) {
+        return;
+      }
+
+      map.fitBounds(bounds, 90);
+    }
+
+    function showTracker(model) {
+      hideState();
+      elements.loadingState.classList.add("hidden");
+      elements.trackerCard.classList.remove("hidden");
+      elements.map.classList.remove("dimmed");
+
+      const progress = progressDetails(model);
+      renderStatus(model, progress);
+      renderProgress(model, progress);
+      renderDriver(model);
+      renderRouteList(model);
+      renderStaticMarkers(model);
+      renderRoutePolylines(model, progress);
+      animateDriverMarker(model);
+      fitMap(model);
+      currentModel = model;
+    }
+
+    function hideState() {
+      elements.stateCard.classList.add("hidden");
+    }
+
+    function showState(title, copy, badgeText) {
+      clearMapDecorations();
+      elements.loadingState.classList.add("hidden");
+      elements.trackerCard.classList.add("hidden");
+      elements.stateTitle.textContent = title;
+      elements.stateCopy.textContent = copy;
+      elements.stateBadge.textContent = badgeText || "NR";
+      elements.stateCard.classList.remove("hidden");
+      elements.map.classList.add("dimmed");
+    }
+
+    function handleSharedTripSnapshot(snapshot) {
+      sharedTripSnapshot = snapshot.exists() ? asObject(snapshot.val()) : null;
+
+      if (!sharedTripSnapshot) {
+        if (hasLoadedTrip) {
+          showState("Share link expired", "This NexRide share link is no longer active.", "EX");
+        } else {
+          showState("Trip not found", "This shared trip could not be found or is no longer available.", "NF");
+        }
+        return;
+      }
+
+      const model = buildModel(sharedTripSnapshot);
+      if (!model || !model.rideId) {
+        showState("Trip unavailable", "The trip data is incomplete for public tracking.", "NR");
+        return;
+      }
+
+      hasLoadedTrip = true;
+
+      if (model.expiresAt && model.expiresAt <= Date.now()) {
+        showState("Share link expired", "This NexRide share link has expired.", "EX");
+        return;
+      }
+
+      if (model.phase === "cancelled") {
+        showState("Trip cancelled", "This trip is no longer active for public tracking.", "CN");
+        return;
+      }
+
+      showTracker(model);
+    }
+
+    function detachSharedTripListener() {
+      if (sharedTripRef) {
+        sharedTripRef.off();
+        sharedTripRef = null;
+      }
+    }
+
+    function attachSharedTripListener(token) {
+      detachSharedTripListener();
+      sharedTripRef = db.ref(`shared_trips/${token}`);
+      sharedTripRef.on("value", handleSharedTripSnapshot);
+    }
+
+    async function resolveTokenForRide(rideId) {
+      if (!rideId) {
+        return "";
+      }
+
+      try {
+        const snapshot = await db.ref(`shared_trip_lookup/${rideId}`).once("value");
+        if (!snapshot.exists()) {
+          return "";
+        }
+
+        const lookup = asObject(snapshot.val());
+        if (!lookup) {
+          return "";
+        }
+
+        const expiresAt = asInt(lookup.expires_at) || asInt(lookup.expiresAt) || 0;
+        if (expiresAt && expiresAt <= Date.now()) {
+          return "";
+        }
+
+        return firstNonEmpty(lookup.token);
+      } catch (error) {
+        console.error("[NexRide tracking] share lookup failed", error);
+        return "";
+      }
+    }
+
+    function attachConnectionListener() {
+      if (connectionRef) {
+        connectionRef.off();
+      }
+      connectionRef = db.ref(".info/connected");
+      connectionRef.on("value", (snapshot) => {
+        isConnected = snapshot.val() === true;
+        elements.reconnectBadge.classList.toggle("hidden", isConnected || !hasLoadedTrip);
+      });
+    }
+
+    function initMap() {
+      map = new google.maps.Map(elements.map, {
+        center: { lat: 6.5244, lng: 3.3792 },
+        zoom: 13,
+        disableDefaultUI: true,
+        zoomControl: true,
+        gestureHandling: "greedy",
+        styles: [
+          { featureType: "poi", stylers: [{ visibility: "off" }] },
+          { featureType: "transit", stylers: [{ visibility: "off" }] },
+          { elementType: "geometry", stylers: [{ color: "#efe7da" }] },
+          { elementType: "labels.text.fill", stylers: [{ color: "#5f6b76" }] },
+          { elementType: "labels.text.stroke", stylers: [{ color: "#fbf6ef" }] },
+          { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] }
+        ]
+      });
+    }
+
+    async function init() {
+      initMap();
+      attachConnectionListener();
+
+      const params = new URLSearchParams(window.location.search);
+      currentRideId = firstNonEmpty(params.get("rideId"));
+      currentToken = firstNonEmpty(params.get("token"));
+
+      if (!currentToken && currentRideId) {
+        currentToken = await resolveTokenForRide(currentRideId);
+      }
+
+      if (!currentToken) {
+        elements.loadingState.classList.add("hidden");
+        showState(
+          "Tracking unavailable",
+          currentRideId
+            ? "This ride does not have an active public tracking session right now."
+            : "Open a valid NexRide tracking link with a ride ID to view live trip progress.",
+          "NF"
+        );
+        return;
+      }
+
+      attachSharedTripListener(currentToken);
+    }
+
+    window.addEventListener("load", init);
+  </script>
+</body>
+</html>

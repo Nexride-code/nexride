@@ -1,0 +1,13 @@
+# ninja log v5
+0	458	1775922247716109072	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	57accedb7f63d0b0
+460	528	1775922247789073376	/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so	98400d8b24bdfc09
+4	67	1776021847965595490	/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so	98400d8b24bdfc09
+0	9	0	clean	8590d1a692ac5311
+0	13	0	clean	8590d1a692ac5311
+4	1167	1776025651651069434	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	57accedb7f63d0b0
+1167	1330	1776025651816381026	/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so	98400d8b24bdfc09
+4	79	1776050375667303130	/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so	98400d8b24bdfc09
+4	63	1776226146193299709	/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so	98400d8b24bdfc09
+6	200	1776351937850960001	/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so	98400d8b24bdfc09
+7	288	1776356411177595156	/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so	98400d8b24bdfc09
+3	59	1776378711163405741	/Users/lexemm/nexride/nexride_driver/build/agora_rtc_engine/intermediates/cxx/Debug/351l2g4p/obj/x86/libiris_rendering_android.so	98400d8b24bdfc09

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="/admin/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="nexride_driver">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>nexride_driver</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      background: #f6f3ee;
+      color: #131313;
+    }
+
+    #nexride-boot-status {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: linear-gradient(135deg, #131313 0%, #2a241a 55%, #5c4320 100%);
+    }
+
+    .nexride-boot-card {
+      width: min(760px, 100%);
+      background: #ffffff;
+      border-radius: 28px;
+      padding: 28px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.18);
+    }
+
+    .nexride-boot-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 52px;
+      height: 52px;
+      border-radius: 18px;
+      background: #f3e1b9;
+      color: #b57a2a;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .nexride-boot-title {
+      margin: 18px 0 10px;
+      font-size: 30px;
+      font-weight: 800;
+      line-height: 1.1;
+    }
+
+    .nexride-boot-copy {
+      margin: 0;
+      color: #6f675d;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .nexride-boot-panel {
+      margin-top: 18px;
+      padding: 16px;
+      border-radius: 18px;
+      background: #f8f5ef;
+      border: 1px solid #e8dfd0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div id="nexride-boot-status" role="status" aria-live="polite">
+    <div class="nexride-boot-card">
+      <div class="nexride-boot-pill">NR</div>
+      <h1 class="nexride-boot-title">Loading NexRide</h1>
+      <p class="nexride-boot-copy">
+        Preparing the app shell and restoring startup services.
+      </p>
+      <div class="nexride-boot-panel" id="nexride-boot-details">
+        Waiting for Flutter bootstrap...
+      </div>
+    </div>
+  </div>
+  <!--
+    You can customize the "flutter_bootstrap.js" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script>
+    (function () {
+      const bootStatus = document.getElementById('nexride-boot-status');
+      const bootDetails = document.getElementById('nexride-boot-details');
+      const adminPaths = new Set([
+        '/admin',
+        '/admin/login',
+        '/admin/dashboard',
+        '/admin/riders',
+        '/admin/drivers',
+        '/admin/trips',
+        '/admin/finance',
+        '/admin/withdrawals',
+        '/admin/pricing',
+        '/admin/subscriptions',
+        '/admin/verification',
+        '/admin/support',
+        '/admin/settings',
+      ]);
+      const supportPaths = new Set([
+        '/support',
+        '/support/login',
+        '/support/dashboard',
+        '/support/open',
+        '/support/assigned',
+        '/support/pending-user',
+        '/support/escalated',
+        '/support/resolved',
+      ]);
+      const normalizedPath = (window.location.pathname || '/').replace(/\/+$/, '') || '/';
+      const isSupportPath =
+        normalizedPath === '/support' ||
+        normalizedPath.startsWith('/support/') ||
+        supportPaths.has(normalizedPath);
+      const isAdminPath =
+        !isSupportPath &&
+        (
+          normalizedPath.startsWith('/admin/') ||
+          adminPaths.has(normalizedPath)
+        );
+      const portalLabel = isSupportPath ? 'support' : (isAdminPath ? 'admin' : 'app');
+      let bootTimer = null;
+
+      function renderStatus(title, message) {
+        if (!bootStatus || !bootDetails) {
+          return;
+        }
+        const titleNode = bootStatus.querySelector('.nexride-boot-title');
+        const copyNode = bootStatus.querySelector('.nexride-boot-copy');
+        if (titleNode) {
+          titleNode.textContent = title;
+        }
+        if (copyNode) {
+          copyNode.textContent = isSupportPath
+            ? 'The support route hit a browser-side boot issue before Flutter could render.'
+            : (isAdminPath
+              ? 'The admin route hit a browser-side boot issue before Flutter could render.'
+              : 'The app hit a browser-side boot issue before Flutter could render.');
+        }
+        bootDetails.textContent = message;
+      }
+
+      const startupSummary = [
+        `pathname: ${window.location.pathname || '/'}`,
+        `search: ${window.location.search || '(none)'}`,
+        `hash: ${window.location.hash || '(none)'}`,
+        `baseURI: ${document.baseURI || '(unknown)'}`,
+      ].join('\n');
+
+      console.log('[NexRide web bootstrap] ' + startupSummary.replace(/\n/g, ' | '));
+      if (bootDetails) {
+        bootDetails.textContent = startupSummary;
+      }
+      if (portalLabel === 'admin') {
+        renderStatus('Loading NexRide admin', startupSummary);
+      } else if (portalLabel === 'support') {
+        renderStatus('Loading NexRide support', startupSummary);
+      }
+
+      bootTimer = window.setTimeout(function () {
+        renderStatus(
+          isSupportPath
+            ? 'Support startup is taking longer than expected'
+            : (isAdminPath
+              ? 'Admin startup is taking longer than expected'
+              : 'App startup is taking longer than expected'),
+          startupSummary + '\n\nFlutter has not rendered the first frame yet. If this persists, refresh the page or review the browser console.'
+        );
+      }, 12000);
+
+      window.addEventListener('flutter-first-frame', function () {
+        if (bootTimer !== null) {
+          window.clearTimeout(bootTimer);
+        }
+        if (bootStatus) {
+          bootStatus.remove();
+        }
+      });
+
+      window.addEventListener('error', function (event) {
+        const message = [
+          event.message || 'Unknown browser error',
+          event.filename ? `file: ${event.filename}` : '',
+          typeof event.lineno === 'number' ? `line: ${event.lineno}` : '',
+          event.error && event.error.stack ? event.error.stack : '',
+        ].filter(Boolean).join('\n');
+        console.error('[NexRide web bootstrap] window.error', event.error || event.message);
+        renderStatus(
+          isSupportPath
+            ? 'Support screen failed to load'
+            : (isAdminPath ? 'Admin screen failed to load' : 'NexRide failed to load'),
+          message,
+        );
+      });
+
+      window.addEventListener('unhandledrejection', function (event) {
+        const reason = event.reason;
+        const message = typeof reason === 'object' && reason
+          ? (reason.stack || reason.message || JSON.stringify(reason))
+          : String(reason);
+        console.error('[NexRide web bootstrap] unhandledrejection', reason);
+        renderStatus(
+          isSupportPath
+            ? 'Support screen failed to load'
+            : (isAdminPath ? 'Admin screen failed to load' : 'NexRide failed to load'),
+          message,
+        );
+      });
+    })();
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

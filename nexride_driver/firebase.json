@@ -1,0 +1,47 @@
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "nexride-8d5bc",
+          "appId": "1:684231437366:android:ce00fc6559282fbaec3c97",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "ios": {
+        "default": {
+          "projectId": "nexride-8d5bc",
+          "appId": "1:684231437366:ios:35109b0addb01811ec3c97",
+          "uploadDebugSymbols": false,
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "nexride-8d5bc",
+          "configurations": {
+            "android": "1:684231437366:android:ce00fc6559282fbaec3c97"
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "rules": "../firestore.rules"
+  },
+  "hosting": {
+    "target": "admin",
+    "public": "build/admin_web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}

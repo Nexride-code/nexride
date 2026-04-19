@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "684231437366",
+    "project_id": "nexride-8d5bc",
+    "storage_bucket": "nexride-8d5bc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:684231437366:android:b0729b7486025abcec3c97",
+        "android_client_info": {
+          "package_name": "com.nexride.rider"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBPKbsKmUCfq0ylIAuekiVko_Gu6wWQse4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:684231437366:android:ce00fc6559282fbaec3c97",
+        "android_client_info": {
+          "package_name": "com.nexride.driver"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBPKbsKmUCfq0ylIAuekiVko_Gu6wWQse4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

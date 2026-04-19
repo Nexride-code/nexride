@@ -1,0 +1,13 @@
+# ninja log v5
+0	482	1775938564327719310	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	57accedb7f63d0b0
+485	554	1775938564402619633	/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86/libiris_rendering_android.so	862de616ac249317
+0	5	0	clean	8590d1a692ac5311
+0	5	0	clean	8590d1a692ac5311
+2	508	1776025654831591509	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	57accedb7f63d0b0
+509	581	1776025654905470971	/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86/libiris_rendering_android.so	862de616ac249317
+2	62	1776027244312213217	/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86/libiris_rendering_android.so	862de616ac249317
+4	73	1776126433612790732	/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86/libiris_rendering_android.so	862de616ac249317
+2	60	1776226189864717756	/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86/libiris_rendering_android.so	862de616ac249317
+6	160	1776356392637200540	/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86/libiris_rendering_android.so	862de616ac249317
+7	243	1776357638077862190	/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86/libiris_rendering_android.so	862de616ac249317
+20	173	1776358404247072686	/Users/lexemm/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/3t4l445x/obj/x86/libiris_rendering_android.so	862de616ac249317
