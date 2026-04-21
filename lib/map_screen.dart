@@ -920,6 +920,47 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
     }
 
+    final canonicalFromRide =
+        TripStateMachine.canonicalStateFromSnapshot(rideData);
+    // After accept, `ride_requests` is authoritative. Cross-checking
+    // `drivers/` + `driver_active_ride/` can briefly lag and incorrectly
+    // collapse the UI back to "searching".
+    if (TripStateMachine.isDriverActiveState(canonicalFromRide)) {
+      _logRideFlow(
+        '[MATCH_DEBUG][SEARCH_STATE_REJECTED_BECAUSE_ASSIGNED] rideId=$rideId '
+        'source=$source trip_state=$canonicalFromRide '
+        'driver_id=${_valueAsText(rideData['driver_id'])}',
+      );
+      _logRideFlow(
+        '[MATCH_DEBUG][RIDER_STATUS_STABLE] rideId=$rideId source=$source '
+        'phase=driver_active_trip trip_state=$canonicalFromRide',
+      );
+      return _RiderRideStatusDecision(
+        status: status,
+        driverData: _extractDriverData(rideData),
+      );
+    }
+
+    if (TripStateMachine.isPendingDriverAssignmentState(canonicalFromRide)) {
+      final assignedId = _valueAsText(rideData['driver_id']);
+      final assignedOk =
+          assignedId.isNotEmpty && assignedId.toLowerCase() != 'waiting';
+      if (assignedOk && !_rideAssignmentHasTimedOut(rideData)) {
+        _logRideFlow(
+          '[MATCH_DEBUG][SEARCH_STATE_REJECTED_BECAUSE_ASSIGNED] rideId=$rideId '
+          'source=$source trip_state=$canonicalFromRide driver_id=$assignedId',
+        );
+        _logRideFlow(
+          '[MATCH_DEBUG][RIDER_STATUS_STABLE] rideId=$rideId source=$source '
+          'phase=pending_driver_action trip_state=$canonicalFromRide',
+        );
+        return _RiderRideStatusDecision(
+          status: status,
+          driverData: _extractDriverData(rideData),
+        );
+      }
+    }
+
     final invalidReason = await _assignedDriverInvalidReason(
       rideId: rideId,
       rideData: rideData,
@@ -1189,12 +1230,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   String get _rideStateEyebrow => switch (_currentCanonicalRideState) {
     TripLifecycleState.searchingDriver => 'MATCHING YOUR RIDE',
-    TripLifecycleState.pendingDriverAction => 'DRIVER REVIEWING REQUEST',
-    TripLifecycleState.driverAccepted => 'DRIVER CONFIRMED',
-    TripLifecycleState.driverArriving => 'HEADING TO PICKUP',
-    TripLifecycleState.driverArrived => 'AT PICKUP',
-    TripLifecycleState.tripStarted => 'TRIP LIVE',
-    TripLifecycleState.tripCompleted => 'TRIP COMPLETE',
+    TripLifecycleState.pendingDriverAction => 'DRIVER MATCHED',
+    TripLifecycleState.driverAccepted => 'DRIVER ACCEPTED',
+    TripLifecycleState.driverArriving => 'ON THE WAY',
+    TripLifecycleState.driverArrived => 'DRIVER ARRIVED',
+    TripLifecycleState.tripStarted => 'TRIP STARTED',
+    TripLifecycleState.tripCompleted => 'TRIP COMPLETED',
     TripLifecycleState.tripCancelled => 'REQUEST CLOSED',
     _ => _hasRoutePreviewReady ? 'READY TO REQUEST' : 'PLAN YOUR RIDE',
   };
@@ -1639,6 +1680,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       '[RIDE_LIFECYCLE] rider_cancel_rtdb rideId=$rideId source=$transitionSource '
       'cancelMeta=$cancelMetadataSource trip_state_before=${currentRide['trip_state']} '
       'status_before=${currentRide['status']}',
+    );
+    _logRideFlow(
+      '[MATCH_DEBUG][RIDER_CANCEL_WRITE] rideId=$rideId '
+      'next_status=cancelled next_trip_state=${TripLifecycleState.tripCancelled}',
     );
     if (driverId != null && driverId.isNotEmpty && driverId != 'waiting') {
       try {
@@ -4088,13 +4133,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
     return switch (canonicalState) {
       TripLifecycleState.requested => 'Preparing your trip request',
-      TripLifecycleState.searchingDriver => 'Searching for driver...',
+      TripLifecycleState.searchingDriver => 'Matching your ride',
       TripLifecycleState.pendingDriverAction =>
-        'Driver matched. Waiting for acceptance',
-      TripLifecycleState.driverAccepted => 'Driver accepted your request',
-      TripLifecycleState.driverArriving => 'Driver is heading to pickup',
-      TripLifecycleState.driverArrived => 'Driver has arrived',
-      TripLifecycleState.tripStarted => 'Trip in progress',
+        'Driver matched — confirming',
+      TripLifecycleState.driverAccepted => 'Driver accepted',
+      TripLifecycleState.driverArriving => 'Driver is on the way',
+      TripLifecycleState.driverArrived => 'Driver arrived',
+      TripLifecycleState.tripStarted => 'Trip started',
       TripLifecycleState.tripCompleted => 'Trip completed',
       TripLifecycleState.tripCancelled => 'Trip cancelled',
       _ => 'Ready when you are',
@@ -5511,8 +5556,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'service_type': RiderServiceType.ride.key,
         'rider_id': user.uid,
         'driver_id': 'waiting',
-        'status': 'requested',
-        'trip_state': TripLifecycleState.requested,
+        // Keep rider discovery seed aligned with driver query expectations.
+        'status': 'searching',
+        'trip_state': TripLifecycleState.searchingDriver,
         'state_machine_version': TripStateMachine.schemaVersion,
         'market': dispatchMarket,
         // Same canonical slug as [market]; driver discovery queries market only.
@@ -5631,6 +5677,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRideFlow(
         'REQUEST RIDE RTDB write started rideId=$rideId path=ride_requests/$rideId',
       );
+      _logRideFlow(
+        '[MATCH_DEBUG][RIDER_WRITE] rideId=$rideId path=ride_requests/$rideId '
+        'status=${searchingPayload['status']} trip_state=${searchingPayload['trip_state']} '
+        'market=${searchingPayload['market']}',
+      );
       _logRideFlow('RTDB write started path=ride_requests/$rideId');
       if (_rideRequestUserAborted) {
         _logRideFlow(
@@ -5682,6 +5733,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
       _logRideFlow('REQUEST RIDE RTDB write succeeded rideId=$rideId');
       _logRideFlow('RTDB write succeeded rideId=$rideId');
+      _logRideFlow(
+        '[MATCH_DEBUG][RIDER_WRITE_OK] rideId=$rideId path=ride_requests/$rideId '
+        'status=${(committedRideData ?? searchingPayload)['status']} '
+        'trip_state=${(committedRideData ?? searchingPayload)['trip_state']}',
+      );
       _logRideFlow(
         'REQUEST RIDE driver matching started rideId=$rideId searchTimeoutAt=$searchTimeoutAt',
       );
@@ -5875,6 +5931,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             'search_timeout_at=${data['search_timeout_at']} request_expires_at=${data['request_expires_at']} '
             'effectiveTimeoutAt=$tAt nowMs=$nowMs',
           );
+          _logRideFlow(
+            '[MATCH_DEBUG][RIDE_EXPIRED] rideId=$rideId status=$rawStatus '
+            'search_timeout_at=${data['search_timeout_at']} request_expires_at=${data['request_expires_at']}',
+          );
           await _markRideNoDriversAvailable(rideId: rideId, rideData: data);
           return;
         }
@@ -5922,11 +5982,22 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _logRideFlow(
           'ride listener update rideId=$rideId rawStatus=$rawStatus visibleStatus=$status',
         );
+        _logRideFlow(
+          '[MATCH_DEBUG][RIDER_LISTENER] rideId=$rideId rawStatus=$rawStatus '
+          'visibleStatus=$status trip_state=${data['trip_state']} '
+          'driver_id=${data['driver_id']}',
+        );
         if (previousStatus != status) {
           _logRideFlow(
             '[RIDE_LIFECYCLE] status_transition rideId=$rideId '
             'prev=$previousStatus next=$status '
             'trip_state=${data['trip_state']} raw_status=${data['status']}',
+          );
+          _logRideFlow(
+            '[MATCH_DEBUG][RIDER_STATUS_UPDATE] rideId=$rideId '
+            'from=$previousStatus to=$status '
+            'trip_state=${visibleRideData['trip_state']} '
+            'raw_status=${data['status']} driver_id=${data['driver_id']}',
           );
         }
 
@@ -6021,6 +6092,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           }
         } else if (status == 'cancelled') {
           _logRideFlow('ride cancelled rideId=$rideId');
+          _logRideFlow(
+            '[MATCH_DEBUG][RIDE_CANCELLED] rideId=$rideId '
+            'cancel_reason=${_valueAsText(data['cancel_reason'])}',
+          );
           await _endCallForRideLifecycle(rideId: rideId);
           await _resetRideState(clearDestination: true);
           final cancelReason = _valueAsText(data['cancel_reason']);
