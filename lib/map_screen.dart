@@ -1616,6 +1616,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (status == 'cancelled' || status == 'completed') {
       return null;
     }
+    if (status != 'searching' && status != 'requested') {
+      return null;
+    }
+    final expiresAt = _asInt(rideData['request_expires_at']) ??
+        _asInt(rideData['expires_at']) ??
+        _asInt(rideData['search_timeout_at']) ??
+        _asInt(rideData['search_timeout']) ??
+        0;
+    if (expiresAt > 0 &&
+        DateTime.now().millisecondsSinceEpoch >= expiresAt) {
+      return null;
+    }
 
     return rideData;
   }
@@ -5693,8 +5705,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'REQUEST RIDE validation passed city=$city routeReady=$_hasRoutePreviewReady fare=$_fare distanceKm=$_distanceKm durationMin=$_estimatedDurationMin',
       );
       _logRideFlow('request validation passed city=$city');
-      // Canonical slug must match driver `orderByChild('market_pool').equalTo(...)` (RiderServiceAreaConfig).
-      final dispatchMarket = RiderServiceAreaConfig.marketForCity(city).city;
+      // Canonical slug must match driver `orderByChild('market_pool').equalTo(...)` byte-for-byte.
+      final dispatchMarket =
+          RiderServiceAreaConfig.marketForCity(city).city.trim().toLowerCase();
       if (dispatchMarket != city) {
         _logRideFlow(
           'REQUEST RIDE market canonicalized for RTDB from=$city to=$dispatchMarket',
@@ -5788,9 +5801,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         RtdbRideRequestFields.rideId: rideId,
         'rider_id': user.uid,
         'driver_id': 'waiting',
-        // Keep rider discovery seed aligned with driver query expectations.
-        'status': 'searching',
-        'trip_state': TripLifecycleState.searchingDriver,
+        // Keep rider discovery seed aligned with driver query and post-filter expectations.
+        'status': 'requesting',
+        'trip_state': 'requesting',
         'state_machine_version': TripStateMachine.schemaVersion,
         'market': dispatchMarket,
         RtdbRideRequestFields.marketPool: dispatchMarket,
@@ -5912,6 +5925,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final searchingPayload = <String, dynamic>{
         ...payload,
         ...searchTransition,
+        // Preserve canonical open-discovery contract for new requests.
+        'status': 'requesting',
+        'trip_state': 'requesting',
         'search_timeout_at': searchTimeoutAt,
         'request_expires_at': searchTimeoutAt,
         RtdbRideRequestFields.expiresAt: searchTimeoutAt,
@@ -5932,7 +5948,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'REQUEST RIDE payload rideId=$rideId payload=$searchingPayload',
       );
       _logRideFlow(
-        '[RIDER_CREATE_PAYLOAD] rideId=$rideId payload=$searchingPayload',
+        '[RIDER_CREATE] payload=$searchingPayload',
       );
       _logRideFlow(
         'REQUEST RIDE RTDB write started rideId=$rideId path=ride_requests/$rideId',
@@ -6004,9 +6020,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'trip_state=${(committedRideData ?? searchingPayload)['trip_state']}',
       );
       _logRideFlow(
-        '[RIDER_CREATE_OK] rideId=$rideId status=${(committedRideData ?? searchingPayload)[RtdbRideRequestFields.status]} '
-        'trip_state=${(committedRideData ?? searchingPayload)[RtdbRideRequestFields.tripState]} '
-        'market=${(committedRideData ?? searchingPayload)[RtdbRideRequestFields.market]}',
+        '[RIDER_CREATE_OK] rideId=$rideId',
       );
       _logRideFlow(
         'REQUEST RIDE driver matching started rideId=$rideId searchTimeoutAt=$searchTimeoutAt',
