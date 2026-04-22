@@ -41,14 +41,26 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
   }
 
   Future<void> _loadMethods() async {
-    final methods = await _service.fetchPaymentMethods(widget.riderId);
-    if (!mounted) {
-      return;
+    try {
+      final methods = await _service.fetchPaymentMethods(widget.riderId);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _methods = methods;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loading = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load payment methods: $error')),
+      );
     }
-    setState(() {
-      _methods = methods;
-      _loading = false;
-    });
   }
 
   Future<void> _openLinkFlow(PaymentMethodType type) async {
@@ -71,6 +83,25 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
 
     try {
       await _service.setDefaultPaymentMethod(
+        riderId: widget.riderId,
+        methodId: method.id,
+      );
+      await _loadMethods();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busyMethodId = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _delete(PaymentMethodRecord method) async {
+    setState(() {
+      _busyMethodId = method.id;
+    });
+    try {
+      await _service.deletePaymentMethod(
         riderId: widget.riderId,
         methodId: method.id,
       );
@@ -333,18 +364,25 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
                           ),
                           if (!method.isDefault) ...<Widget>[
                             const SizedBox(height: 14),
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: TextButton(
-                                onPressed: _busyMethodId == method.id
-                                    ? null
-                                    : () => unawaited(_setDefault(method)),
-                                child: Text(
-                                  _busyMethodId == method.id
-                                      ? 'Updating...'
-                                      : 'Set as default',
+                            Row(
+                              children: <Widget>[
+                                TextButton(
+                                  onPressed: _busyMethodId == method.id
+                                      ? null
+                                      : () => unawaited(_setDefault(method)),
+                                  child: Text(
+                                    _busyMethodId == method.id
+                                        ? 'Updating...'
+                                        : 'Set as default',
+                                  ),
                                 ),
-                              ),
+                                TextButton(
+                                  onPressed: _busyMethodId == method.id
+                                      ? null
+                                      : () => unawaited(_delete(method)),
+                                  child: const Text('Delete'),
+                                ),
+                              ],
                             ),
                           ],
                         ],

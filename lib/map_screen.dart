@@ -7492,11 +7492,61 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
-  void _rollbackRiderOptimisticMessage(String rideId, String messageId) {
-    _riderChatMessagesById.remove(messageId);
-    if (_riderChatListenerRideId == rideId) {
-      _flushRiderChatMessageTable(rideId);
+  void _confirmRiderOptimisticMessageSent({
+    required String rideId,
+    required String messageId,
+    required String senderId,
+    required String text,
+    required int clientCreatedAt,
+  }) {
+    if (_riderChatListenerRideId != rideId) {
+      return;
     }
+    _riderChatMessagesById[messageId] = RideChatMessage(
+      id: messageId,
+      rideId: rideId,
+      messageId: messageId,
+      senderId: senderId,
+      senderRole: 'rider',
+      type: 'text',
+      text: text,
+      imageUrl: '',
+      createdAt: clientCreatedAt,
+      status: 'sent',
+      isRead: false,
+      localTempId: messageId,
+    );
+    _flushRiderChatMessageTable(rideId);
+  }
+
+  void _markRiderOptimisticMessageFailed({
+    required String rideId,
+    required String messageId,
+    required String senderId,
+    required String text,
+  }) {
+    if (_riderChatListenerRideId != rideId) {
+      return;
+    }
+    final existing = _riderChatMessagesById[messageId];
+    if (existing == null) {
+      return;
+    }
+    _riderChatMessagesById[messageId] = RideChatMessage(
+      id: messageId,
+      rideId: rideId,
+      messageId: messageId,
+      senderId: senderId,
+      senderRole: 'rider',
+      type: 'text',
+      text: text.isNotEmpty ? text : existing.text,
+      imageUrl: existing.imageUrl,
+      createdAt: existing.createdAt,
+      status: 'failed',
+      isRead: false,
+      localTempId: existing.localTempId,
+    );
+    _flushRiderChatMessageTable(rideId);
   }
 
   Future<String?> sendMessage(String rideId, String text) async {
@@ -7532,12 +7582,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final optimistic = RideChatMessage(
         id: messageId,
         rideId: normalizedRideId,
+        messageId: messageId,
         senderId: user.uid,
         senderRole: 'rider',
+        type: 'text',
         text: trimmed,
+        imageUrl: '',
         createdAt: clientCreatedAt,
         status: 'sending',
         isRead: false,
+        localTempId: messageId,
       );
       if (_riderChatListenerRideId == normalizedRideId) {
         _riderChatMessagesById[messageId] = optimistic;
@@ -7546,10 +7600,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
       final payload = <String, dynamic>{
         'id': messageId,
+        'message_id': messageId,
         'ride_id': normalizedRideId,
         'sender_id': user.uid,
         'sender_role': 'rider',
+        'type': 'text',
         'text': trimmed,
+        'image_url': '',
+        'local_temp_id': messageId,
         'created_at': rtdb.ServerValue.timestamp,
         'created_at_client': clientCreatedAt,
         'status': 'sent',
@@ -7565,7 +7623,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'created_at_client': clientCreatedAt,
       };
       _logRideFlow(
-        'chat send start rideId=$normalizedRideId messageId=$messageId path=${canonicalRideChatMessagesPath(normalizedRideId)}/$messageId',
+        '[CHAT_SEND_START] role=rider rideId=$normalizedRideId '
+        'messageId=$messageId path=${canonicalRideChatMessagesPath(normalizedRideId)}/$messageId',
       );
       try {
         await rootRef
@@ -7588,6 +7647,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             })
             .timeout(_rideChatSendTimeout);
 
+        _confirmRiderOptimisticMessageSent(
+          rideId: normalizedRideId,
+          messageId: messageId,
+          senderId: user.uid,
+          text: trimmed,
+          clientCreatedAt: clientCreatedAt,
+        );
+
         unawaited(_mirrorRiderChatToTripRouteLog(
           rideId: normalizedRideId,
           messageId: messageId,
@@ -7596,14 +7663,27 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         ));
 
         _logRideFlow(
-          'chat send success rideId=$normalizedRideId messageId=$messageId path=${canonicalRideChatMessagesPath(normalizedRideId)}/$messageId',
+          '[CHAT_SEND_OK] role=rider rideId=$normalizedRideId '
+          'messageId=$messageId path=${canonicalRideChatMessagesPath(normalizedRideId)}/$messageId',
         );
         return null;
       } catch (error) {
-        _rollbackRiderOptimisticMessage(normalizedRideId, messageId);
-        _logRideFlow(
-          'chat send failure rideId=$normalizedRideId messageId=$messageId error=$error',
+        _markRiderOptimisticMessageFailed(
+          rideId: normalizedRideId,
+          messageId: messageId,
+          senderId: user.uid,
+          text: trimmed,
         );
+        _logRideFlow(
+          '[CHAT_SEND_FAIL] role=rider rideId=$normalizedRideId '
+          'messageId=$messageId error=$error',
+        );
+        if (isPermissionDeniedError(error)) {
+          _logRideFlow(
+            '[CHAT_PERMISSION_DENIED] role=rider rideId=$normalizedRideId '
+            'messageId=$messageId error=$error',
+          );
+        }
         if (error is TimeoutException) {
           return 'Sending this message took too long. Please try again.';
         }
@@ -7635,9 +7715,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     _lastRiderChatErrorNoticeKey = issueKey;
+    if (error != null && isPermissionDeniedError(error)) {
+      _logRideFlow('[CHAT_PERMISSION_DENIED] role=rider rideId=$rideId message=$message error=$error');
+    }
     if (_isRiderChatSessionActive(rideId)) {
       _showSnackBar(
-        'Chat is temporarily unavailable. Your trip is still active.',
+        'Chat is syncing. Please retry in a moment.',
       );
     }
   }
@@ -7843,7 +7926,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _lastRiderChatErrorNoticeKey = null;
     _riderChatMessages.value = const <RideChatMessage>[];
     _riderChatMessagesById.clear();
-    _logRideFlow('rider chat child listeners attached rideId=$rideId');
+    _logRideFlow(
+      '[CHAT_SUBSCRIBE] role=rider rideId=$rideId '
+      'path=${canonicalRideChatMessagesPath(rideId)}',
+    );
 
     final ref = _rideChatMessagesRef(rideId);
     _riderChatSubscriptions.add(

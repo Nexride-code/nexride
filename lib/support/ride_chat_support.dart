@@ -2,22 +2,30 @@ class RideChatMessage {
   const RideChatMessage({
     required this.id,
     required this.rideId,
+    required this.messageId,
     required this.senderId,
     required this.senderRole,
+    required this.type,
     required this.text,
+    required this.imageUrl,
     required this.createdAt,
     required this.status,
     required this.isRead,
+    required this.localTempId,
   });
 
   final String id;
   final String rideId;
+  final String messageId;
   final String senderId;
   final String senderRole;
+  final String type;
   final String text;
+  final String imageUrl;
   final int createdAt;
   final String status;
   final bool isRead;
+  final String localTempId;
 
   bool isSentBy(String currentUserId) {
     return currentUserId.isNotEmpty && senderId == currentUserId;
@@ -49,7 +57,7 @@ class RideChatSnapshot {
 
 String canonicalRideChatMessagesPath(String rideId) {
   final normalizedRideId = rideId.trim();
-  return 'chats/$normalizedRideId/messages';
+  return 'ride_chats/$normalizedRideId/messages';
 }
 
 RideChatMessage? parseRideChatMessageEntry({
@@ -85,12 +93,18 @@ RideChatMessage? parseRideChatMessageEntry({
     return RideChatMessage(
       id: messageId,
       rideId: rideId,
+      messageId: map['message_id']?.toString().trim().isNotEmpty == true
+          ? map['message_id'].toString().trim()
+          : messageId,
       senderId: senderId,
       senderRole: senderRole,
+      type: (map['type']?.toString().trim().toLowerCase() ?? 'text'),
       text: text,
+      imageUrl: map['image_url']?.toString().trim() ?? '',
       createdAt: createdAt,
       status: status,
       isRead: map['read'] == true,
+      localTempId: map['local_temp_id']?.toString().trim() ?? '',
     );
   } catch (_) {
     return null;
@@ -158,12 +172,18 @@ RideChatSnapshot parseRideChatSnapshot({
         RideChatMessage(
           id: messageId,
           rideId: rideId,
+          messageId: map['message_id']?.toString().trim().isNotEmpty == true
+              ? map['message_id'].toString().trim()
+              : messageId,
           senderId: senderId,
           senderRole: senderRole,
+          type: (map['type']?.toString().trim().toLowerCase() ?? 'text'),
           text: text,
+          imageUrl: map['image_url']?.toString().trim() ?? '',
           createdAt: createdAt,
           status: status,
           isRead: map['read'] == true,
+          localTempId: map['local_temp_id']?.toString().trim() ?? '',
         ),
       );
     } catch (_) {

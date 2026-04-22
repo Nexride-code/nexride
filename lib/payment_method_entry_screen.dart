@@ -28,21 +28,23 @@ class _PaymentMethodEntryScreenState extends State<PaymentMethodEntryScreen> {
   final TextEditingController _labelController = TextEditingController();
   final TextEditingController _detailsController = TextEditingController();
   final TextEditingController _holderController = TextEditingController();
+  final TextEditingController _providerRefController = TextEditingController();
   bool _makeDefault = true;
   bool _saving = false;
-
-  String get _provider => widget.type == PaymentMethodType.card
-      ? RiderFeatureFlags.paymentProviderCardDefault
-      : RiderFeatureFlags.paymentProviderBankDefault;
+  late String _provider;
 
   @override
   void initState() {
     super.initState();
+    _provider = widget.type == PaymentMethodType.card
+        ? RiderFeatureFlags.paymentProviderCardDefault
+        : RiderFeatureFlags.paymentProviderBankDefault;
     if (widget.type == PaymentMethodType.card) {
       _labelController.text = 'Visa';
     } else {
       _labelController.text = 'Bank account';
     }
+    _providerRefController.text = 'ref_${DateTime.now().millisecondsSinceEpoch}';
   }
 
   @override
@@ -50,6 +52,7 @@ class _PaymentMethodEntryScreenState extends State<PaymentMethodEntryScreen> {
     _labelController.dispose();
     _detailsController.dispose();
     _holderController.dispose();
+    _providerRefController.dispose();
     super.dispose();
   }
 
@@ -106,6 +109,10 @@ class _PaymentMethodEntryScreenState extends State<PaymentMethodEntryScreen> {
           maskedDetails: _maskedDetails(),
           displayTitle: _displayTitle(),
           detailLabel: _detailLabel(),
+          tokenRef: _providerRefController.text.trim(),
+          providerReference: _providerRefController.text.trim(),
+          country: 'NG',
+          last4: _detailsController.text.trim(),
           makeDefault: _makeDefault,
         ),
       );
@@ -260,15 +267,56 @@ class _PaymentMethodEntryScreenState extends State<PaymentMethodEntryScreen> {
                               const Icon(Icons.online_prediction_outlined),
                               const SizedBox(width: 10),
                               Expanded(
-                                child: Text(
-                                  'Online Payment provider: ${_provider.replaceAll('_', ' ')}',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
+                                child: DropdownButtonFormField<String>(
+                                  initialValue: _provider,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Provider',
+                                    border: InputBorder.none,
                                   ),
+                                  items: const <DropdownMenuItem<String>>[
+                                    DropdownMenuItem<String>(
+                                      value: 'paystack_ready',
+                                      child: Text('Paystack (integration-ready)'),
+                                    ),
+                                    DropdownMenuItem<String>(
+                                      value: 'flutterwave_ready',
+                                      child: Text('Flutterwave (integration-ready)'),
+                                    ),
+                                  ],
+                                  onChanged: _saving
+                                      ? null
+                                      : (value) {
+                                          if (value == null) {
+                                            return;
+                                          }
+                                          setState(() {
+                                            _provider = value;
+                                          });
+                                        },
                                 ),
                               ),
                             ],
                           ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextFormField(
+                          controller: _providerRefController,
+                          decoration: InputDecoration(
+                            labelText: 'Provider token/reference',
+                            helperText:
+                                'Store PSP token/reference only. Never store PAN/CVV.',
+                            filled: true,
+                            fillColor: _cream,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(18),
+                            ),
+                          ),
+                          validator: (value) {
+                            if ((value ?? '').trim().length < 6) {
+                              return 'Enter a valid token/reference';
+                            }
+                            return null;
+                          },
                         ),
                         const SizedBox(height: 10),
                         SwitchListTile.adaptive(
