@@ -1626,6 +1626,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (status != 'searching' && status != 'requested') {
       return null;
     }
+    if (!_isCanonicalOpenDiscoverySeed(rideData)) {
+      _logRideFlow(
+        'pending submission snapshot rejected rideId=$rideId reason=non_canonical_seed '
+        'market=${_valueAsText(rideData['market'])} market_pool=${_valueAsText(rideData['market_pool'])} '
+        'status=${_valueAsText(rideData['status'])} trip_state=${_valueAsText(rideData['trip_state'])} '
+        'driver_id=${_valueAsText(rideData['driver_id'])}',
+      );
+      return null;
+    }
     final expiresAt = _asInt(rideData['request_expires_at']) ??
         _asInt(rideData['expires_at']) ??
         _asInt(rideData['search_timeout_at']) ??
@@ -1637,6 +1646,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     return rideData;
+  }
+
+  bool _isCanonicalOpenDiscoverySeed(Map<String, dynamic> rideData) {
+    final market = _valueAsText(rideData['market']).trim().toLowerCase();
+    final marketPool = _valueAsText(rideData['market_pool']).trim().toLowerCase();
+    final status = _valueAsText(rideData['status']).trim().toLowerCase();
+    final tripState = _valueAsText(rideData['trip_state']).trim().toLowerCase();
+    final driverId = _valueAsText(rideData['driver_id']).trim().toLowerCase();
+    final expiresAt = _asInt(rideData['request_expires_at']) ??
+        _asInt(rideData['expires_at']) ??
+        _asInt(rideData['search_timeout_at']) ??
+        _asInt(rideData['search_timeout']) ??
+        0;
+    return market == 'lagos' &&
+        marketPool == 'lagos' &&
+        status == 'requesting' &&
+        tripState == 'requesting' &&
+        driverId == 'waiting' &&
+        expiresAt > DateTime.now().millisecondsSinceEpoch;
   }
 
   /// After a [set] times out locally, poll until the write is visible or give up.
@@ -5746,9 +5774,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _rideListener = null;
       _activeRideListenerRideId = null;
 
-      final rideRef = _rideRequestsRef.push();
-      rideId = rideRef.key;
-      if (rideId == null || rideId.isEmpty) {
+      rtdb.DatabaseReference? rideRef;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        final nextRef = _rideRequestsRef.push();
+        final nextId = nextRef.key?.trim() ?? '';
+        final isReusableId =
+            nextId.isEmpty ||
+            nextId == _currentRideId?.trim() ||
+            nextId == _pendingRideRequestSubmissionId?.trim();
+        if (!isReusableId) {
+          rideRef = nextRef;
+          rideId = nextId;
+          break;
+        }
+      }
+      if (rideRef == null || rideId == null || rideId.isEmpty) {
         throw StateError('Unable to create ride id');
       }
       _pendingRideRequestSubmissionId = rideId;
@@ -5803,7 +5843,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         ...destinationScope,
       };
 
-      final payload = <String, dynamic>{
+      final canonicalSeed = <String, dynamic>{
         'service_type': RiderServiceType.ride.key,
         RtdbRideRequestFields.rideId: rideId,
         'rider_id': user.uid,
@@ -5923,14 +5963,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'createRideRequest before write city=$city dispatchMarket=$dispatchMarket',
       );
       final searchTransition = TripStateMachine.buildTransitionUpdate(
-        currentRide: payload,
+        currentRide: canonicalSeed,
         nextCanonicalState: TripLifecycleState.searchingDriver,
         timestampValue: rtdb.ServerValue.timestamp,
         transitionSource: 'rider_request_search_start',
         transitionActor: 'rider',
       );
       final searchingPayload = <String, dynamic>{
-        ...payload,
+        ...canonicalSeed,
         ...searchTransition,
         // Preserve canonical open-discovery contract for new requests.
         'status': 'requesting',
@@ -5939,6 +5979,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'request_expires_at': searchTimeoutAt,
         RtdbRideRequestFields.expiresAt: searchTimeoutAt,
       };
+      searchingPayload['status'] = 'requesting';
+      searchingPayload['trip_state'] = 'requesting';
+      searchingPayload['driver_id'] = 'waiting';
+      searchingPayload['market'] = dispatchMarket;
+      searchingPayload['market_pool'] = dispatchMarket;
       rtdbFlowLog(
         '[NEXRIDE_RIDER_RTDB][CREATE_START]',
         'rideId=$rideId uid=${user.uid} market=$dispatchMarket market_pool=$dispatchMarket',
