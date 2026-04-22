@@ -60,6 +60,11 @@ String canonicalRideChatMessagesPath(String rideId) {
   return 'ride_chats/$normalizedRideId/messages';
 }
 
+String canonicalRideChatMetaPath(String rideId) {
+  final normalizedRideId = rideId.trim();
+  return 'ride_chats/$normalizedRideId/meta';
+}
+
 RideChatMessage? parseRideChatMessageEntry({
   required String rideId,
   required String messageId,
@@ -78,7 +83,8 @@ RideChatMessage? parseRideChatMessageEntry({
     });
 
     final text = map['text']?.toString().trim() ?? '';
-    if (text.isEmpty) {
+    final imageUrl = map['image_url']?.toString().trim() ?? '';
+    if (text.isEmpty && imageUrl.isEmpty) {
       return null;
     }
 
@@ -88,7 +94,7 @@ RideChatMessage? parseRideChatMessageEntry({
       primary: map['created_at'],
       fallback: map['created_at_client'],
     );
-    final status = _normalizeStatus(map['status']);
+    final status = rideChatStatusFromMessageMap(map);
 
     return RideChatMessage(
       id: messageId,
@@ -100,7 +106,7 @@ RideChatMessage? parseRideChatMessageEntry({
       senderRole: senderRole,
       type: (map['type']?.toString().trim().toLowerCase() ?? 'text'),
       text: text,
-      imageUrl: map['image_url']?.toString().trim() ?? '',
+      imageUrl: imageUrl,
       createdAt: createdAt,
       status: status,
       isRead: map['read'] == true,
@@ -155,7 +161,8 @@ RideChatSnapshot parseRideChatSnapshot({
       });
 
       final text = map['text']?.toString().trim() ?? '';
-      if (text.isEmpty) {
+      final imageUrl = map['image_url']?.toString().trim() ?? '';
+      if (text.isEmpty && imageUrl.isEmpty) {
         invalidRecordCount += 1;
         return;
       }
@@ -166,7 +173,7 @@ RideChatSnapshot parseRideChatSnapshot({
         primary: map['created_at'],
         fallback: map['created_at_client'],
       );
-      final status = _normalizeStatus(map['status']);
+      final status = rideChatStatusFromMessageMap(map);
 
       messages.add(
         RideChatMessage(
@@ -179,7 +186,7 @@ RideChatSnapshot parseRideChatSnapshot({
           senderRole: senderRole,
           type: (map['type']?.toString().trim().toLowerCase() ?? 'text'),
           text: text,
-          imageUrl: map['image_url']?.toString().trim() ?? '',
+          imageUrl: imageUrl,
           createdAt: createdAt,
           status: status,
           isRead: map['read'] == true,
@@ -236,11 +243,22 @@ String _normalizeSenderRole(dynamic value) {
 
 String _normalizeStatus(dynamic value) {
   final normalized = value?.toString().trim().toLowerCase() ?? '';
+  if (normalized == 'failed' || normalized == 'pending' || normalized == 'sending') {
+    return normalized;
+  }
   if (normalized.isEmpty) {
     return 'sent';
   }
-  if (normalized == 'pending' || normalized == 'sending') {
-    return normalized;
-  }
   return normalized;
+}
+
+String rideChatStatusFromMessageMap(Map<String, dynamic> map) {
+  if (map['server_ack'] == true) {
+    return 'sent';
+  }
+  final rawClientStatus = map['client_status']?.toString().trim().toLowerCase() ?? '';
+  if (rawClientStatus == 'failed' || rawClientStatus == 'pending' || rawClientStatus == 'sending') {
+    return rawClientStatus;
+  }
+  return _normalizeStatus(map['status']);
 }

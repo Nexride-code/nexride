@@ -2985,6 +2985,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required String uid,
   }) async {
     try {
+      _logRideCall('[CALL_JOIN_START] rideId=$rideId');
       await _callService.ensureJoinedVoiceChannel(
         channelId: rideId,
         uid: uid,
@@ -2992,7 +2993,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         muted: _callMuted,
       );
       _callJoinedChannel = true;
-      _logRideCall('joined channel rideId=$rideId');
+      _logRideCall('[CALL_JOIN_OK] rideId=$rideId');
       await _callService.updateParticipantState(
         rideId: rideId,
         uid: uid,
@@ -3002,7 +3003,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         foreground: _appLifecycleState == AppLifecycleState.resumed,
       );
     } catch (error) {
-      _logRideCall('join failed rideId=$rideId error=$error');
+      _logRideCall('[CALL_JOIN_FAIL] rideId=$rideId error=$error');
       await _callService.endAcceptedCall(rideId: rideId, endedBy: 'system');
       if (mounted) {
         final message = error is RideCallException
@@ -3160,6 +3161,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     _setStartingVoiceCall(true);
     try {
+      _logRideCall('[CALL_START] rideId=$rideId initiator=rider');
       if (_currentCallSession != null && !_currentCallSession!.isTerminal) {
         _refreshCallOverlayEntry();
         _showSnackBar('A call is already active for this ride.');
@@ -3167,7 +3169,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
 
       if (!_callService.hasRtcConfiguration) {
-        _showSnackBar(_callService.missingConfigurationMessage);
+        _logRideCall('[CALL_CONFIG_MISSING] rideId=$rideId');
+        _showSnackBar(_callService.unavailableUserMessage);
         return;
       }
 
@@ -3179,8 +3182,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
 
       try {
+        _logRideCall('[CALL_TOKEN_FETCH_START] rideId=$rideId');
         await _callService.prefetchAgoraToken(channelId: rideId, uid: riderUid);
+        _logRideCall('[CALL_TOKEN_FETCH_OK] rideId=$rideId');
       } on RideCallException catch (error) {
+        _logRideCall('[CALL_TOKEN_FETCH_FAIL] rideId=$rideId error=$error');
         _showSnackBar(error.message);
         return;
       }
@@ -3218,7 +3224,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     if (!_callService.hasRtcConfiguration) {
-      _showSnackBar(_callService.missingConfigurationMessage);
+      _logRideCall('[CALL_CONFIG_MISSING] rideId=${session.rideId}');
+      _showSnackBar(_callService.unavailableUserMessage);
       return;
     }
 
@@ -3236,11 +3243,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     try {
+      _logRideCall('[CALL_TOKEN_FETCH_START] rideId=${session.rideId}');
       await _callService.prefetchAgoraToken(
         channelId: session.rideId,
         uid: riderUid,
       );
+      _logRideCall('[CALL_TOKEN_FETCH_OK] rideId=${session.rideId}');
     } on RideCallException catch (error) {
+      _logRideCall('[CALL_TOKEN_FETCH_FAIL] rideId=${session.rideId} error=$error');
       _showSnackBar(error.message);
       return;
     }
@@ -7473,7 +7483,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     try {
-      _logRideFlow('[SHARE] start rideId=$rideId');
+      _logRideFlow('[SHARE_TRIP_START] rideId=$rideId');
       Map<String, dynamic>? latestRideData;
       try {
         latestRideData = await _fetchLatestRideSnapshot(rideId)
@@ -7488,7 +7498,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         rideData: latestRideData,
       );
       if (payload == null) {
-        _logRideFlow('[SHARE] fail rideId=$rideId reason=no_payload');
+        _logRideFlow('[SHARE_TRIP_FAIL] rideId=$rideId reason=no_payload');
         _showSnackBar('Unable to prepare trip sharing right now.');
         return;
       }
@@ -7500,9 +7510,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         shareLink = await _shareTripRtdbService
             .ensureShare(payload)
             .timeout(const Duration(seconds: 10));
+        _logRideFlow('[SHARE_TRIP_LINK_OK] rideId=$rideId');
       } catch (error) {
         _logRideFlow(
-          '[SHARE] fallback live link rideId=$rideId error=$error',
+          '[SHARE_TRIP_LINK_FAIL] rideId=$rideId error=$error',
         );
       }
 
@@ -7548,13 +7559,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         shareText.toString().trim(),
         subject: 'NexRide live trip $rideId',
       );
-      if (shareLink == null && mounted) {
-        _showSnackBar(
-          'Shared trip summary; live link could not be created — try again later.',
-        );
+      if (shareLink == null) {
+        _logRideFlow('[SHARE_TRIP_FALLBACK_OK] rideId=$rideId');
+        if (mounted) {
+          _showSnackBar('Trip summary shared successfully.');
+        }
       }
     } catch (error) {
-      _logRideFlow('[SHARE] fail rideId=$rideId error=$error');
+      _logRideFlow('[SHARE_TRIP_FAIL] rideId=$rideId error=$error');
       _showSnackBar('Unable to share this trip right now.');
     } finally {
       if (mounted) {
@@ -7744,6 +7756,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     _riderChatSendInFlight = true;
     try {
+      if (_riderChatListenerRideId == null &&
+          _isRiderChatSessionActive(normalizedRideId)) {
+        _startRiderChatListener(normalizedRideId);
+      }
       final clientCreatedAt = DateTime.now().millisecondsSinceEpoch;
       final optimistic = RideChatMessage(
         id: messageId,
@@ -7776,6 +7792,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'local_temp_id': messageId,
         'created_at': rtdb.ServerValue.timestamp,
         'created_at_client': clientCreatedAt,
+        'client_status': 'sent',
+        'server_ack': true,
         'status': 'sent',
         'read': false,
       };
@@ -7810,6 +7828,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               'ride_requests/$normalizedRideId/chat_updated_at':
                   rtdb.ServerValue.timestamp,
               'ride_requests/$normalizedRideId/has_chat_messages': true,
+              '${canonicalRideChatMetaPath(normalizedRideId)}/rideId':
+                  normalizedRideId,
+              '${canonicalRideChatMetaPath(normalizedRideId)}/rider_id':
+                  user.uid,
+              '${canonicalRideChatMetaPath(normalizedRideId)}/driver_id':
+                  _valueAsText(_currentRideSnapshot?['driver_id']),
+              '${canonicalRideChatMetaPath(normalizedRideId)}/created_at':
+                  rtdb.ServerValue.timestamp,
+              '${canonicalRideChatMetaPath(normalizedRideId)}/updated_at':
+                  rtdb.ServerValue.timestamp,
+              '${canonicalRideChatMetaPath(normalizedRideId)}/last_message':
+                  lastMessageMeta['text'],
+              '${canonicalRideChatMetaPath(normalizedRideId)}/last_message_sender_id':
+                  user.uid,
+              '${canonicalRideChatMetaPath(normalizedRideId)}/last_message_at':
+                  rtdb.ServerValue.timestamp,
+              '${canonicalRideChatMetaPath(normalizedRideId)}/status': 'active',
             })
             .timeout(_rideChatSendTimeout);
 
@@ -8098,6 +8133,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
 
     final ref = _rideChatMessagesRef(rideId);
+    unawaited(_loadRiderChatSnapshot(rideId, ref));
     _riderChatSubscriptions.add(
       ref.onChildAdded.listen(
         (event) => _onRiderChatChildEvent(rideId, event),
@@ -8132,6 +8168,28 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
+  Future<void> _loadRiderChatSnapshot(
+    String rideId,
+    rtdb.DatabaseReference ref,
+  ) async {
+    try {
+      _logRideFlow('[CHAT_LOAD_START] role=rider rideId=$rideId');
+      final snapshot = await ref.get().timeout(const Duration(seconds: 6));
+      final parsed = parseRideChatSnapshot(rideId: rideId, raw: snapshot.value);
+      for (final message in parsed.messages) {
+        _riderChatMessagesById[message.id] = message;
+      }
+      _flushRiderChatMessageTable(rideId);
+      _logRideFlow(
+        '[CHAT_LOAD_OK] role=rider rideId=$rideId count=${parsed.messages.length} '
+        'invalid=${parsed.invalidRecordCount}',
+      );
+    } catch (error) {
+      _logRideFlow('[CHAT_LOAD_FAIL] role=rider rideId=$rideId error=$error');
+      _reportRiderChatIssue(rideId, 'load_failed', error: error);
+    }
+  }
+
   void _openChat() {
     final rideId = _activeRideInteractionId;
     final user = FirebaseAuth.instance.currentUser;
@@ -8139,7 +8197,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
-    _logRideFlow('rider chat opened rideId=$rideId');
+    _logRideFlow('[CHAT_OPEN] role=rider rideId=$rideId');
     _resetRiderUnreadCount(rideId);
     unawaited(
       _markRiderMessagesRead(rideId, messages: _riderChatMessages.value),

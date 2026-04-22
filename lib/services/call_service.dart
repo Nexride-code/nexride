@@ -154,6 +154,7 @@ class CallService {
   final rtdb.FirebaseDatabase _database;
   final String _agoraAppId;
   final String _agoraTokenEndpoint;
+  final String _agoraChannelPrefix = _resolveChannelPrefix();
   final Set<String> _syncedRideIds = <String>{};
   final Set<String> _syncedReceiverIds = <String>{};
 
@@ -195,6 +196,17 @@ class CallService {
     }
 
     return 'Voice calling is not configured yet. Add ${missing.join(' and ')} to enable it.';
+  }
+
+  String get unavailableUserMessage =>
+      'Calling will be available once secure voice setup is completed.';
+
+  String channelForRide(String rideId) {
+    final normalizedRideId = rideId.trim();
+    if (_agoraChannelPrefix.isEmpty) {
+      return normalizedRideId;
+    }
+    return '${_agoraChannelPrefix}_$normalizedRideId';
   }
 
   Stream<rtdb.DatabaseEvent> observeCall(String rideId) {
@@ -276,7 +288,7 @@ class CallService {
       'started_by': normalizedStartedBy,
       'callerId': callerId,
       'receiverId': receiverId,
-      'channelName': normalizedRideId,
+      'channelName': channelForRide(normalizedRideId),
       'status': 'ringing',
       'createdAt': rtdb.ServerValue.timestamp,
       'updatedAt': rtdb.ServerValue.timestamp,
@@ -421,7 +433,8 @@ class CallService {
     required bool muted,
   }) async {
     if (!hasRtcConfiguration) {
-      throw RideCallException(missingConfigurationMessage);
+      debugPrint('[CALL_CONFIG_MISSING] rideId=$channelId');
+      throw RideCallException(unavailableUserMessage);
     }
 
     _disposed = false;
@@ -464,14 +477,14 @@ class CallService {
       );
     }
 
-    debugPrint('[RideCall] join started rideId=$channelId');
+    debugPrint('[CALL_JOIN_START] rideId=$channelId');
 
     try {
       await _engine!.setEnableSpeakerphone(speakerOn);
       await _engine!.muteLocalAudioStream(muted);
       await _joinChannelWithToken(token: token, request: _lastJoinRequest!);
     } catch (error) {
-      debugPrint('[RideCall] join failed rideId=$channelId error=$error');
+      debugPrint('[CALL_JOIN_FAIL] rideId=$channelId error=$error');
       rethrow;
     }
   }
@@ -543,9 +556,7 @@ class CallService {
     final agoraUid = _agoraUid(normalizedUserId).toString();
 
     if (!hasRtcConfiguration) {
-      debugPrint(
-        '[RideCall] token fetch failed rideId=$rideId error=missing_configuration',
-      );
+      debugPrint('[CALL_CONFIG_MISSING] rideId=$rideId');
       return null;
     }
 
@@ -557,7 +568,7 @@ class CallService {
       return _cachedToken;
     }
 
-    debugPrint('[RideCall] token fetch started rideId=$rideId uid=$agoraUid');
+    debugPrint('[CALL_TOKEN_FETCH_START] rideId=$rideId uid=$agoraUid');
 
     final uri = Uri.parse(_agoraTokenEndpoint).replace(
       queryParameters: <String, String>{'channel': rideId, 'uid': agoraUid},
@@ -591,13 +602,13 @@ class CallService {
       _cachedTokenUserId = normalizedUserId;
       _cachedToken = token;
 
-      debugPrint('[RideCall] token fetch success rideId=$rideId');
+      debugPrint('[CALL_TOKEN_FETCH_OK] rideId=$rideId');
       return token;
     } catch (error) {
       _cachedTokenChannelId = null;
       _cachedTokenUserId = null;
       _cachedToken = null;
-      debugPrint('[RideCall] token fetch failed rideId=$rideId error=$error');
+      debugPrint('[CALL_TOKEN_FETCH_FAIL] rideId=$rideId error=$error');
       return null;
     }
   }
@@ -1135,6 +1146,11 @@ String _resolveTokenEndpoint(String? override) {
 
   const endpoint = String.fromEnvironment('AGORA_TOKEN_ENDPOINT');
   return endpoint.trim();
+}
+
+String _resolveChannelPrefix() {
+  const prefix = String.fromEnvironment('AGORA_CHANNEL_PREFIX');
+  return prefix.trim();
 }
 
 RideCallStatus? _parseStatus(String? raw) {
