@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'config/rider_app_config.dart';
+import 'map_screen.dart';
 import 'payment_method_entry_screen.dart';
+import 'services/rider_active_trip_session_service.dart';
 import 'services/payment_methods_service.dart';
 import 'support/payment_method_support.dart';
 
@@ -21,6 +23,8 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
   static const Color _cream = Color(0xFFF7F2EA);
 
   final PaymentMethodsService _service = const PaymentMethodsService();
+  final RiderActiveTripSessionService _activeTripSessionService =
+      RiderActiveTripSessionService.instance;
   List<PaymentMethodRecord> _methods = <PaymentMethodRecord>[];
   bool _loading = true;
   String? _busyMethodId;
@@ -38,6 +42,11 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
   void initState() {
     super.initState();
     unawaited(_loadMethods());
+    unawaited(
+      _activeTripSessionService.restoreActiveTripForCurrentUser(
+        source: 'payment_methods.init',
+      ),
+    );
   }
 
   Future<void> _loadMethods() async {
@@ -132,6 +141,37 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
             children: <Widget>[
+              ValueListenableBuilder<RiderActiveTripSession?>(
+                valueListenable: _activeTripSessionService.sessionNotifier,
+                builder: (
+                  BuildContext context,
+                  RiderActiveTripSession? session,
+                  Widget? _,
+                ) {
+                  if (session == null || !_activeTripSessionService.hasActiveTrip) {
+                    return const SizedBox.shrink();
+                  }
+                  debugPrint(
+                    '[RIDER_ACTIVE_TRIP_BANNER] source=payment_methods status=${session.status} rideId=${session.rideId}',
+                  );
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: _PaymentTripBanner(
+                      status: session.status,
+                      onTap: () {
+                        debugPrint(
+                          '[RIDER_NAV_RETURN_TO_TRIP] source=payment_methods rideId=${session.rideId}',
+                        );
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const MapScreen(),
+                          ),
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
@@ -390,6 +430,48 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
                     ),
                   ),
                 ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PaymentTripBanner extends StatelessWidget {
+  const _PaymentTripBanner({required this.status, required this.onTap});
+
+  final String status;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: Ink(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFFB57A2A)),
+          ),
+          child: Row(
+            children: <Widget>[
+              const Icon(Icons.alt_route_rounded, color: Color(0xFFB57A2A)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Trip active • ${status.replaceAll('_', ' ')}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: Colors.white70),
             ],
           ),
         ),

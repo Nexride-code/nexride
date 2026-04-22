@@ -11,6 +11,7 @@ import 'rider_profile_screen.dart';
 import 'rider_login.dart';
 import 'service_type.dart';
 import 'services/rider_trust_bootstrap_service.dart';
+import 'services/rider_active_trip_session_service.dart';
 import 'support/rider_trust_support.dart';
 import 'support/startup_rtdb_support.dart';
 
@@ -21,7 +22,8 @@ class RideTypeScreen extends StatefulWidget {
   State<RideTypeScreen> createState() => _RideTypeScreenState();
 }
 
-class _RideTypeScreenState extends State<RideTypeScreen> {
+class _RideTypeScreenState extends State<RideTypeScreen>
+    with WidgetsBindingObserver {
   static const Color _gold = Color(0xFFB57A2A);
   static const String _bookCarRouteName = '/rider/book-car';
   static const String _dispatchRouteName = '/rider/dispatch';
@@ -29,6 +31,8 @@ class _RideTypeScreenState extends State<RideTypeScreen> {
   final rtdb.DatabaseReference _rootRef = rtdb.FirebaseDatabase.instance.ref();
   final RiderTrustBootstrapService _trustBootstrapService =
       const RiderTrustBootstrapService();
+  final RiderActiveTripSessionService _activeTripSessionService =
+      RiderActiveTripSessionService.instance;
 
   Map<String, dynamic> _userProfile = <String, dynamic>{};
   Map<String, dynamic> _verification = buildRiderVerificationDefaults(null);
@@ -44,7 +48,32 @@ class _RideTypeScreenState extends State<RideTypeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_loadTrustState());
+    unawaited(
+      _activeTripSessionService.restoreActiveTripForCurrentUser(
+        source: 'ride_type.init',
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      return;
+    }
+    debugPrint('[RIDER_NAV_RESUME_ACTIVE_TRIP] source=ride_type');
+    unawaited(
+      _activeTripSessionService.restoreActiveTripForCurrentUser(
+        source: 'ride_type.resume',
+      ),
+    );
   }
 
   Future<void> _loadTrustState() async {
@@ -405,6 +434,31 @@ class _RideTypeScreenState extends State<RideTypeScreen> {
                   ),
                 ),
                 const SizedBox(height: 18),
+                ValueListenableBuilder<RiderActiveTripSession?>(
+                  valueListenable: _activeTripSessionService.sessionNotifier,
+                  builder: (
+                    BuildContext context,
+                    RiderActiveTripSession? session,
+                    Widget? _,
+                  ) {
+                    if (session == null ||
+                        !_activeTripSessionService.hasActiveTrip) {
+                      return const SizedBox.shrink();
+                    }
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 14),
+                      child: _ActiveTripBanner(
+                        session: session,
+                        onTap: () {
+                          debugPrint(
+                            '[RIDER_NAV_RETURN_TO_TRIP] source=ride_type rideId=${session.rideId}',
+                          );
+                          unawaited(_openBookCarFlow());
+                        },
+                      ),
+                    );
+                  },
+                ),
                 Row(
                   children: <Widget>[
                     Expanded(
@@ -534,6 +588,51 @@ class _RideTypeScreenState extends State<RideTypeScreen> {
                 ],
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ActiveTripBanner extends StatelessWidget {
+  const _ActiveTripBanner({required this.session, required this.onTap});
+
+  final RiderActiveTripSession session;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    debugPrint(
+      '[RIDER_ACTIVE_TRIP_BANNER] source=ride_type status=${session.status} rideId=${session.rideId}',
+    );
+    return Material(
+      color: const Color(0xFF1A1A1A),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Ink(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0xFFB57A2A)),
+          ),
+          child: Row(
+            children: <Widget>[
+              const Icon(Icons.alt_route_rounded, color: Color(0xFFB57A2A)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Trip active • ${session.status.replaceAll('_', ' ')}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: Colors.white70),
+            ],
           ),
         ),
       ),

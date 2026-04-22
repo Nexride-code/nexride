@@ -4,6 +4,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import 'map_screen.dart';
+import 'services/rider_active_trip_session_service.dart';
 import 'services/user_support_ticket_service.dart';
 
 const List<String> _kSupportCategories = <String>[
@@ -44,6 +46,8 @@ class _SupportCenterScreenState extends State<SupportCenterScreen> {
 
   final UserSupportTicketService _ticketService =
       const UserSupportTicketService();
+  final RiderActiveTripSessionService _activeTripSessionService =
+      RiderActiveTripSessionService.instance;
   int _reloadSeed = 0;
 
   Stream<List<UserSupportTicketSummary>> get _ticketsStream =>
@@ -51,6 +55,16 @@ class _SupportCenterScreenState extends State<SupportCenterScreen> {
         userId: widget.userId,
         createdByType: widget.createdByType,
       );
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(
+      _activeTripSessionService.restoreActiveTripForCurrentUser(
+        source: 'support_center.init',
+      ),
+    );
+  }
 
   Future<void> _openCreateTicket() async {
     final ticketDocumentId = await Navigator.of(context).push<String>(
@@ -162,6 +176,38 @@ class _SupportCenterScreenState extends State<SupportCenterScreen> {
 
               return Column(
                 children: <Widget>[
+                  ValueListenableBuilder<RiderActiveTripSession?>(
+                    valueListenable: _activeTripSessionService.sessionNotifier,
+                    builder: (
+                      BuildContext context,
+                      RiderActiveTripSession? session,
+                      Widget? _,
+                    ) {
+                      if (session == null ||
+                          !_activeTripSessionService.hasActiveTrip) {
+                        return const SizedBox.shrink();
+                      }
+                      debugPrint(
+                        '[RIDER_ACTIVE_TRIP_BANNER] source=support_center status=${session.status} rideId=${session.rideId}',
+                      );
+                      return Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                        child: _SupportTripBanner(
+                          status: session.status,
+                          onTap: () {
+                            debugPrint(
+                              '[RIDER_NAV_RETURN_TO_TRIP] source=support_center rideId=${session.rideId}',
+                            );
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const MapScreen(),
+                              ),
+                            );
+                          },
+                        ),
+                      );
+                    },
+                  ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
                     child: Container(
@@ -285,6 +331,48 @@ class _SupportCenterScreenState extends State<SupportCenterScreen> {
                 ],
               );
             },
+      ),
+    );
+  }
+}
+
+class _SupportTripBanner extends StatelessWidget {
+  const _SupportTripBanner({required this.status, required this.onTap});
+
+  final String status;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFF111111),
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: Ink(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFFB57A2A)),
+          ),
+          child: Row(
+            children: <Widget>[
+              const Icon(Icons.alt_route_rounded, color: Color(0xFFB57A2A)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Trip active • ${status.replaceAll('_', ' ')}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: Colors.white70),
+            ],
+          ),
+        ),
       ),
     );
   }

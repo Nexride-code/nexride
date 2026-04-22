@@ -19,6 +19,7 @@ import 'services/call_service.dart';
 import 'services/native_places_service.dart';
 import 'services/road_route_service.dart';
 import 'services/rider_alert_sound_service.dart';
+import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'services/trip_safety_service.dart';
@@ -80,6 +81,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final CallService _callService = CallService();
   final CallPermissions _callPermissions = const CallPermissions();
   final RiderAlertSoundService _alertSoundService = RiderAlertSoundService();
+  final RiderActiveTripSessionService _activeTripSessionService =
+      RiderActiveTripSessionService.instance;
   final ShareTripRtdbService _shareTripRtdbService = ShareTripRtdbService();
   final RiderTrustBootstrapService _bootstrapService =
       const RiderTrustBootstrapService();
@@ -590,7 +593,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     bool force = false,
   }) async {
-    final status = TripStateMachine.uiStatusFromSnapshot(rideData);
+    final status = _canonicalRiderUiStatus(rideData);
     final driverId = _valueAsText(rideData['driver_id']);
     _logRideFlow(
       '[RIDE_LIFECYCLE] cancel_no_drivers_enter rideId=$rideId force=$force '
@@ -820,7 +823,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return true;
   }
 
-  String _rideCancellationMessage(String cancelReason) {
+  String _rideCancellationMessage({
+    required String cancelReason,
+    required String terminalStatus,
+  }) {
+    if (terminalStatus == 'driver_cancelled') {
+      return 'Your driver cancelled this trip.';
+    }
+    if (terminalStatus == 'rider_cancelled') {
+      return 'You cancelled this trip.';
+    }
+    if (terminalStatus == 'expired') {
+      return 'This trip request expired. Please request again.';
+    }
     return switch (cancelReason.trim().toLowerCase()) {
       'no_drivers_available' => 'No drivers available right now.',
       'driver_cancelled' => 'Driver cancelled the ride.',
@@ -832,6 +847,35 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'driver_offline' || 'driver_status_offline' || 'driver_session_lost' =>
         'Ride cancelled because the driver went offline.',
       _ => 'Ride cancelled.',
+    };
+  }
+
+  String _canonicalRiderUiStatus(Map<String, dynamic> rideData) {
+    final canonical = TripStateMachine.canonicalStateFromSnapshot(rideData);
+    final rawTripState = _valueAsText(rideData['trip_state']).toLowerCase();
+    final rawStatus = _valueAsText(rideData['status']).toLowerCase();
+    final cancelReason = _valueAsText(rideData['cancel_reason']).toLowerCase();
+    if (rawTripState == 'driver_cancelled' || cancelReason == 'driver_cancelled') {
+      return 'driver_cancelled';
+    }
+    if (rawTripState == 'rider_cancelled' || cancelReason == 'rider_cancelled') {
+      return 'rider_cancelled';
+    }
+    if (rawTripState == 'expired' ||
+        rawStatus == 'expired' ||
+        cancelReason == 'expired') {
+      return 'expired';
+    }
+
+    return switch (canonical) {
+      TripLifecycleState.requested || TripLifecycleState.searchingDriver => 'searching',
+      TripLifecycleState.pendingDriverAction || TripLifecycleState.driverAccepted => 'accepted',
+      TripLifecycleState.driverArriving => 'arriving',
+      TripLifecycleState.driverArrived => 'arrived',
+      TripLifecycleState.tripStarted => 'on_trip',
+      TripLifecycleState.tripCompleted => 'completed',
+      TripLifecycleState.tripCancelled => 'cancelled',
+      _ => 'searching',
     };
   }
 
@@ -1091,9 +1135,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   bool get _hasActiveRide =>
       _currentRideId != null &&
-      _rideStatus != 'completed' &&
-      _rideStatus != 'cancelled' &&
-      _rideStatus != 'idle';
+      _effectiveRideStatus != 'completed' &&
+      _effectiveRideStatus != 'cancelled' &&
+      _effectiveRideStatus != 'driver_cancelled' &&
+      _effectiveRideStatus != 'rider_cancelled' &&
+      _effectiveRideStatus != 'expired' &&
+      _effectiveRideStatus != 'idle';
 
   /// Open-pool / driver-assignment phase (not yet an accepted on-trip ride for controls).
   bool get _isRiderRequestMatchingPhase {
@@ -1105,7 +1152,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     final canonical = TripStateMachine.canonicalStateFromValues(
       tripState: _currentRideSnapshot?['trip_state'],
-      status: _rideStatus,
+      status: _effectiveRideStatus,
     );
     return canonical == TripLifecycleState.requested ||
         canonical == TripLifecycleState.searchingDriver ||
@@ -1126,7 +1173,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'arriving',
         'arrived',
         'on_trip',
-      }.contains(_rideStatus);
+      }.contains(_effectiveRideStatus);
 
   String? get _currentRiderUid => FirebaseAuth.instance.currentUser?.uid.trim();
 
@@ -1204,7 +1251,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'arriving',
         'arrived',
         'on_trip',
-      }.contains(_rideStatus);
+      }.contains(_effectiveRideStatus);
 
   /// Cancel while preparing/writing, or after request is live but not yet matched.
   bool get _canShowCancelRequestButton => _showCancelRequestOnly;
@@ -1215,9 +1262,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool get _canShareTrip =>
       !_isRiderRequestMatchingPhase &&
       _currentRideId != null &&
-      _rideStatus != 'idle' &&
-      _rideStatus != 'cancelled' &&
-      _rideStatus != 'completed';
+      _effectiveRideStatus != 'idle' &&
+      _effectiveRideStatus != 'cancelled' &&
+      _effectiveRideStatus != 'driver_cancelled' &&
+      _effectiveRideStatus != 'rider_cancelled' &&
+      _effectiveRideStatus != 'expired' &&
+      _effectiveRideStatus != 'completed';
 
   String get _primaryRideButtonLabel {
     if (_isCancellingRide) {
@@ -1263,7 +1313,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _isSubmittingRideRequest || _isCreatingRide || _isCancellingRide;
 
   bool get _isPrimaryRideButtonPendingMatch =>
-      <String>{'pending_driver_action', 'assigned'}.contains(_rideStatus);
+      <String>{'pending_driver_action', 'assigned'}.contains(_effectiveRideStatus);
 
   bool get _isPrimaryRideButtonCancelMode =>
       _isCancellingRide || _showCancelRideOnly;
@@ -1271,8 +1321,20 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   String get _currentCanonicalRideState =>
       TripStateMachine.canonicalStateFromValues(
         tripState: _currentRideSnapshot?['trip_state'],
-        status: _rideStatus,
+        status: _effectiveRideStatus,
       );
+
+  String get _effectiveRideStatus {
+    final snapshot = _currentRideSnapshot;
+    if (snapshot != null && snapshot.isNotEmpty) {
+      return _canonicalRiderUiStatus(snapshot);
+    }
+    final session = _activeTripSessionService.currentSession;
+    if (session != null && session.status.trim().isNotEmpty) {
+      return session.status.trim().toLowerCase();
+    }
+    return _rideStatus;
+  }
 
   Color get _rideStateAccentColor {
     return switch (_currentCanonicalRideState) {
@@ -1952,6 +2014,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _startIncomingCallListener();
     unawaited(_resyncIncomingCallState());
     unawaited(_restoreActiveRideIfAny());
+    unawaited(
+      _activeTripSessionService.restoreActiveTripForCurrentUser(
+        source: 'map_screen.init',
+      ),
+    );
   }
 
   int _rideActivityTimestamp(Map<String, dynamic> rideData) {
@@ -2110,6 +2177,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _isRiderChatOpen = false;
         _applyRideStatus(status);
       });
+      await _activeTripSessionService.attachToRide(
+        rideId,
+        seedData: visibleRideData,
+        source: 'map_screen.restore',
+      );
 
       if (status == 'searching') {
         _scheduleRideSearchTimeout(rideId: rideId, rideData: rideData);
@@ -2166,6 +2238,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     final rideId = _activeRideInteractionId;
     if (rideId == null || rideId.isEmpty) {
+      _logRideFlow('[RIDER_NAV_RESUME_ACTIVE_TRIP] source=map_screen action=restore');
+      unawaited(
+        _activeTripSessionService.restoreActiveTripForCurrentUser(
+          source: 'map_screen.resume',
+        ),
+      );
       unawaited(_restoreActiveRideIfAny());
       return;
     }
@@ -4222,6 +4300,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return 'Calculating your route and fare';
     }
 
+    if (status == 'driver_cancelled') {
+      return 'Your driver cancelled this trip.';
+    }
+    if (status == 'rider_cancelled') {
+      return 'You cancelled this trip.';
+    }
+    if (status == 'expired') {
+      return 'This trip request expired.';
+    }
+
     final canonicalState = TripStateMachine.canonicalStateFromValues(
       tripState: _currentRideSnapshot?['trip_state'],
       status: status,
@@ -6034,6 +6122,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         if (!event.snapshot.exists) {
           _logRideFlow('ride listener missing node rideId=$rideId');
           if (_currentRideId == rideId || _activeRideListenerRideId == rideId) {
+            _activeTripSessionService.clearSession(
+              reason: 'ride_node_deleted',
+              source: 'map_listener',
+            );
             await _resetRideState(clearDestination: false);
           }
           return;
@@ -6043,6 +6135,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         if (raw is! Map) {
           _logRideFlow('ride listener invalid payload rideId=$rideId raw=$raw');
           if (_currentRideId == rideId || _activeRideListenerRideId == rideId) {
+            _activeTripSessionService.clearSession(
+              reason: 'ride_payload_invalid',
+              source: 'map_listener',
+            );
             await _resetRideState(clearDestination: false);
           }
           return;
@@ -6144,6 +6240,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _rideStatus = status;
         _currentRideSnapshot = visibleRideData;
         _driverData = nextDriverData;
+        _activeTripSessionService.updateFromRideSnapshot(
+          rideId,
+          visibleRideData,
+          source: 'map_listener',
+        );
         _startCallListener(rideId);
         _applyRideStatus(status);
 
@@ -6229,16 +6330,32 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               mounted) {
             Future<void>.microtask(() => _showRatingDialog(completedDriverId));
           }
-        } else if (status == 'cancelled') {
+        } else if (status == 'cancelled' ||
+            status == 'driver_cancelled' ||
+            status == 'rider_cancelled' ||
+            status == 'expired') {
           _logRideFlow('ride cancelled rideId=$rideId');
           _logRideFlow(
             '[MATCH_DEBUG][RIDE_CANCELLED] rideId=$rideId '
             'cancel_reason=${_valueAsText(data['cancel_reason'])}',
           );
           await _endCallForRideLifecycle(rideId: rideId);
+          if (_valueAsText(data['cancel_reason']) == 'driver_cancelled') {
+            _logRideFlow('[RIDER_DRIVER_CANCELLED] rideId=$rideId');
+          }
+          _logRideFlow('[RIDER_TERMINAL_STATE] rideId=$rideId status=cancelled');
+          _activeTripSessionService.clearSession(
+            reason: 'cancelled',
+            source: 'map_listener',
+          );
           await _resetRideState(clearDestination: true);
           final cancelReason = _valueAsText(data['cancel_reason']);
-          _showSnackBar(_rideCancellationMessage(cancelReason));
+          _showSnackBar(
+            _rideCancellationMessage(
+              cancelReason: cancelReason,
+              terminalStatus: status,
+            ),
+          );
         }
       },
       onError: (Object error) {
@@ -6561,6 +6678,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _polylines = <Polyline>{};
     _resetMarkersForIdleState();
     _pendingRideRequestSubmissionId = null;
+    _activeTripSessionService.clearSession(
+      reason: 'reset_ride_state',
+      source: 'map_screen',
+    );
 
     if (mounted) {
       setState(() {
@@ -8207,7 +8328,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Widget _bottomPanel() {
-    final statusText = _rideStatusLabel(_rideStatus);
+    final effectiveStatus = _effectiveRideStatus;
+    final statusText = _rideStatusLabel(effectiveStatus);
     final stopAddresses = _orderedDropOffAddresses();
     final showRouteSummary = _hasActiveRide || _hasRoutePreviewReady;
 
@@ -8253,7 +8375,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             const SizedBox(height: 12),
             _buildDriverAssignmentCard(),
           ],
-          if (_rideStatus == 'arrived') ...[
+          if (effectiveStatus == 'arrived') ...[
             const SizedBox(height: 12),
             _buildArrivalCountdownCard(),
           ],
@@ -8327,7 +8449,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final showSosButton = _rideStatus == 'on_trip';
+    final showSosButton = _effectiveRideStatus == 'on_trip';
 
     return Scaffold(
       body: Stack(

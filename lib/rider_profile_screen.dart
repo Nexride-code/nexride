@@ -8,6 +8,7 @@ import 'config/rider_app_config.dart';
 import 'payment_methods_screen.dart';
 import 'rider_verification_screen.dart';
 import 'services/payment_methods_service.dart';
+import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/user_support_ticket_service.dart';
 import 'support/payment_method_support.dart';
@@ -15,6 +16,7 @@ import 'support/rider_trust_support.dart';
 import 'support/startup_rtdb_support.dart';
 import 'support_center_screen.dart';
 import 'trip_history_screen.dart';
+import 'map_screen.dart';
 
 class RiderProfileScreen extends StatefulWidget {
   const RiderProfileScreen({
@@ -40,7 +42,8 @@ class RiderProfileScreen extends StatefulWidget {
   State<RiderProfileScreen> createState() => _RiderProfileScreenState();
 }
 
-class _RiderProfileScreenState extends State<RiderProfileScreen> {
+class _RiderProfileScreenState extends State<RiderProfileScreen>
+    with WidgetsBindingObserver {
   static const Color _gold = Color(0xFFB57A2A);
   static const Color _cream = Color(0xFFF7F2EA);
   static const Color _dark = Color(0xFF111111);
@@ -51,6 +54,8 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
       const PaymentMethodsService();
   final UserSupportTicketService _userSupportTicketService =
       const UserSupportTicketService();
+  final RiderActiveTripSessionService _activeTripSessionService =
+      RiderActiveTripSessionService.instance;
   final rtdb.DatabaseReference _rootRef = rtdb.FirebaseDatabase.instance.ref();
 
   late Map<String, dynamic> _userProfile;
@@ -67,6 +72,7 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _userProfile = Map<String, dynamic>.from(widget.initialUserProfile);
     _verification = buildRiderVerificationDefaults(widget.initialVerification);
     _riskFlags = buildRiderRiskFlagsDefaults(widget.initialRiskFlags);
@@ -78,6 +84,30 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
         widget.initialVerification.isEmpty &&
         widget.initialTrustSummary.isEmpty;
     unawaited(_loadProfile(showLoading: _loading));
+    unawaited(
+      _activeTripSessionService.restoreActiveTripForCurrentUser(
+        source: 'profile.init',
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      return;
+    }
+    debugPrint('[RIDER_NAV_RESUME_ACTIVE_TRIP] source=profile');
+    unawaited(
+      _activeTripSessionService.restoreActiveTripForCurrentUser(
+        source: 'profile.resume',
+      ),
+    );
   }
 
   Future<void> _loadProfile({bool showLoading = false}) async {
@@ -202,10 +232,16 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
+      isScrollControlled: true,
       builder: (BuildContext sheetContext) {
         return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
+          child: SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+              16,
+              24,
+              16,
+              16 + MediaQuery.of(sheetContext).viewInsets.bottom,
+            ),
             child: Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
@@ -356,41 +392,39 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
     required String value,
     Color? valueColor,
   }) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(22),
-          boxShadow: const <BoxShadow>[
-            BoxShadow(
-              color: Color(0x10000000),
-              blurRadius: 14,
-              offset: Offset(0, 8),
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const <BoxShadow>[
+          BoxShadow(
+            color: Color(0x10000000),
+            blurRadius: 14,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            value,
+            style: TextStyle(
+              color: valueColor ?? Colors.black87,
+              fontSize: 19,
+              fontWeight: FontWeight.w900,
             ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(
-              value,
-              style: TextStyle(
-                color: valueColor ?? Colors.black87,
-                fontSize: 19,
-                fontWeight: FontWeight.w900,
-              ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: Colors.black.withValues(alpha: 0.62),
+              height: 1.4,
             ),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                color: Colors.black.withValues(alpha: 0.62),
-                height: 1.4,
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -428,10 +462,24 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
             : RefreshIndicator(
                 color: _gold,
                 onRefresh: () => _loadProfile(),
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
-                  children: <Widget>[
-                    Container(
+                child: LayoutBuilder(
+                  builder: (BuildContext context, BoxConstraints constraints) {
+                    return SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: EdgeInsets.fromLTRB(
+                        18,
+                        18,
+                        18,
+                        28 + MediaQuery.of(context).padding.bottom,
+                      ),
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: constraints.maxHeight,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            Container(
                       padding: const EdgeInsets.all(22),
                       decoration: BoxDecoration(
                         color: _dark,
@@ -494,24 +542,56 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
                         ],
                       ),
                     ),
-                    const SizedBox(height: 18),
-                    Row(
-                      children: <Widget>[
-                        _buildMetricCard(
-                          label: 'User Verification',
-                          value: verificationLabel,
-                          valueColor: verificationColor,
-                        ),
-                        const SizedBox(width: 12),
-                        _buildMetricCard(
-                          label: ratingCount <= 0
-                              ? 'Rating baseline'
-                              : '$ratingCount driver ratings',
-                          value: rating.toStringAsFixed(1),
-                          valueColor: _gold,
-                        ),
-                      ],
-                    ),
+                            const SizedBox(height: 18),
+                            LayoutBuilder(
+                              builder: (
+                                BuildContext context,
+                                BoxConstraints metricConstraints,
+                              ) {
+                                final stackMetrics =
+                                    metricConstraints.maxWidth < 360;
+                                if (stackMetrics) {
+                                  return Column(
+                                    children: <Widget>[
+                                      _buildMetricCard(
+                                        label: 'User Verification',
+                                        value: verificationLabel,
+                                        valueColor: verificationColor,
+                                      ),
+                                      const SizedBox(height: 12),
+                                      _buildMetricCard(
+                                        label: ratingCount <= 0
+                                            ? 'Rating baseline'
+                                            : '$ratingCount driver ratings',
+                                        value: rating.toStringAsFixed(1),
+                                        valueColor: _gold,
+                                      ),
+                                    ],
+                                  );
+                                }
+                                return Row(
+                                  children: <Widget>[
+                                    Expanded(
+                                      child: _buildMetricCard(
+                                        label: 'User Verification',
+                                        value: verificationLabel,
+                                        valueColor: verificationColor,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: _buildMetricCard(
+                                        label: ratingCount <= 0
+                                            ? 'Rating baseline'
+                                            : '$ratingCount driver ratings',
+                                        value: rating.toStringAsFixed(1),
+                                        valueColor: _gold,
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
                     if (RiderFeatureFlags.showTrustWarnings) ...<Widget>[
                       const SizedBox(height: 14),
                       Container(
@@ -567,6 +647,45 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
                       ),
                     ],
                     const SizedBox(height: 18),
+                    ValueListenableBuilder<RiderActiveTripSession?>(
+                      valueListenable: _activeTripSessionService.sessionNotifier,
+                      builder: (
+                        BuildContext context,
+                        RiderActiveTripSession? session,
+                        Widget? _,
+                      ) {
+                        if (session == null ||
+                            !_activeTripSessionService.hasActiveTrip) {
+                          return const SizedBox.shrink();
+                        }
+                        debugPrint(
+                          '[RIDER_ACTIVE_TRIP_BANNER] source=profile status=${session.status} rideId=${session.rideId}',
+                        );
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _ProfileActionTile(
+                            icon: Icons.alt_route_rounded,
+                            title: 'Trip active',
+                            subtitle:
+                                'Status: ${session.status.replaceAll('_', ' ')}. Tap to return to your active trip.',
+                            trailing: const _ProfileStatusChip(
+                              label: 'Live',
+                              color: Color(0xFF198754),
+                            ),
+                            onTap: () {
+                              debugPrint(
+                                '[RIDER_NAV_RETURN_TO_TRIP] source=profile rideId=${session.rideId}',
+                              );
+                              Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => const MapScreen(),
+                                ),
+                              );
+                            },
+                          ),
+                        );
+                      },
+                    ),
                     Text(
                       'Account',
                       style: TextStyle(
@@ -649,7 +768,11 @@ class _RiderProfileScreenState extends State<RiderProfileScreen> {
                         ],
                       ),
                     ],
-                  ],
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
       ),
@@ -674,6 +797,8 @@ class _ProfileActionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final stackTrailing = width < 365;
     return Material(
       color: Colors.white,
       borderRadius: BorderRadius.circular(24),
@@ -692,50 +817,72 @@ class _ProfileActionTile extends StatelessWidget {
               ),
             ],
           ),
-          child: Row(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: _RiderProfileScreenState._gold.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Icon(icon, color: _RiderProfileScreenState._gold),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w900,
-                        color: Colors.black87,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: _RiderProfileScreenState._gold.withValues(
+                        alpha: 0.12,
                       ),
+                      borderRadius: BorderRadius.circular(16),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        color: Colors.black.withValues(alpha: 0.64),
-                        height: 1.45,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              trailing ??
-                  Icon(
-                    onTap == null
-                        ? Icons.info_outline_rounded
-                        : Icons.chevron_right_rounded,
-                    color: Colors.black45,
+                    child: Icon(icon, color: _RiderProfileScreenState._gold),
                   ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          title,
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w900,
+                            color: Colors.black87,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          subtitle,
+                          style: TextStyle(
+                            color: Colors.black.withValues(alpha: 0.64),
+                            height: 1.45,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (!stackTrailing) ...<Widget>[
+                    const SizedBox(width: 12),
+                    trailing ??
+                        Icon(
+                          onTap == null
+                              ? Icons.info_outline_rounded
+                              : Icons.chevron_right_rounded,
+                          color: Colors.black45,
+                        ),
+                  ],
+                ],
+              ),
+              if (stackTrailing) ...<Widget>[
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: trailing ??
+                      Icon(
+                        onTap == null
+                            ? Icons.info_outline_rounded
+                            : Icons.chevron_right_rounded,
+                        color: Colors.black45,
+                      ),
+                ),
+              ],
             ],
           ),
         ),
