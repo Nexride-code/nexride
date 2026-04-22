@@ -7,6 +7,7 @@ import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -155,6 +156,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   int _riderUnreadChatCount = 0;
   /// Missed incoming voice call (this user was receiver) — cleared when chat/call is opened.
   bool _riderMissedCallNotice = false;
+  DateTime? _lastRiderChatNoticeAt;
   int _routeDeviationStrikeCount = 0;
   String? _pendingRideRequestSubmissionId;
 
@@ -4718,9 +4720,36 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Future<void> _playChatNotificationSound() async {
     try {
       await _alertSoundService.playChatAlert();
+      await HapticFeedback.lightImpact();
     } catch (error) {
       _logRideFlow('chat notification sound failed error=$error');
     }
+  }
+
+  void _showRiderIncomingChatNotice() {
+    final now = DateTime.now();
+    if (_lastRiderChatNoticeAt != null &&
+        now.difference(_lastRiderChatNoticeAt!) < const Duration(seconds: 2)) {
+      return;
+    }
+    _lastRiderChatNoticeAt = now;
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) {
+      return;
+    }
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: const Text('New message from driver'),
+        action: SnackBarAction(
+          label: 'Open',
+          onPressed: _openChat,
+        ),
+      ),
+    );
   }
 
   Future<String> _addressFromCoordinates(LatLng point) async {
@@ -7992,7 +8021,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       if (_hasHydratedRiderChatMessages &&
           receivedNewDriverMessage &&
           mounted) {
-        safeShowSnackBar(context, 'New message from driver');
+        _showRiderIncomingChatNotice();
       }
     }
 
