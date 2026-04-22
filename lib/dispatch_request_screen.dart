@@ -12,12 +12,14 @@ import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'config/rider_app_config.dart';
+import 'config/rtdb_ride_request_contract.dart';
 import 'services/dispatch_photo_upload_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'services/trip_safety_service.dart';
 import 'service_type.dart';
 import 'support/rider_fare_support.dart';
+import 'support/rtdb_flow_debug_log.dart';
 import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
 
@@ -1108,6 +1110,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       if (city == null) {
         throw const FormatException('unsupported_city');
       }
+      final dispatchMarket = RiderServiceAreaConfig.marketForCity(city).city;
 
       final requestRef = _rideRequestsRef.push();
       final requestId = requestRef.key;
@@ -1145,25 +1148,25 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
           1000;
       final fareBreakdown = calculateRiderFare(
         serviceKey: RiderServiceType.dispatchDelivery.key,
-        city: city,
+        city: dispatchMarket,
         distanceKm: distanceKm,
       );
       final pickupArea = await _resolveAreaFromPoint(
         pickup.lat,
         pickup.lng,
-        city: city,
+        city: dispatchMarket,
         addressHint: pickupAddress,
       );
       final destinationArea = await _resolveAreaFromPoint(
         dropoff.lat,
         dropoff.lng,
-        city: city,
+        city: dispatchMarket,
         addressHint: dropoffAddress,
       );
-      final rideScope = _buildServiceAreaFields(city: city, area: pickupArea);
-      final pickupScope = _buildServiceAreaFields(city: city, area: pickupArea);
+      final rideScope = _buildServiceAreaFields(city: dispatchMarket, area: pickupArea);
+      final pickupScope = _buildServiceAreaFields(city: dispatchMarket, area: pickupArea);
       final destinationScope = _buildServiceAreaFields(
-        city: city,
+        city: dispatchMarket,
         area: destinationArea,
       );
       final packagePhotoUrl = uploadedPackagePhoto?.fileUrl ?? '';
@@ -1185,12 +1188,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
       final payload = <String, dynamic>{
         'service_type': RiderServiceType.dispatchDelivery.key,
+        RtdbRideRequestFields.rideId: requestId,
         'rider_id': user.uid,
         'driver_id': 'waiting',
         'status': 'searching',
         'trip_state': TripLifecycleState.searchingDriver,
         'state_machine_version': TripStateMachine.schemaVersion,
-        'market': city,
+        'market': dispatchMarket,
+        RtdbRideRequestFields.marketPool: dispatchMarket,
         'country': rideScope['country'],
         'country_code': rideScope['country_code'],
         'area': rideScope['area'],
@@ -1228,6 +1233,8 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'fare': fareBreakdown.totalFare,
         'distance_km': fareBreakdown.distanceKm,
         'duration_min': fareBreakdown.durationMin,
+        RtdbRideRequestFields.etaMin: fareBreakdown.durationMin,
+        RtdbRideRequestFields.paymentStatus: 'not_required',
         'fare_breakdown': fareBreakdown.toMap(),
         'rider_trust_snapshot': <String, dynamic>{
           'verificationStatus':
@@ -1248,7 +1255,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'route_basis': <String, dynamic>{
           'country': rideScope['country'],
           'country_code': rideScope['country_code'],
-          'market': city,
+          'market': dispatchMarket,
           'area': rideScope['area'],
           'zone': rideScope['zone'],
           'community': rideScope['community'],
@@ -1277,6 +1284,9 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'request_expires_at':
             DateTime.now().millisecondsSinceEpoch +
             _searchTimeoutDuration.inMilliseconds,
+        RtdbRideRequestFields.expiresAt:
+            DateTime.now().millisecondsSinceEpoch +
+            _searchTimeoutDuration.inMilliseconds,
         'packagePhotoUrl': packagePhotoUrl,
         'packagePhotoSubmittedAt': packagePhotoSubmittedAt,
         'deliveryProofPhotoUrl': '',
@@ -1287,6 +1297,10 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'dispatch_details': dispatchDetails,
       };
 
+      rtdbFlowLog(
+        '[NEXRIDE_RIDER_RTDB][DISPATCH_CREATE]',
+        'requestId=$requestId uid=${user.uid} market_pool=$dispatchMarket',
+      );
       await requestRef.set(payload);
       debugPrint('[Dispatch] request created requestId=$requestId');
       await _tripSafetyService.registerRideRequest(

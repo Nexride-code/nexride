@@ -13,6 +13,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'config/rider_app_config.dart';
+import 'config/rtdb_ride_request_contract.dart';
 import 'services/call_permissions.dart';
 import 'services/call_service.dart';
 import 'services/native_places_service.dart';
@@ -26,6 +27,7 @@ import 'share_trip_rtdb.dart';
 import 'support/rider_fare_support.dart';
 import 'support/ride_chat_support.dart';
 import 'support/rider_trust_support.dart';
+import 'support/rtdb_flow_debug_log.dart';
 import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
 import 'widgets/native_places_autocomplete_field.dart';
@@ -298,7 +300,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
-  /// Single-line log for rider → RTDB write (filter `[RIDER_REQ_WRITE]`); must match driver `orderByChild('market')`.
+  /// Single-line log for rider → RTDB write (filter `[RIDER_REQ_WRITE]`); must match driver `orderByChild('market_pool')`.
   void _logRiderReqWrite(String rideId, Map<String, dynamic> payload) {
     debugPrint(
       '[RIDER_REQ_WRITE] rideId=$rideId city=${payload['city']} market=${payload['market']} '
@@ -1425,7 +1427,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   String _rideRequestErrorMessage(Object error) {
     if (isPermissionDeniedError(error)) {
-      return 'Permission denied while creating your ride request.';
+      if (kDebugMode) {
+        rtdbFlowLog(
+          '[NEXRIDE_RIDER_RTDB][PERMISSION]',
+          'ride_request_create denied raw=$error',
+        );
+      }
+      return 'We could not send your ride request. Please sign in again, then retry. '
+          'If this keeps happening, contact support.';
     }
     if (error is TimeoutException) {
       return 'We could not confirm your ride request in time. Please try again.';
@@ -5447,7 +5456,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
-    final user = FirebaseAuth.instance.currentUser!;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _logRideFlow('createRideRequest blocked reason=no_auth_user');
+      rtdbFlowLog(
+        '[NEXRIDE_RIDER_RTDB][AUTH]',
+        'createRideRequest blocked reason=no_auth_user',
+      );
+      _showSnackBar('Please sign in before requesting a ride.');
+      return;
+    }
 
     setState(() {
       _isCreatingRide = true;
@@ -5462,7 +5480,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'REQUEST RIDE validation passed city=$city routeReady=$_hasRoutePreviewReady fare=$_fare distanceKm=$_distanceKm durationMin=$_estimatedDurationMin',
       );
       _logRideFlow('request validation passed city=$city');
-      // Canonical slug must match driver `orderByChild('market').equalTo(...)` (RiderServiceAreaConfig).
+      // Canonical slug must match driver `orderByChild('market_pool').equalTo(...)` (RiderServiceAreaConfig).
       final dispatchMarket = RiderServiceAreaConfig.marketForCity(city).city;
       if (dispatchMarket != city) {
         _logRideFlow(
@@ -5554,6 +5572,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
       final payload = <String, dynamic>{
         'service_type': RiderServiceType.ride.key,
+        RtdbRideRequestFields.rideId: rideId,
         'rider_id': user.uid,
         'driver_id': 'waiting',
         // Keep rider discovery seed aligned with driver query expectations.
@@ -5561,7 +5580,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'trip_state': TripLifecycleState.searchingDriver,
         'state_machine_version': TripStateMachine.schemaVersion,
         'market': dispatchMarket,
-        // Same canonical slug as [market]; driver discovery queries market only.
+        RtdbRideRequestFields.marketPool: dispatchMarket,
+        // Same canonical slug as [market]; driver discovery uses [market_pool].
         'city': dispatchMarket,
         'country': rideScope['country'],
         'country_code': rideScope['country_code'],
@@ -5588,6 +5608,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'fare': fareBreakdown.totalFare,
         'distance_km': fareBreakdown.distanceKm,
         'duration_min': fareBreakdown.durationMin,
+        RtdbRideRequestFields.etaMin: fareBreakdown.durationMin,
+        RtdbRideRequestFields.paymentStatus: RiderFeatureFlags.disableCashTripPayments
+            ? 'pending'
+            : 'not_required',
         'fare_breakdown': fareBreakdown.toMap(),
         'rider_trust_snapshot': <String, dynamic>{
           'verificationStatus':
@@ -5667,7 +5691,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         ...searchTransition,
         'search_timeout_at': searchTimeoutAt,
         'request_expires_at': searchTimeoutAt,
+        RtdbRideRequestFields.expiresAt: searchTimeoutAt,
       };
+      rtdbFlowLog(
+        '[NEXRIDE_RIDER_RTDB][CREATE_START]',
+        'rideId=$rideId uid=${user.uid} market=$dispatchMarket market_pool=$dispatchMarket',
+      );
       _logRideFlow('createRideRequest before write path=ride_requests/$rideId');
       _logRideFlow('request payload prepared rideId=$rideId');
       _logRideFlow('createRideRequest before write payload=$searchingPayload');
@@ -5680,7 +5709,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRideFlow(
         '[MATCH_DEBUG][RIDER_WRITE] rideId=$rideId path=ride_requests/$rideId '
         'status=${searchingPayload['status']} trip_state=${searchingPayload['trip_state']} '
-        'market=${searchingPayload['market']}',
+        'market=${searchingPayload['market']} market_pool=${searchingPayload['market_pool']}',
       );
       _logRideFlow('RTDB write started path=ride_requests/$rideId');
       if (_rideRequestUserAborted) {
