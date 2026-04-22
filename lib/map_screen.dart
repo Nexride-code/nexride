@@ -5881,11 +5881,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         '[NEXRIDE_RIDER_RTDB][CREATE_START]',
         'rideId=$rideId uid=${user.uid} market=$dispatchMarket market_pool=$dispatchMarket',
       );
+      _logRideFlow(
+        '[RIDER_CREATE_START] rideId=$rideId rider_id=${user.uid} '
+        'market=$dispatchMarket status=${searchingPayload[RtdbRideRequestFields.status]} '
+        'trip_state=${searchingPayload[RtdbRideRequestFields.tripState]}',
+      );
       _logRideFlow('createRideRequest before write path=ride_requests/$rideId');
       _logRideFlow('request payload prepared rideId=$rideId');
       _logRideFlow('createRideRequest before write payload=$searchingPayload');
       _logRideFlow(
         'REQUEST RIDE payload rideId=$rideId payload=$searchingPayload',
+      );
+      _logRideFlow(
+        '[RIDER_CREATE_PAYLOAD] rideId=$rideId payload=$searchingPayload',
       );
       _logRideFlow(
         'REQUEST RIDE RTDB write started rideId=$rideId path=ride_requests/$rideId',
@@ -5955,6 +5963,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         '[MATCH_DEBUG][RIDER_WRITE_OK] rideId=$rideId path=ride_requests/$rideId '
         'status=${(committedRideData ?? searchingPayload)['status']} '
         'trip_state=${(committedRideData ?? searchingPayload)['trip_state']}',
+      );
+      _logRideFlow(
+        '[RIDER_CREATE_OK] rideId=$rideId status=${(committedRideData ?? searchingPayload)[RtdbRideRequestFields.status]} '
+        'trip_state=${(committedRideData ?? searchingPayload)[RtdbRideRequestFields.tripState]} '
+        'market=${(committedRideData ?? searchingPayload)[RtdbRideRequestFields.market]}',
       );
       _logRideFlow(
         'REQUEST RIDE driver matching started rideId=$rideId searchTimeoutAt=$searchTimeoutAt',
@@ -6069,6 +6082,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       _logRideFlow('createRideRequest write failure error=$error');
       _logRideFlow('REQUEST RIDE caught exception error=$error');
+      _logRideFlow(
+        '[RIDER_CREATE_FAIL] rideId=${rideId ?? 'unknown'} error=$error',
+      );
       debugPrintStack(
         label: '[RiderRTDB] REQUEST RIDE exception stack',
         stackTrace: stackTrace,
