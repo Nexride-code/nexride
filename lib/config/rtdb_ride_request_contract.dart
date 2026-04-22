@@ -18,12 +18,18 @@ abstract final class RtdbRideRequestFields {
   static const tripState = 'trip_state';
   static const paymentMethod = 'payment_method';
   static const paymentStatus = 'payment_status';
+  static const settlementStatus = 'settlement_status';
+  static const supportStatus = 'support_status';
   static const pickup = 'pickup';
-  static const dropoff = 'destination';
+  static const dropoff = 'dropoff';
   static const fare = 'fare';
   static const distanceKm = 'distance_km';
   static const etaMin = 'eta_min';
   static const createdAt = 'created_at';
   static const updatedAt = 'updated_at';
+  static const acceptedAt = 'accepted_at';
+  static const cancelledAt = 'cancelled_at';
+  static const completedAt = 'completed_at';
+  static const cancelReason = 'cancel_reason';
   static const expiresAt = 'expires_at';
 }

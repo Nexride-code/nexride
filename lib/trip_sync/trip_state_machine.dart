@@ -74,6 +74,7 @@ class TripStateMachine {
         },
         TripLifecycleState.searchingDriver: <String>{
           TripLifecycleState.pendingDriverAction,
+          TripLifecycleState.driverAccepted,
           TripLifecycleState.tripCancelled,
         },
         TripLifecycleState.pendingDriverAction: <String>{

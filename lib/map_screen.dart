@@ -306,6 +306,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       '[RIDER_REQ_WRITE] rideId=$rideId city=${payload['city']} market=${payload['market']} '
       'status=${payload['status']} trip_state=${payload['trip_state']}',
     );
+    debugPrint(
+      '[RIDER_CREATE] rideId=$rideId rider_id=${payload['rider_id']} '
+      'status=${payload['status']} trip_state=${payload['trip_state']} '
+      'market=${payload['market']} market_pool=${payload['market_pool']}',
+    );
   }
 
   void _logRiderMap(String message) {
@@ -314,6 +319,77 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   void _logRideCall(String message) {
     debugPrint('[RideCall] $message');
+  }
+
+  Future<void> _syncRideOperationalViews({
+    required String rideId,
+    required Map<String, dynamic> rideData,
+    required String lastEvent,
+  }) async {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    final riderId = _valueAsText(rideData['rider_id']);
+    final driverId = _valueAsText(rideData['driver_id']);
+    final fallbackStatus = TripStateMachine.uiStatusFromSnapshot(rideData);
+    final fallbackTripState = TripStateMachine.canonicalStateFromSnapshot(rideData);
+    final updates = <String, dynamic>{
+      'admin_rides/$normalizedRideId/summary/ride_id': normalizedRideId,
+      'admin_rides/$normalizedRideId/summary/rider_id': riderId,
+      'admin_rides/$normalizedRideId/summary/driver_id': driverId,
+      'admin_rides/$normalizedRideId/summary/market': _valueAsText(rideData['market']),
+      'admin_rides/$normalizedRideId/summary/status': _valueAsText(rideData['status']).isEmpty
+          ? fallbackStatus
+          : _valueAsText(rideData['status']),
+      'admin_rides/$normalizedRideId/summary/trip_state': _valueAsText(rideData['trip_state']).isEmpty
+          ? fallbackTripState
+          : _valueAsText(rideData['trip_state']),
+      'admin_rides/$normalizedRideId/summary/payment_method': _valueAsText(rideData['payment_method']),
+      'admin_rides/$normalizedRideId/summary/payment_status': _valueAsText(rideData['payment_status']),
+      'admin_rides/$normalizedRideId/summary/settlement_status': _valueAsText(rideData['settlement_status']).isEmpty
+          ? 'pending'
+          : _valueAsText(rideData['settlement_status']),
+      'admin_rides/$normalizedRideId/summary/support_status': _valueAsText(rideData['support_status']).isEmpty
+          ? 'normal'
+          : _valueAsText(rideData['support_status']),
+      'admin_rides/$normalizedRideId/summary/created_at': rideData['created_at'],
+      'admin_rides/$normalizedRideId/summary/accepted_at': rideData['accepted_at'],
+      'admin_rides/$normalizedRideId/summary/cancelled_at': rideData['cancelled_at'],
+      'admin_rides/$normalizedRideId/summary/completed_at': rideData['completed_at'],
+      'admin_rides/$normalizedRideId/summary/cancel_reason': _valueAsText(rideData['cancel_reason']),
+      'admin_rides/$normalizedRideId/summary/updated_at': rtdb.ServerValue.timestamp,
+      'support_queue/$normalizedRideId/ride_id': normalizedRideId,
+      'support_queue/$normalizedRideId/rider_id': riderId,
+      'support_queue/$normalizedRideId/driver_id': driverId,
+      'support_queue/$normalizedRideId/status': _valueAsText(rideData['status']).isEmpty
+          ? fallbackStatus
+          : _valueAsText(rideData['status']),
+      'support_queue/$normalizedRideId/trip_state': _valueAsText(rideData['trip_state']).isEmpty
+          ? fallbackTripState
+          : _valueAsText(rideData['trip_state']),
+      'support_queue/$normalizedRideId/payment_status': _valueAsText(rideData['payment_status']),
+      'support_queue/$normalizedRideId/settlement_status': _valueAsText(rideData['settlement_status']).isEmpty
+          ? 'pending'
+          : _valueAsText(rideData['settlement_status']),
+      'support_queue/$normalizedRideId/support_status': _valueAsText(rideData['support_status']).isEmpty
+          ? 'normal'
+          : _valueAsText(rideData['support_status']),
+      'support_queue/$normalizedRideId/created_at': rideData['created_at'],
+      'support_queue/$normalizedRideId/accepted_at': rideData['accepted_at'],
+      'support_queue/$normalizedRideId/cancelled_at': rideData['cancelled_at'],
+      'support_queue/$normalizedRideId/completed_at': rideData['completed_at'],
+      'support_queue/$normalizedRideId/cancel_reason': _valueAsText(rideData['cancel_reason']),
+      'support_queue/$normalizedRideId/last_event': lastEvent,
+      'support_queue/$normalizedRideId/updated_at': rtdb.ServerValue.timestamp,
+    };
+    try {
+      await _rideRequestsRef.root.update(updates);
+    } catch (error) {
+      _logRideFlow(
+        '[OPS_MIRROR] sync_failed rideId=$normalizedRideId last_event=$lastEvent error=$error',
+      );
+    }
   }
 
   void _showSnackBar(String message) {
@@ -548,6 +624,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       ),
     );
     await _rideRequestsRef.child(rideId).update(updates);
+    await _syncRideOperationalViews(
+      rideId: rideId,
+      rideData: <String, dynamic>{...rideData, ...updates},
+      lastEvent: 'system_search_timeout',
+    );
     await _restoreDriverAvailabilityIfRideMatches(
       rideId: rideId,
       driverId: driverId,
@@ -1685,6 +1766,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     await _rideRequestsRef.child(rideId).update(updates).timeout(
           const Duration(seconds: 18),
         );
+    await _syncRideOperationalViews(
+      rideId: rideId,
+      rideData: <String, dynamic>{...currentRide, ...updates},
+      lastEvent: 'rider_cancel',
+    );
     _logRideFlow(
       '[RIDE_LIFECYCLE] rider_cancel_rtdb rideId=$rideId source=$transitionSource '
       'cancelMeta=$cancelMetadataSource trip_state_before=${currentRide['trip_state']} '
@@ -5609,9 +5695,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'distance_km': fareBreakdown.distanceKm,
         'duration_min': fareBreakdown.durationMin,
         RtdbRideRequestFields.etaMin: fareBreakdown.durationMin,
+        'dropoff': destinationPayload,
+        'payment_method': RiderFeatureFlags.disableCashTripPayments
+            ? _riderTripPaymentMethod
+            : 'cash',
         RtdbRideRequestFields.paymentStatus: RiderFeatureFlags.disableCashTripPayments
             ? 'pending'
             : 'not_required',
+        'settlement_status': 'pending',
+        'support_status': 'normal',
+        'accepted_at': null,
+        'cancelled_at': null,
+        'completed_at': null,
+        'cancel_reason': '',
         'fare_breakdown': fareBreakdown.toMap(),
         'rider_trust_snapshot': <String, dynamic>{
           'verificationStatus':
@@ -5729,6 +5825,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         rideRef: rideRef,
         rideId: rideId,
         payload: searchingPayload,
+      );
+      await _syncRideOperationalViews(
+        rideId: rideId,
+        rideData: Map<String, dynamic>.from(committedRideData ?? searchingPayload),
+        lastEvent: 'rider_create',
       );
       _logDiscoveryRideRequestPayload(
         'after_write',
@@ -6016,6 +6117,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'visibleStatus=$status trip_state=${data['trip_state']} '
           'driver_id=${data['driver_id']}',
         );
+        _logRideFlow(
+          '[RIDER_LISTENER] rideId=$rideId raw_status=${data['status']} '
+          'trip_state=${data['trip_state']} visible_status=$status '
+          'driver_id=${data['driver_id']}',
+        );
         if (previousStatus != status) {
           _logRideFlow(
             '[RIDE_LIFECYCLE] status_transition rideId=$rideId '
@@ -6027,6 +6133,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             'from=$previousStatus to=$status '
             'trip_state=${visibleRideData['trip_state']} '
             'raw_status=${data['status']} driver_id=${data['driver_id']}',
+          );
+          _logRideFlow(
+            '[RIDE_STATUS_CHANGE] rideId=$rideId from=$previousStatus to=$status '
+            'trip_state=${visibleRideData['trip_state']} driver_id=${data['driver_id']}',
           );
         }
 

@@ -1234,7 +1234,19 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'distance_km': fareBreakdown.distanceKm,
         'duration_min': fareBreakdown.durationMin,
         RtdbRideRequestFields.etaMin: fareBreakdown.durationMin,
+        'dropoff': <String, dynamic>{
+          'lat': dropoff.lat,
+          'lng': dropoff.lng,
+          ...destinationScope,
+        },
+        'payment_method': 'cash',
         RtdbRideRequestFields.paymentStatus: 'not_required',
+        'settlement_status': 'pending',
+        'support_status': 'normal',
+        'accepted_at': null,
+        'cancelled_at': null,
+        'completed_at': null,
+        'cancel_reason': '',
         'fare_breakdown': fareBreakdown.toMap(),
         'rider_trust_snapshot': <String, dynamic>{
           'verificationStatus':
@@ -1301,7 +1313,65 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         '[NEXRIDE_RIDER_RTDB][DISPATCH_CREATE]',
         'requestId=$requestId uid=${user.uid} market_pool=$dispatchMarket',
       );
+      debugPrint(
+        '[RIDER_CREATE] rideId=$requestId rider_id=${user.uid} '
+        'status=${payload['status']} trip_state=${payload['trip_state']} '
+        'market=${payload['market']} market_pool=${payload[RtdbRideRequestFields.marketPool]}',
+      );
       await requestRef.set(payload);
+      try {
+        final payloadDriverId = payload['driver_id']?.toString().trim() ?? '';
+        final payloadMarket = payload['market']?.toString().trim() ?? '';
+        final payloadStatus = payload['status']?.toString().trim() ?? '';
+        final payloadTripState = payload['trip_state']?.toString().trim() ?? '';
+        final payloadPaymentMethod =
+            payload['payment_method']?.toString().trim() ?? '';
+        final payloadPaymentStatus =
+            payload['payment_status']?.toString().trim() ?? '';
+        final payloadSettlementStatus =
+            payload['settlement_status']?.toString().trim() ?? '';
+        final payloadSupportStatus =
+            payload['support_status']?.toString().trim() ?? '';
+        final payloadCancelReason =
+            payload['cancel_reason']?.toString().trim() ?? '';
+        await requestRef.root.update(<String, dynamic>{
+          'admin_rides/$requestId/summary/ride_id': requestId,
+          'admin_rides/$requestId/summary/rider_id': user.uid,
+          'admin_rides/$requestId/summary/driver_id': payloadDriverId,
+          'admin_rides/$requestId/summary/market': payloadMarket,
+          'admin_rides/$requestId/summary/status': payloadStatus,
+          'admin_rides/$requestId/summary/trip_state': payloadTripState,
+          'admin_rides/$requestId/summary/payment_method': payloadPaymentMethod,
+          'admin_rides/$requestId/summary/payment_status': payloadPaymentStatus,
+          'admin_rides/$requestId/summary/settlement_status': payloadSettlementStatus,
+          'admin_rides/$requestId/summary/support_status': payloadSupportStatus,
+          'admin_rides/$requestId/summary/created_at': payload['created_at'],
+          'admin_rides/$requestId/summary/accepted_at': payload['accepted_at'],
+          'admin_rides/$requestId/summary/cancelled_at': payload['cancelled_at'],
+          'admin_rides/$requestId/summary/completed_at': payload['completed_at'],
+          'admin_rides/$requestId/summary/cancel_reason': payloadCancelReason,
+          'admin_rides/$requestId/summary/updated_at': rtdb.ServerValue.timestamp,
+          'support_queue/$requestId/ride_id': requestId,
+          'support_queue/$requestId/rider_id': user.uid,
+          'support_queue/$requestId/driver_id': payloadDriverId,
+          'support_queue/$requestId/status': payloadStatus,
+          'support_queue/$requestId/trip_state': payloadTripState,
+          'support_queue/$requestId/payment_status': payloadPaymentStatus,
+          'support_queue/$requestId/settlement_status': payloadSettlementStatus,
+          'support_queue/$requestId/support_status': payloadSupportStatus,
+          'support_queue/$requestId/created_at': payload['created_at'],
+          'support_queue/$requestId/accepted_at': payload['accepted_at'],
+          'support_queue/$requestId/cancelled_at': payload['cancelled_at'],
+          'support_queue/$requestId/completed_at': payload['completed_at'],
+          'support_queue/$requestId/cancel_reason': payloadCancelReason,
+          'support_queue/$requestId/last_event': 'rider_create_dispatch',
+          'support_queue/$requestId/updated_at': rtdb.ServerValue.timestamp,
+        });
+      } catch (error) {
+        debugPrint(
+          '[OPS_MIRROR] dispatch_create sync_failed rideId=$requestId error=$error',
+        );
+      }
       debugPrint('[Dispatch] request created requestId=$requestId');
       await _tripSafetyService.registerRideRequest(
         rideId: requestId,
