@@ -43,6 +43,8 @@ class RideChatMessage {
     }
     return 'Sent';
   }
+
+  bool get hasImage => imageUrl.trim().isNotEmpty;
 }
 
 class RideChatSnapshot {

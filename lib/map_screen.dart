@@ -11,12 +11,15 @@ import 'package:flutter/services.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'config/rider_app_config.dart';
 import 'config/rtdb_ride_request_contract.dart';
 import 'services/call_permissions.dart';
 import 'services/call_service.dart';
+import 'services/dispatch_photo_upload_service.dart';
 import 'services/native_places_service.dart';
 import 'services/road_route_service.dart';
 import 'services/rider_alert_sound_service.dart';
@@ -93,6 +96,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       TripSafetyTelemetryService();
   final NativePlacesService _nativePlacesService = NativePlacesService.instance;
   final RoadRouteService _roadRouteService = RoadRouteService();
+  final ImagePicker _riderChatImagePicker = ImagePicker();
+  final DispatchPhotoUploadService _dispatchPhotoUploadService =
+      const DispatchPhotoUploadService();
   final ValueNotifier<int> _mapLayerVersion = ValueNotifier<int>(0);
   final TextEditingController _pickupController = TextEditingController();
   final TextEditingController _destinationController = TextEditingController();
@@ -179,6 +185,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final Map<String, RideChatMessage> _riderChatMessagesById =
       <String, RideChatMessage>{};
   bool _riderChatSendInFlight = false;
+  final Map<String, String> _riderChatDraftByRide = <String, String>{};
   StreamSubscription<rtdb.DatabaseEvent>? _callSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _incomingCallSubscription;
   OverlayEntry? _callOverlayEntry;
@@ -7742,13 +7749,41 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<String?> sendMessage(String rideId, String text) async {
+    return _sendRiderChatMessageInternal(rideId: rideId, text: text);
+  }
+
+  Future<String?> _retryRiderChatMessage(
+    String rideId,
+    RideChatMessage message,
+  ) async {
+    _logRideFlow(
+      '[CHAT_RETRY] role=rider rideId=$rideId uid=${FirebaseAuth.instance.currentUser?.uid ?? ''} '
+      'messageId=${message.id}',
+    );
+    return _sendRiderChatMessageInternal(
+      rideId: rideId,
+      text: message.text,
+      imageUrl: message.imageUrl,
+      retryMessageId: message.id,
+      retryType: message.type,
+    );
+  }
+
+  Future<String?> _sendRiderChatMessageInternal({
+    required String rideId,
+    required String text,
+    String imageUrl = '',
+    String? retryMessageId,
+    String retryType = 'text',
+  }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       return 'Please log in before sending a message.';
     }
 
     final trimmed = text.trim();
-    if (trimmed.isEmpty) {
+    final normalizedImageUrl = imageUrl.trim();
+    if (trimmed.isEmpty && normalizedImageUrl.isEmpty) {
       return null;
     }
 
@@ -7762,8 +7797,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     final normalizedRideId = rideId.trim();
     final rootRef = _rideRequestsRef.root;
-    final messageRef = _rideChatMessagesRef(normalizedRideId).push();
-    final messageId = messageRef.key?.trim() ?? '';
+    final messageId = retryMessageId?.trim().isNotEmpty == true
+        ? retryMessageId!.trim()
+        : (_rideChatMessagesRef(normalizedRideId).push().key?.trim() ?? '');
     if (messageId.isEmpty) {
       return 'Unable to start this chat message right now.';
     }
@@ -7775,15 +7811,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _startRiderChatListener(normalizedRideId);
       }
       final clientCreatedAt = DateTime.now().millisecondsSinceEpoch;
+      final messageType = normalizedImageUrl.isNotEmpty ? 'image' : retryType;
       final optimistic = RideChatMessage(
         id: messageId,
         rideId: normalizedRideId,
         messageId: messageId,
         senderId: user.uid,
         senderRole: 'rider',
-        type: 'text',
+        type: messageType,
         text: trimmed,
-        imageUrl: '',
+        imageUrl: normalizedImageUrl,
         createdAt: clientCreatedAt,
         status: 'sending',
         isRead: false,
@@ -7800,9 +7837,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'ride_id': normalizedRideId,
         'sender_id': user.uid,
         'sender_role': 'rider',
-        'type': 'text',
+        'type': messageType,
         'text': trimmed,
-        'image_url': '',
+        'image_url': normalizedImageUrl,
         'local_temp_id': messageId,
         'created_at': rtdb.ServerValue.timestamp,
         'created_at_client': clientCreatedAt,
@@ -7816,7 +7853,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'ride_id': normalizedRideId,
         'sender_id': user.uid,
         'sender_role': 'rider',
-        'text': _rideChatPreview(trimmed),
+        'text': _rideChatPreview(
+          trimmed.isEmpty ? 'Photo' : trimmed,
+        ),
         'created_at': rtdb.ServerValue.timestamp,
         'created_at_client': clientCreatedAt,
       };
@@ -7911,6 +7950,89 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<String?> _sendRiderChatImage(
+    String rideId,
+    RideChatImageSource source,
+  ) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return 'Please log in before sending a photo.';
+    }
+    final normalizedRideId = rideId.trim();
+    final useCamera = source == RideChatImageSource.camera;
+    _logRideFlow(
+      '[CHAT_IMAGE_PICK] role=rider rideId=$normalizedRideId uid=${user.uid} source=${useCamera ? 'camera' : 'gallery'}',
+    );
+    if (useCamera) {
+      final cameraPermission = await Permission.camera.request();
+      if (!cameraPermission.isGranted) {
+        return 'Camera permission is required to take a photo.';
+      }
+    }
+    final picked = await _riderChatImagePicker.pickImage(
+      source: useCamera ? ImageSource.camera : ImageSource.gallery,
+      maxWidth: 1600,
+      imageQuality: 86,
+    );
+    if (picked == null) {
+      return null;
+    }
+    _logRideFlow(
+      '[CHAT_IMAGE_UPLOAD_START] role=rider rideId=$normalizedRideId uid=${user.uid}',
+    );
+    try {
+      final driverId =
+          _valueAsText(_currentRideSnapshot?['driver_id']).trim().isNotEmpty
+          ? _valueAsText(_currentRideSnapshot?['driver_id']).trim()
+          : _valueAsText(_currentRideSnapshot?['matched_driver_id']).trim();
+      final participantKey = _chatParticipantKey(user.uid, driverId);
+      final uploaded = await _dispatchPhotoUploadService.uploadRideChatPhoto(
+        rideId: normalizedRideId,
+        actorId: user.uid,
+        participantKey: participantKey,
+        asset: DispatchPhotoSelectedAsset(
+          localPath: picked.path,
+          fileName: picked.name.isNotEmpty
+              ? picked.name
+              : picked.path.split('/').last,
+          mimeType: picked.path.toLowerCase().endsWith('.png')
+              ? 'image/png'
+              : 'image/jpeg',
+          fileSizeBytes: await picked.length(),
+          source: useCamera ? 'camera' : 'gallery',
+        ),
+      );
+      final result = await _sendRiderChatMessageInternal(
+        rideId: normalizedRideId,
+        text: '',
+        imageUrl: uploaded.fileUrl,
+        retryType: 'image',
+      );
+      if (result == null) {
+        _logRideFlow(
+          '[CHAT_IMAGE_UPLOAD_OK] role=rider rideId=$normalizedRideId uid=${user.uid}',
+        );
+      } else {
+        _logRideFlow(
+          '[CHAT_IMAGE_UPLOAD_FAIL] role=rider rideId=$normalizedRideId uid=${user.uid} error=$result',
+        );
+      }
+      return result;
+    } catch (error) {
+      _logRideFlow(
+        '[CHAT_IMAGE_UPLOAD_FAIL] role=rider rideId=$normalizedRideId uid=${user.uid} error=$error',
+      );
+      return 'Unable to send this image right now.';
+    }
+  }
+
+  String _chatParticipantKey(String first, String second) {
+    final a = first.trim();
+    final b = second.trim();
+    final ids = <String>[a, b]..sort();
+    return ids.join('_');
+  }
+
   void _setRiderChatMessages(String rideId, List<RideChatMessage> messages) {
     if (_riderChatListenerRideId != rideId) {
       return;
@@ -7989,13 +8111,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     _logRideFlow(
-      'rider chat unread updated rideId=$rideId unreadCount=$unreadCount chatOpen=$_isRiderChatOpen',
+      '[CHAT_UNREAD_INC] role=rider rideId=$rideId uid=${FirebaseAuth.instance.currentUser?.uid ?? ''} '
+      'unreadCount=$unreadCount',
     );
   }
 
   void _resetRiderUnreadCount(String rideId) {
     _updateRiderUnreadCount(rideId, 0);
-    _logRideFlow('rider chat unread reset rideId=$rideId unreadCount=0');
+    _logRideFlow(
+      '[CHAT_UNREAD_CLEAR] role=rider rideId=$rideId uid=${FirebaseAuth.instance.currentUser?.uid ?? ''} unreadCount=0',
+    );
   }
 
   void _stopRiderChatListener() {
@@ -8142,7 +8267,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _riderChatMessages.value = const <RideChatMessage>[];
     _riderChatMessagesById.clear();
     _logRideFlow(
-      '[CHAT_SUBSCRIBE] role=rider rideId=$rideId '
+      '[CHAT_ATTACH] role=rider rideId=$rideId '
       'path=${canonicalRideChatMessagesPath(rideId)}',
     );
 
@@ -8240,6 +8365,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           currentUserId: user.uid,
           messagesListenable: _riderChatMessages,
           onSendMessage: sendMessage,
+          onRetryMessage: _retryRiderChatMessage,
+          onSendImage: _sendRiderChatImage,
+          initialDraft: _riderChatDraftByRide[rideId] ?? '',
+          onDraftChanged: (value) {
+            _riderChatDraftByRide[rideId] = value;
+          },
           onStartVoiceCall: _showRideCallButton
               ? () {
                   unawaited(_startVoiceCallFromChat());
@@ -8252,6 +8383,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       },
     ).whenComplete(() {
       _isRiderChatOpen = false;
+      _riderChatDraftByRide.removeWhere((key, _) => key != rideId);
     });
   }
 

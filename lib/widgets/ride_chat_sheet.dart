@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 
 import '../support/ride_chat_support.dart';
 
+enum RideChatImageSource { camera, gallery }
+
 class RideChatSheet extends StatefulWidget {
   const RideChatSheet({
     super.key,
@@ -12,7 +14,11 @@ class RideChatSheet extends StatefulWidget {
     required this.currentUserId,
     required this.messagesListenable,
     required this.onSendMessage,
+    required this.onRetryMessage,
+    required this.onSendImage,
     this.onStartVoiceCall,
+    this.initialDraft = '',
+    this.onDraftChanged,
     this.showCallButton = false,
     this.isCallButtonEnabled = true,
     this.isCallButtonBusy = false,
@@ -22,7 +28,13 @@ class RideChatSheet extends StatefulWidget {
   final String currentUserId;
   final ValueListenable<List<RideChatMessage>> messagesListenable;
   final Future<String?> Function(String rideId, String text) onSendMessage;
+  final Future<String?> Function(String rideId, RideChatMessage message)
+      onRetryMessage;
+  final Future<String?> Function(String rideId, RideChatImageSource source)
+      onSendImage;
   final VoidCallback? onStartVoiceCall;
+  final String initialDraft;
+  final ValueChanged<String>? onDraftChanged;
   final bool showCallButton;
   final bool isCallButtonEnabled;
   final bool isCallButtonBusy;
@@ -41,6 +53,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
   @override
   void initState() {
     super.initState();
+    _messageController.text = widget.initialDraft;
     _lastMessageCount = widget.messagesListenable.value.length;
     widget.messagesListenable.addListener(_onRemoteMessagesChanged);
     WidgetsBinding.instance
@@ -114,6 +127,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
         return;
       }
       _messageController.clear();
+      widget.onDraftChanged?.call('');
       _scrollToBottom(animated: true);
     } catch (_) {
       if (!mounted) {
@@ -139,6 +153,49 @@ class _RideChatSheetState extends State<RideChatSheet> {
         });
       }
     }
+  }
+
+  Future<void> _handleRetry(RideChatMessage message) async {
+    final error = await widget.onRetryMessage(widget.rideId, message);
+    if (!mounted || error == null || error.isEmpty) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.hideCurrentSnackBar();
+    messenger?.showSnackBar(SnackBar(content: Text(error)));
+  }
+
+  Future<void> _handleImageSend() async {
+    final source = await showModalBottomSheet<RideChatImageSource>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Take photo'),
+              onTap: () => Navigator.of(context).pop(RideChatImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Choose from gallery'),
+              onTap: () => Navigator.of(context).pop(RideChatImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source == null) {
+      return;
+    }
+    final error = await widget.onSendImage(widget.rideId, source);
+    if (!mounted || error == null || error.isEmpty) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.hideCurrentSnackBar();
+    messenger?.showSnackBar(SnackBar(content: Text(error)));
   }
 
   void _scrollToBottom({required bool animated}) {
@@ -282,6 +339,34 @@ class _RideChatSheetState extends State<RideChatSheet> {
                                           : Colors.black87,
                                     ),
                                   ),
+                                  if (message.hasImage) ...[
+                                    const SizedBox(height: 8),
+                                    GestureDetector(
+                                      onTap: () {
+                                        showDialog<void>(
+                                          context: context,
+                                          builder: (_) => Dialog(
+                                            insetPadding: const EdgeInsets.all(16),
+                                            child: InteractiveViewer(
+                                              child: Image.network(
+                                                message.imageUrl,
+                                                fit: BoxFit.contain,
+                                              ),
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: Image.network(
+                                          message.imageUrl,
+                                          height: 130,
+                                          width: 130,
+                                          fit: BoxFit.cover,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                   if (isMine) ...[
                                     const SizedBox(height: 6),
                                     Row(
@@ -311,11 +396,9 @@ class _RideChatSheetState extends State<RideChatSheet> {
                                             ),
                                             onPressed: _sending
                                                 ? null
-                                                : () {
-                                                    _messageController.text =
-                                                        message.text;
-                                                    unawaited(_handleSend());
-                                                  },
+                                                : () => unawaited(
+                                                      _handleRetry(message),
+                                                    ),
                                             child: const Text(
                                               'Retry',
                                               style: TextStyle(
@@ -347,6 +430,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
                     child: TextField(
                       controller: _messageController,
                       textInputAction: TextInputAction.send,
+                      onChanged: widget.onDraftChanged,
                       onSubmitted: (_) => unawaited(_handleSend()),
                       decoration: InputDecoration(
                         hintText: 'Message your driver',
@@ -357,6 +441,22 @@ class _RideChatSheetState extends State<RideChatSheet> {
                           borderSide: BorderSide.none,
                         ),
                       ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    height: 52,
+                    width: 52,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        backgroundColor: const Color(0xFFEEE6DB),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                      onPressed: _sending ? null : () => unawaited(_handleImageSend()),
+                      child: const Icon(Icons.photo_camera_outlined, color: Colors.black87),
                     ),
                   ),
                   const SizedBox(width: 10),
