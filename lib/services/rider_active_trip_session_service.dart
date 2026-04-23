@@ -274,33 +274,6 @@ class RiderActiveTripSessionService {
   }
 
   static String _canonicalRiderUiStatus(Map<String, dynamic> rideData) {
-    final canonical = TripStateMachine.canonicalStateFromSnapshot(rideData);
-    final rawTripState = _readText(rideData['trip_state']).toLowerCase();
-    final rawStatus = _readText(rideData['status']).toLowerCase();
-    final cancelReason = _readText(rideData['cancel_reason']).toLowerCase();
-
-    if (rawTripState == 'driver_cancelled' || cancelReason == 'driver_cancelled') {
-      return 'driver_cancelled';
-    }
-    if (rawTripState == 'rider_cancelled' || cancelReason == 'rider_cancelled') {
-      return 'rider_cancelled';
-    }
-    if (rawTripState == 'expired' ||
-        rawStatus == 'expired' ||
-        cancelReason == 'expired') {
-      return 'expired';
-    }
-
-    return switch (canonical) {
-      TripLifecycleState.requested || TripLifecycleState.searchingDriver => 'searching',
-      TripLifecycleState.pendingDriverAction => 'accepted',
-      TripLifecycleState.driverAccepted => 'accepted',
-      TripLifecycleState.driverArriving => 'arriving',
-      TripLifecycleState.driverArrived => 'arrived',
-      TripLifecycleState.tripStarted => 'on_trip',
-      TripLifecycleState.tripCompleted => 'completed',
-      TripLifecycleState.tripCancelled => 'cancelled',
-      _ => 'searching',
-    };
+    return TripStateMachine.riderUiStatusFromRideData(rideData);
   }
 }

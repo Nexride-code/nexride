@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 class TripLifecycleState {
   static const String requested = 'requested';
   static const String searchingDriver = 'searching_driver';
@@ -104,38 +106,36 @@ class TripStateMachine {
       };
 
   static String canonicalStateFromSnapshot(Map<String, dynamic>? rideData) {
+    if (rideData == null) {
+      return canonicalStateFromValues(
+        tripState: null,
+        status: null,
+        assignedDriverId: null,
+      );
+    }
+    final d = _normalizeText(rideData['driver_id']);
+    dynamic assignedDriverId = rideData['driver_id'];
+    if (d.isEmpty || d == 'waiting') {
+      assignedDriverId = rideData['matched_driver_id'];
+    }
     return canonicalStateFromValues(
-      tripState: rideData?['trip_state'],
-      status: rideData?['status'],
+      tripState: rideData['trip_state'],
+      status: rideData['status'],
+      assignedDriverId: assignedDriverId,
     );
   }
 
-  static String canonicalStateFromValues({dynamic tripState, dynamic status}) {
-    final normalizedTripState = _normalizeText(tripState);
-    final normalizedStatus = _normalizeText(status);
-    if (normalizedTripState == 'requesting') {
-      return TripLifecycleState.requested;
-    }
-    if (normalizedTripState == 'pending_driver_acceptance' ||
-        normalizedTripState == 'driver_reviewing_request') {
-      return TripLifecycleState.pendingDriverAction;
-    }
-    if (normalizedTripState == 'driver_on_the_way') {
-      return TripLifecycleState.driverArriving;
-    }
-    if (TripLifecycleState.all.contains(normalizedTripState)) {
-      if (normalizedTripState == TripLifecycleState.requested &&
-          (normalizedStatus == 'searching' ||
-              normalizedStatus == 'searching_driver')) {
-        return TripLifecycleState.searchingDriver;
-      }
-      return normalizedTripState;
-    }
-
+  /// Legacy [status] only — used when [trip_state] is absent or not a known canonical value.
+  static String _canonicalFromLegacyNormalizedStatus(String normalizedStatus) {
     return switch (normalizedStatus) {
       '' || 'idle' => TripLifecycleState.requested,
       'requested' || 'requesting' => TripLifecycleState.requested,
-      'searching' || 'searching_driver' => TripLifecycleState.searchingDriver,
+      'searching' ||
+      'searching_driver' ||
+      'matching' ||
+      'offered' ||
+      'offer_pending' =>
+        TripLifecycleState.searchingDriver,
       'assigned' ||
       'driver_assigned' ||
       'matched' ||
@@ -143,7 +143,12 @@ class TripStateMachine {
       'pending_driver_action' ||
       'driver_reviewing_request' =>
         TripLifecycleState.pendingDriverAction,
-      'accepted' || 'driver_accepted' => TripLifecycleState.driverAccepted,
+      'accepted' ||
+      'driver_accepted' ||
+      'driver_found' ||
+      'driver_matched' ||
+      'driver_found_pending' =>
+        TripLifecycleState.driverAccepted,
       'arriving' ||
       'driver_arriving' ||
       'driver_on_the_way' =>
@@ -152,15 +157,92 @@ class TripStateMachine {
       'on_trip' ||
       'ontrip' ||
       'in_progress' ||
-      'trip_started' => TripLifecycleState.tripStarted,
+      'trip_started' =>
+        TripLifecycleState.tripStarted,
       'completed' ||
       'completed_with_payment_issue' ||
-      'trip_completed' => TripLifecycleState.tripCompleted,
+      'trip_completed' =>
+        TripLifecycleState.tripCompleted,
       'cancelled' ||
       'canceled' ||
-      'trip_cancelled' => TripLifecycleState.tripCancelled,
+      'trip_cancelled' ||
+      'driver_cancelled' ||
+      'rider_cancelled' =>
+        TripLifecycleState.tripCancelled,
       _ => TripLifecycleState.requested,
     };
+  }
+
+  static String canonicalStateFromValues({
+    dynamic tripState,
+    dynamic status,
+    dynamic assignedDriverId,
+  }) {
+    final normalizedTripState = _normalizeText(tripState);
+    final normalizedStatus = _normalizeText(status);
+    final assignedNorm = _normalizeText(assignedDriverId);
+    final hasConcreteDriver =
+        assignedNorm.isNotEmpty && assignedNorm != 'waiting';
+
+    String? canonicalFromTripStateField() {
+      if (normalizedTripState == 'requesting') {
+        return TripLifecycleState.requested;
+      }
+      if (normalizedTripState == 'pending_driver_acceptance' ||
+          normalizedTripState == 'driver_reviewing_request') {
+        return TripLifecycleState.pendingDriverAction;
+      }
+      if (normalizedTripState == 'driver_on_the_way') {
+        return TripLifecycleState.driverArriving;
+      }
+      if (TripLifecycleState.all.contains(normalizedTripState)) {
+        if (normalizedTripState == TripLifecycleState.requested &&
+            (normalizedStatus == 'searching' ||
+                normalizedStatus == 'searching_driver')) {
+          return TripLifecycleState.searchingDriver;
+        }
+        return normalizedTripState;
+      }
+      return null;
+    }
+
+    final fromTrip = canonicalFromTripStateField();
+    final fromLegacy = _canonicalFromLegacyNormalizedStatus(normalizedStatus);
+
+    if (fromTrip != null) {
+      if (isTerminal(fromTrip)) {
+        return fromTrip;
+      }
+      if (isTerminal(fromLegacy)) {
+        return fromTrip;
+      }
+      var effective = fromTrip;
+      if (hasConcreteDriver &&
+          (effective == TripLifecycleState.searchingDriver ||
+              effective == TripLifecycleState.requested)) {
+        if (isPendingDriverAssignmentState(fromLegacy) ||
+            isDriverActiveState(fromLegacy)) {
+          effective = fromLegacy;
+          developer.log(
+            '[MATCH_DEBUG][RIDER_STATE_ACCEPTED_LOCKED] '
+            'tripState=$normalizedTripState status=$normalizedStatus '
+            'driverId=$assignedNorm uplift=$effective',
+            name: 'nexride.trip_state',
+          );
+        } else if (fromLegacy == TripLifecycleState.searchingDriver) {
+          effective = TripLifecycleState.pendingDriverAction;
+          developer.log(
+            '[MATCH_DEBUG][RIDER_STATE_ACCEPTED_LOCKED] '
+            'tripState=$normalizedTripState status=$normalizedStatus '
+            'driverId=$assignedNorm uplift=$effective (bound_driver_stale_open_state)',
+            name: 'nexride.trip_state',
+          );
+        }
+      }
+      return effective;
+    }
+
+    return fromLegacy;
   }
 
   static String legacyStatusForCanonical(String canonicalState) {
@@ -180,6 +262,91 @@ class TripStateMachine {
 
   static String uiStatusFromSnapshot(Map<String, dynamic>? rideData) {
     return legacyStatusForCanonical(canonicalStateFromSnapshot(rideData));
+  }
+
+  /// When RTDB uses legacy `status: cancelled`, infer who cancelled for rider UI.
+  static String? refinedRiderTerminalCancelStatus(
+    Map<String, dynamic> rideData,
+  ) {
+    if (canonicalStateFromSnapshot(rideData) !=
+        TripLifecycleState.tripCancelled) {
+      return null;
+    }
+    final by = _firstNonEmptyLower(<dynamic>[
+      rideData['cancelled_by'],
+      rideData['cancel_actor'],
+    ]);
+    if (by == 'driver') {
+      return 'driver_cancelled';
+    }
+    if (by == 'rider' || by == 'rider_user' || by == 'user') {
+      return 'rider_cancelled';
+    }
+    final rawTripState = _normalizeText(rideData['trip_state']);
+    if (rawTripState == 'driver_cancelled') {
+      return 'driver_cancelled';
+    }
+    if (rawTripState == 'rider_cancelled') {
+      return 'rider_cancelled';
+    }
+    final cancelReason = _normalizeText(rideData['cancel_reason']);
+    if (cancelReason == 'driver_cancelled') {
+      return 'driver_cancelled';
+    }
+    if (cancelReason == 'rider_cancelled' || cancelReason == 'user_cancelled') {
+      return 'rider_cancelled';
+    }
+    return null;
+  }
+
+  static String _firstNonEmptyLower(List<dynamic> values) {
+    for (final v in values) {
+      final s = _normalizeText(v);
+      if (s.isNotEmpty) {
+        return s;
+      }
+    }
+    return '';
+  }
+
+  /// Single rider UI status string (aligned with driver lifecycle + cancel refinements).
+  static String riderUiStatusFromRideData(Map<String, dynamic> rideData) {
+    final refinedCancel = refinedRiderTerminalCancelStatus(rideData);
+    if (refinedCancel != null) {
+      return refinedCancel;
+    }
+    final canonical = canonicalStateFromSnapshot(rideData);
+    final rawTripState = _normalizeText(rideData['trip_state']);
+    final rawStatus = _normalizeText(rideData['status']);
+    final cancelReason = _normalizeText(rideData['cancel_reason']);
+    if (rawTripState == 'driver_cancelled' ||
+        cancelReason == 'driver_cancelled') {
+      return 'driver_cancelled';
+    }
+    if (rawTripState == 'rider_cancelled' ||
+        cancelReason == 'rider_cancelled') {
+      return 'rider_cancelled';
+    }
+    if (rawTripState == 'expired' ||
+        rawStatus == 'expired' ||
+        cancelReason == 'expired') {
+      return 'expired';
+    }
+
+    return switch (canonical) {
+      TripLifecycleState.requested ||
+      TripLifecycleState.searchingDriver =>
+        'searching',
+      TripLifecycleState.pendingDriverAction ||
+      TripLifecycleState.driverAccepted =>
+        'accepted',
+      TripLifecycleState.driverArriving => 'arriving',
+      TripLifecycleState.driverArrived => 'arrived',
+      TripLifecycleState.tripStarted => 'on_trip',
+      TripLifecycleState.tripCompleted => 'completed',
+      TripLifecycleState.tripCancelled => 'cancelled',
+      _ => 'searching',
+    };
   }
 
   static bool isTerminal(String canonicalState) {

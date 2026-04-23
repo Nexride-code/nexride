@@ -842,35 +842,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   /// When RTDB still uses legacy `status: cancelled`, infer who cancelled for UI + copy.
   String? _riderRefinedTerminalCancelStatus(Map<String, dynamic> rideData) {
-    if (TripStateMachine.canonicalStateFromSnapshot(rideData) !=
-        TripLifecycleState.tripCancelled) {
-      return null;
-    }
-    final by = _firstNonEmptyText(<dynamic>[
-      rideData['cancelled_by'],
-      rideData['cancel_actor'],
-    ]).toLowerCase();
-    if (by == 'driver') {
-      return 'driver_cancelled';
-    }
-    if (by == 'rider' || by == 'rider_user' || by == 'user') {
-      return 'rider_cancelled';
-    }
-    final rawTripState = _valueAsText(rideData['trip_state']).toLowerCase();
-    if (rawTripState == 'driver_cancelled') {
-      return 'driver_cancelled';
-    }
-    if (rawTripState == 'rider_cancelled') {
-      return 'rider_cancelled';
-    }
-    final cancelReason = _valueAsText(rideData['cancel_reason']).toLowerCase();
-    if (cancelReason == 'driver_cancelled') {
-      return 'driver_cancelled';
-    }
-    if (cancelReason == 'rider_cancelled' || cancelReason == 'user_cancelled') {
-      return 'rider_cancelled';
-    }
-    return null;
+    return TripStateMachine.refinedRiderTerminalCancelStatus(rideData);
   }
 
   String _rideCancellationMessage({
@@ -901,36 +873,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   String _canonicalRiderUiStatus(Map<String, dynamic> rideData) {
-    final refinedCancel = _riderRefinedTerminalCancelStatus(rideData);
-    if (refinedCancel != null) {
-      return refinedCancel;
-    }
-    final canonical = TripStateMachine.canonicalStateFromSnapshot(rideData);
-    final rawTripState = _valueAsText(rideData['trip_state']).toLowerCase();
-    final rawStatus = _valueAsText(rideData['status']).toLowerCase();
-    final cancelReason = _valueAsText(rideData['cancel_reason']).toLowerCase();
-    if (rawTripState == 'driver_cancelled' || cancelReason == 'driver_cancelled') {
-      return 'driver_cancelled';
-    }
-    if (rawTripState == 'rider_cancelled' || cancelReason == 'rider_cancelled') {
-      return 'rider_cancelled';
-    }
-    if (rawTripState == 'expired' ||
-        rawStatus == 'expired' ||
-        cancelReason == 'expired') {
-      return 'expired';
-    }
-
-    return switch (canonical) {
-      TripLifecycleState.requested || TripLifecycleState.searchingDriver => 'searching',
-      TripLifecycleState.pendingDriverAction || TripLifecycleState.driverAccepted => 'accepted',
-      TripLifecycleState.driverArriving => 'arriving',
-      TripLifecycleState.driverArrived => 'arrived',
-      TripLifecycleState.tripStarted => 'on_trip',
-      TripLifecycleState.tripCompleted => 'completed',
-      TripLifecycleState.tripCancelled => 'cancelled',
-      _ => 'searching',
-    };
+    return TripStateMachine.riderUiStatusFromRideData(rideData);
   }
 
   Future<bool> _releaseExpiredAssignedRideIfNeeded({
@@ -1022,10 +965,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     required String status,
   }) async {
-    final canonicalState = TripStateMachine.canonicalStateFromValues(
-      tripState: rideData['trip_state'],
-      status: status,
-    );
+    final canonicalState = TripStateMachine.canonicalStateFromSnapshot(rideData);
     final driverId = _valueAsText(rideData['driver_id']);
     if (driverId.isEmpty || driverId == 'waiting') {
       return 'driver_missing';
@@ -1093,6 +1033,22 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     required String source,
   }) async {
+    final terminalCanonical =
+        TripStateMachine.canonicalStateFromSnapshot(rideData);
+    if (TripStateMachine.isTerminal(terminalCanonical)) {
+      var terminalStatus = TripStateMachine.uiStatusFromSnapshot(rideData);
+      if (terminalStatus == 'cancelled') {
+        final refined = _riderRefinedTerminalCancelStatus(rideData);
+        if (refined != null) {
+          terminalStatus = refined;
+        }
+      }
+      return _RiderRideStatusDecision(
+        status: terminalStatus,
+        driverData: _extractDriverData(rideData),
+      );
+    }
+
     var status = TripStateMachine.uiStatusFromSnapshot(rideData);
     if (status == 'cancelled') {
       final refined = _riderRefinedTerminalCancelStatus(rideData);
@@ -1210,10 +1166,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (!hasRideContext) {
       return false;
     }
-    final canonical = TripStateMachine.canonicalStateFromValues(
-      tripState: _currentRideSnapshot?['trip_state'],
-      status: _effectiveRideStatus,
-    );
+    final snap = _currentRideSnapshot;
+    if (snap == null || snap.isEmpty) {
+      return false;
+    }
+    final canonical = TripStateMachine.canonicalStateFromSnapshot(snap);
     return canonical == TripLifecycleState.requested ||
         canonical == TripLifecycleState.searchingDriver ||
         canonical == TripLifecycleState.pendingDriverAction;
@@ -1229,6 +1186,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool get _canChat =>
       _currentRideId != null &&
       <String>{
+        'pending_driver_action',
+        'assigned',
         'accepted',
         'arriving',
         'arrived',
@@ -1399,11 +1358,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool get _isPrimaryRideButtonCancelMode =>
       _isCancellingRide || _showCancelRideOnly;
 
-  String get _currentCanonicalRideState =>
-      TripStateMachine.canonicalStateFromValues(
-        tripState: _currentRideSnapshot?['trip_state'],
-        status: _effectiveRideStatus,
-      );
+  String get _currentCanonicalRideState {
+    final snap = _currentRideSnapshot;
+    if (snap == null || snap.isEmpty) {
+      return TripStateMachine.canonicalStateFromSnapshot(const {});
+    }
+    return TripStateMachine.canonicalStateFromSnapshot(snap);
+  }
 
   String get _effectiveRideStatus {
     final snapshot = _currentRideSnapshot;
@@ -4443,9 +4404,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return 'This trip request expired.';
     }
 
-    final canonicalState = TripStateMachine.canonicalStateFromValues(
-      tripState: _currentRideSnapshot?['trip_state'],
-      status: status,
+    final canonicalState = TripStateMachine.canonicalStateFromSnapshot(
+      _currentRideSnapshot ?? const <String, dynamic>{},
     );
     return switch (canonicalState) {
       TripLifecycleState.requested => 'Preparing your trip request',

@@ -68,7 +68,7 @@ void main() {
         fromCanonicalState: TripLifecycleState.searchingDriver,
         toCanonicalState: TripLifecycleState.driverAccepted,
       ),
-      isFalse,
+      isTrue,
     );
     expect(
       TripStateMachine.canTransition(
