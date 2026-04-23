@@ -1111,6 +1111,8 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         throw const FormatException('unsupported_city');
       }
       final dispatchMarket = RiderServiceAreaConfig.marketForCity(city).city;
+      final dispatchSlug =
+          normalizeRideMarketSlug(dispatchMarket) ?? dispatchMarket.trim().toLowerCase();
 
       final requestRef = _rideRequestsRef.push();
       final requestId = requestRef.key;
@@ -1148,25 +1150,25 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
           1000;
       final fareBreakdown = calculateRiderFare(
         serviceKey: RiderServiceType.dispatchDelivery.key,
-        city: dispatchMarket,
+        city: dispatchSlug,
         distanceKm: distanceKm,
       );
       final pickupArea = await _resolveAreaFromPoint(
         pickup.lat,
         pickup.lng,
-        city: dispatchMarket,
+        city: dispatchSlug,
         addressHint: pickupAddress,
       );
       final destinationArea = await _resolveAreaFromPoint(
         dropoff.lat,
         dropoff.lng,
-        city: dispatchMarket,
+        city: dispatchSlug,
         addressHint: dropoffAddress,
       );
-      final rideScope = _buildServiceAreaFields(city: dispatchMarket, area: pickupArea);
-      final pickupScope = _buildServiceAreaFields(city: dispatchMarket, area: pickupArea);
+      final rideScope = _buildServiceAreaFields(city: dispatchSlug, area: pickupArea);
+      final pickupScope = _buildServiceAreaFields(city: dispatchSlug, area: pickupArea);
       final destinationScope = _buildServiceAreaFields(
-        city: dispatchMarket,
+        city: dispatchSlug,
         area: destinationArea,
       );
       final packagePhotoUrl = uploadedPackagePhoto?.fileUrl ?? '';
@@ -1194,8 +1196,9 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'status': 'searching',
         'trip_state': TripLifecycleState.searchingDriver,
         'state_machine_version': TripStateMachine.schemaVersion,
-        'market': dispatchMarket,
-        RtdbRideRequestFields.marketPool: dispatchMarket,
+        'market': dispatchSlug,
+        'city': dispatchSlug,
+        RtdbRideRequestFields.marketPool: dispatchSlug,
         'country': rideScope['country'],
         'country_code': rideScope['country_code'],
         'area': rideScope['area'],
@@ -1267,7 +1270,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'route_basis': <String, dynamic>{
           'country': rideScope['country'],
           'country_code': rideScope['country_code'],
-          'market': dispatchMarket,
+          'market': dispatchSlug,
           'area': rideScope['area'],
           'zone': rideScope['zone'],
           'community': rideScope['community'],
@@ -1311,7 +1314,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
       rtdbFlowLog(
         '[NEXRIDE_RIDER_RTDB][DISPATCH_CREATE]',
-        'requestId=$requestId uid=${user.uid} market_pool=$dispatchMarket',
+        'requestId=$requestId uid=${user.uid} market_pool=$dispatchSlug',
       );
       debugPrint(
         '[RIDER_CREATE] rideId=$requestId rider_id=${user.uid} '

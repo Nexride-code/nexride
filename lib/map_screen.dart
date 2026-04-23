@@ -1649,8 +1649,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   bool _isCanonicalOpenDiscoverySeed(Map<String, dynamic> rideData) {
-    final market = _valueAsText(rideData['market']).trim().toLowerCase();
-    final marketPool = _valueAsText(rideData['market_pool']).trim().toLowerCase();
+    final market =
+        normalizeRideMarketSlug(rideData['market']) ?? '';
+    final marketPool =
+        normalizeRideMarketSlug(rideData['market_pool']) ?? '';
     final status = _valueAsText(rideData['status']).trim().toLowerCase();
     final tripState = _valueAsText(rideData['trip_state']).trim().toLowerCase();
     final driverId = _valueAsText(rideData['driver_id']).trim().toLowerCase();
@@ -1659,8 +1661,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _asInt(rideData['search_timeout_at']) ??
         _asInt(rideData['search_timeout']) ??
         0;
-    return market == 'lagos' &&
-        marketPool == 'lagos' &&
+    return market.isNotEmpty &&
+        market == marketPool &&
         status == 'requesting' &&
         tripState == 'requesting' &&
         driverId == 'waiting' &&
@@ -4900,6 +4902,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     try {
       final dispatchMarket = RiderServiceAreaConfig.marketForCity(city).city;
+      final dispatchSlug =
+          normalizeRideMarketSlug(dispatchMarket) ?? dispatchMarket.trim().toLowerCase();
       final pickupArea = await _resolveServiceAreaFromPoint(
         pickupLocation,
         city: dispatchMarket,
@@ -4911,13 +4915,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         addressHint: destinationPayloadBase['address']?.toString(),
       );
       final pickupScope =
-          _buildServiceAreaFields(city: dispatchMarket, area: pickupArea);
+          _buildServiceAreaFields(city: dispatchSlug, area: pickupArea);
       final destinationScope = _buildServiceAreaFields(
-        city: dispatchMarket,
+        city: dispatchSlug,
         area: destinationArea,
       );
       final rideScope =
-          _buildServiceAreaFields(city: dispatchMarket, area: pickupArea);
+          _buildServiceAreaFields(city: dispatchSlug, area: pickupArea);
       final expectedRoutePayload = expectedRoutePoints
           .map(
             (LatLng point) => <String, double>{
@@ -4927,8 +4931,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           )
           .toList();
       final updates = <String, dynamic>{
-        'market': dispatchMarket,
-        'city': dispatchMarket,
+        'market': dispatchSlug,
+        'city': dispatchSlug,
+        RtdbRideRequestFields.marketPool: dispatchSlug,
         'country': rideScope['country'],
         'country_code': rideScope['country_code'],
         'area': rideScope['area'],
@@ -4955,7 +4960,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'route_basis': <String, dynamic>{
           'country': rideScope['country'],
           'country_code': rideScope['country_code'],
-          'market': dispatchMarket,
+          'market': dispatchSlug,
           'area': rideScope['area'],
           'zone': rideScope['zone'],
           'community': rideScope['community'],
@@ -4990,6 +4995,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           ...updates,
         };
       }
+      _logRideFlow(
+        '[RIDER_REQ] metadata_enrich_ok rideId=$rideId city=$city '
+        'market=$dispatchSlug market_pool=$dispatchSlug '
+        '(discovery fields status/trip_state/driver_id untouched by design)',
+      );
       _logRideFlow('ride request metadata enriched rideId=$rideId city=$city');
     } catch (error) {
       _logRideFlow(
@@ -6019,6 +6029,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         return;
       }
       _logRiderReqWrite(rideId, searchingPayload);
+      _logRideFlow(
+        '[RIDER_REQ] create_pre_write rideId=$rideId '
+        'market=${searchingPayload['market']} '
+        'market_pool=${searchingPayload[RtdbRideRequestFields.marketPool]} '
+        'status=${searchingPayload['status']} trip_state=${searchingPayload['trip_state']} '
+        'driver_id=${searchingPayload['driver_id']} '
+        'expires_at=${searchingPayload[RtdbRideRequestFields.expiresAt]} '
+        'search_timeout_at=${searchingPayload['search_timeout_at']} '
+        'request_expires_at=${searchingPayload['request_expires_at']}',
+      );
       _logDiscoveryRideRequestPayload(
         'before_write',
         rideId,
@@ -6039,6 +6059,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         rideId,
         Map<String, dynamic>.from(committedRideData ?? searchingPayload),
       );
+      {
+        final eff = Map<String, dynamic>.from(
+          committedRideData ?? searchingPayload,
+        );
+        _logRideFlow(
+          '[RIDER_REQ] create_post_write_payment_lock_subset rideId=$rideId '
+          'payment_method=${eff['payment_method']} '
+          'payment_status=${eff[RtdbRideRequestFields.paymentStatus]} '
+          'status=${eff['status']} trip_state=${eff['trip_state']} '
+          'driver_id=${eff['driver_id']} market=${eff['market']} '
+          'market_pool=${eff[RtdbRideRequestFields.marketPool]}',
+        );
+      }
       if (_rideRequestUserAborted) {
         _logRideFlow(
           'createRideRequest user aborted after write rideId=$rideId',

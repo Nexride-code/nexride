@@ -113,6 +113,9 @@ class TripStateMachine {
   static String canonicalStateFromValues({dynamic tripState, dynamic status}) {
     final normalizedTripState = _normalizeText(tripState);
     final normalizedStatus = _normalizeText(status);
+    if (normalizedTripState == 'requesting') {
+      return TripLifecycleState.requested;
+    }
     if (normalizedTripState == 'pending_driver_acceptance' ||
         normalizedTripState == 'driver_reviewing_request') {
       return TripLifecycleState.pendingDriverAction;
@@ -131,7 +134,7 @@ class TripStateMachine {
 
     return switch (normalizedStatus) {
       '' || 'idle' => TripLifecycleState.requested,
-      'requested' => TripLifecycleState.requested,
+      'requested' || 'requesting' => TripLifecycleState.requested,
       'searching' || 'searching_driver' => TripLifecycleState.searchingDriver,
       'assigned' ||
       'driver_assigned' ||
