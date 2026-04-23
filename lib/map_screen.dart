@@ -171,6 +171,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Marker? _driverMarker;
   DateTime? _lastMoveTime;
   DateTime? _lastSafetyPromptAt;
+  DateTime? _lastRiderSpeedSampleAt;
+  double? _lastRiderImpliedSpeedKmh;
+  int? _lastConsumedRiderSafetyAlertIssuedAt;
   int _driverAnimationGeneration = 0;
   String _lastRenderedRouteSignature = '';
 
@@ -241,6 +244,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   static const double _routeDeviationThresholdMeters = 250;
   static const double _stopMovementThresholdMeters = 18;
   static const double _expectedStopRadiusMeters = 120;
+  static const double _suddenStopMinPriorKmh = 32;
+  static const double _suddenStopMaxAfterKmh = 14;
+  static const double _suddenStopDropKmh = 22;
+  static const double _suddenStopMinDtSec = 0.35;
+  static const double _suddenStopMaxDtSec = 8;
   static const Set<String> _rideTrackingStatuses = <String>{
     'searching',
     'pending_driver_action',
@@ -832,6 +840,39 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return true;
   }
 
+  /// When RTDB still uses legacy `status: cancelled`, infer who cancelled for UI + copy.
+  String? _riderRefinedTerminalCancelStatus(Map<String, dynamic> rideData) {
+    if (TripStateMachine.canonicalStateFromSnapshot(rideData) !=
+        TripLifecycleState.tripCancelled) {
+      return null;
+    }
+    final by = _firstNonEmptyText(<dynamic>[
+      rideData['cancelled_by'],
+      rideData['cancel_actor'],
+    ]).toLowerCase();
+    if (by == 'driver') {
+      return 'driver_cancelled';
+    }
+    if (by == 'rider' || by == 'rider_user' || by == 'user') {
+      return 'rider_cancelled';
+    }
+    final rawTripState = _valueAsText(rideData['trip_state']).toLowerCase();
+    if (rawTripState == 'driver_cancelled') {
+      return 'driver_cancelled';
+    }
+    if (rawTripState == 'rider_cancelled') {
+      return 'rider_cancelled';
+    }
+    final cancelReason = _valueAsText(rideData['cancel_reason']).toLowerCase();
+    if (cancelReason == 'driver_cancelled') {
+      return 'driver_cancelled';
+    }
+    if (cancelReason == 'rider_cancelled' || cancelReason == 'user_cancelled') {
+      return 'rider_cancelled';
+    }
+    return null;
+  }
+
   String _rideCancellationMessage({
     required String cancelReason,
     required String terminalStatus,
@@ -860,6 +901,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   String _canonicalRiderUiStatus(Map<String, dynamic> rideData) {
+    final refinedCancel = _riderRefinedTerminalCancelStatus(rideData);
+    if (refinedCancel != null) {
+      return refinedCancel;
+    }
     final canonical = TripStateMachine.canonicalStateFromSnapshot(rideData);
     final rawTripState = _valueAsText(rideData['trip_state']).toLowerCase();
     final rawStatus = _valueAsText(rideData['status']).toLowerCase();
@@ -1048,7 +1093,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     required String source,
   }) async {
-    final status = TripStateMachine.uiStatusFromSnapshot(rideData);
+    var status = TripStateMachine.uiStatusFromSnapshot(rideData);
+    if (status == 'cancelled') {
+      final refined = _riderRefinedTerminalCancelStatus(rideData);
+      if (refined != null) {
+        status = refined;
+      }
+    }
     if (!_rideStatusNeedsAssignedDriver(status)) {
       return _RiderRideStatusDecision(
         status: status,
@@ -6340,6 +6391,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           rideData: data,
           source: 'listener',
         );
+        await _maybeHandleRemoteRiderSafetyAlert(
+          rideId: rideId,
+          rideData: data,
+        );
         final visibleRideData = _sanitizedRideSnapshotForDecision(
           rideData: data,
           decision: decision,
@@ -6408,7 +6463,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           _clearRideSearchTimeout(reason: 'listener_status_$status');
         }
 
-        if (mounted && previousUiSignature != nextUiSignature) {
+        if (mounted &&
+            (previousUiSignature != nextUiSignature ||
+                previousStatus != status)) {
           setState(() {});
         }
 
@@ -6867,6 +6924,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _safetyPopupVisible = false;
         _routeDeviationStrikeCount = 0;
         _routePreviewError = null;
+        _lastRiderSpeedSampleAt = null;
+        _lastRiderImpliedSpeedKmh = null;
+        _lastConsumedRiderSafetyAlertIssuedAt = null;
       });
     }
   }
@@ -7124,6 +7184,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _lastMoveTime = null;
     _lastSafetyCheckLocation = null;
     _routeDeviationStrikeCount = 0;
+    _lastRiderSpeedSampleAt = null;
+    _lastRiderImpliedSpeedKmh = null;
   }
 
   bool _isNearExpectedStop(LatLng driverPosition) {
@@ -7174,12 +7236,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return minimumDistance.isFinite ? minimumDistance : null;
   }
 
-  Future<void> _showSafetyPopup({
+  Future<bool> _showSafetyPopup({
     required String reason,
     required String details,
   }) async {
     if (!mounted || _safetyPopupVisible) {
-      return;
+      return false;
     }
 
     final now = DateTime.now();
@@ -7188,7 +7250,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRiderMap(
         'safety popup suppressed (cooldown) rideId=$_currentRideId reason=$reason',
       );
-      return;
+      return false;
     }
 
     _lastSafetyPromptAt = now;
@@ -7206,6 +7268,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             onPressed: () => Navigator.of(context).pop('safe'),
             child: const Text("I'M SAFE"),
           ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop('help'),
+            child: const Text('HELP'),
+          ),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () => Navigator.of(context).pop('sos'),
@@ -7216,6 +7282,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
 
     _safetyPopupVisible = false;
+
+    if (action == 'help') {
+      await _openEmergencySheet();
+      return true;
+    }
 
     if (action == 'sos') {
       final rideId = _currentRideId;
@@ -7238,6 +7309,47 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
       await _openEmergencySheet();
     }
+    return true;
+  }
+
+  Future<void> _maybeHandleRemoteRiderSafetyAlert({
+    required String rideId,
+    required Map<String, dynamic> rideData,
+  }) async {
+    if (TripStateMachine.canonicalStateFromSnapshot(rideData) !=
+        TripLifecycleState.tripStarted) {
+      return;
+    }
+    final alert = _asStringDynamicMap(rideData['rider_safety_alert']);
+    if (alert == null) {
+      return;
+    }
+    final type = _valueAsText(alert['type']).toLowerCase();
+    if (type != 'sudden_stop') {
+      return;
+    }
+    final issuedAt = _asInt(alert['issued_at']);
+    if (issuedAt == null || issuedAt <= 0) {
+      return;
+    }
+    if (issuedAt <= (_lastConsumedRiderSafetyAlertIssuedAt ?? 0)) {
+      return;
+    }
+    final shown = await _showSafetyPopup(
+      reason: 'sudden_stop_remote',
+      details:
+          'We detected a sharp slowdown on this trip. If you feel unsafe, use SOS or Help below.',
+    );
+    try {
+      await _rideRequestsRef.child(rideId).child('rider_safety_alert').remove();
+    } catch (error) {
+      _logRideFlow(
+        'rider_safety_alert remove failed rideId=$rideId error=$error',
+      );
+    }
+    if (shown) {
+      _lastConsumedRiderSafetyAlertIssuedAt = issuedAt;
+    }
   }
 
   void _checkSafety(LatLng driverPosition) {
@@ -7256,6 +7368,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (previousPosition == null) {
       _lastMoveTime = now;
       _lastSafetyCheckLocation = driverPosition;
+      _lastRiderSpeedSampleAt = null;
+      _lastRiderImpliedSpeedKmh = null;
       return;
     }
 
@@ -7269,7 +7383,55 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (nearExpectedStop) {
       _routeDeviationStrikeCount = 0;
       _lastMoveTime = now;
+      _lastRiderImpliedSpeedKmh = null;
+      _lastRiderSpeedSampleAt = now;
     } else {
+      if (_lastRiderSpeedSampleAt != null) {
+        final dtSec =
+            now.difference(_lastRiderSpeedSampleAt!).inMilliseconds / 1000.0;
+        if (dtSec >= _suddenStopMinDtSec && dtSec <= _suddenStopMaxDtSec) {
+          final impliedKmh = (movement / dtSec) * 3.6;
+          final prev = _lastRiderImpliedSpeedKmh;
+          if (prev != null &&
+              prev >= _suddenStopMinPriorKmh &&
+              impliedKmh <= _suddenStopMaxAfterKmh &&
+              (prev - impliedKmh) >= _suddenStopDropKmh) {
+            _logRideFlow(
+              'sudden deceleration (rider inferred) rideId=$_currentRideId '
+              'prevKmh=${prev.toStringAsFixed(1)} nextKmh=${impliedKmh.toStringAsFixed(1)} dtSec=${dtSec.toStringAsFixed(2)}',
+            );
+            final rideId = _currentRideId;
+            if (rideId != null && rideId.isNotEmpty) {
+              unawaited(
+                _tripSafetyService.createSafetyFlag(
+                  rideId: rideId,
+                  riderId: _currentRiderUid ?? '',
+                  driverId: _currentRideSnapshot?['driver_id']?.toString() ?? '',
+                  serviceType:
+                      _currentRideSnapshot?['service_type']?.toString() ??
+                          RiderServiceType.ride.key,
+                  flagType: 'sudden_stop',
+                  source: 'rider_map_monitor',
+                  message:
+                      'Rider app inferred a sharp slowdown from live driver positions.',
+                  status: 'manual_review',
+                  severity: 'high',
+                ),
+              );
+            }
+            unawaited(
+              _showSafetyPopup(
+                reason: 'sudden_stop',
+                details:
+                    'We noticed a sharp slowdown on this trip. Are you safe?',
+              ),
+            );
+          }
+          _lastRiderImpliedSpeedKmh = impliedKmh;
+        } else if (dtSec > _suddenStopMaxDtSec || dtSec <= 0) {
+          _lastRiderImpliedSpeedKmh = null;
+        }
+      }
       if (movement >= _stopMovementThresholdMeters) {
         _lastMoveTime = now;
       } else if (_lastMoveTime != null &&
@@ -7353,6 +7515,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       } else {
         _routeDeviationStrikeCount = 0;
       }
+      _lastRiderSpeedSampleAt = now;
     }
 
     _lastSafetyCheckLocation = driverPosition;
@@ -7733,6 +7896,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                     safeShowSnackBar(
                       context,
                       'Emergency help is not connected yet. Please call local emergency services now.',
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.support_agent, color: _gold),
+                  title: const Text('Contact support team'),
+                  subtitle: const Text(
+                    'Describe what happened; include your ride ID if you can.',
+                  ),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    final id = rideId;
+                    safeShowSnackBar(
+                      context,
+                      id.isEmpty
+                          ? 'Support: open your trip receipt after the ride ends, or email help with your account phone number.'
+                          : 'Support: reference ride ID $id when you reach out (email / in-app help).',
                     );
                   },
                 ),
