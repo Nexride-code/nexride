@@ -8058,9 +8058,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     final normalizedRideId = rideId.trim();
     final rootRef = _rideRequestsRef.root;
-    final messageId = retryMessageId?.trim().isNotEmpty == true
-        ? retryMessageId!.trim()
-        : (_rideChatMessagesRef(normalizedRideId).push().key?.trim() ?? '');
+    final messagesRef = _rideChatMessagesRef(normalizedRideId);
+    final messageNode = retryMessageId?.trim().isNotEmpty == true
+        ? messagesRef.child(retryMessageId!.trim())
+        : messagesRef.push();
+    final messageId = messageNode.key?.trim() ?? '';
     if (messageId.isEmpty) {
       return 'Unable to start this chat message right now.';
     }
@@ -8093,23 +8095,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
 
       final payload = <String, dynamic>{
-        'id': messageId,
-        'message_id': messageId,
-        'ride_id': normalizedRideId,
-        'sender_id': user.uid,
-        'sender_role': 'rider',
+        'senderId': user.uid,
+        'senderRole': 'rider',
         'type': messageType,
         'text': trimmed,
-        'image_url': normalizedImageUrl,
-        'local_temp_id': messageId,
-        'created_at': rtdb.ServerValue.timestamp,
-        'created_at_client': clientCreatedAt,
-        'client_status': 'sent',
-        'local_status': 'sent',
-        'server_ack': true,
-        'status': 'sent',
-        'read': false,
-        'updated_at': rtdb.ServerValue.timestamp,
+        'imageUrl': normalizedImageUrl.isEmpty ? null : normalizedImageUrl,
+        'timestamp': rtdb.ServerValue.timestamp,
       };
       final lastMessageMeta = <String, dynamic>{
         'id': messageId,
@@ -8127,48 +8118,49 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'messageId=$messageId path=${canonicalRideChatMessagesPath(normalizedRideId)}/$messageId',
       );
       try {
-        await rootRef
-            .update(<String, dynamic>{
-              '${canonicalRideChatMessagesPath(normalizedRideId)}/$messageId':
-                  payload,
-              '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/uid':
-                  user.uid,
-              '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/sender_role':
-                  'rider',
-              '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/updated_at':
-                  rtdb.ServerValue.timestamp,
-              'ride_requests/$normalizedRideId/chat_last_message':
-                  lastMessageMeta,
-              'ride_requests/$normalizedRideId/chat_last_message_text':
-                  lastMessageMeta['text'],
-              'ride_requests/$normalizedRideId/chat_last_message_sender_id':
-                  user.uid,
-              'ride_requests/$normalizedRideId/chat_last_message_sender_role':
-                  'rider',
-              'ride_requests/$normalizedRideId/chat_last_message_at':
-                  rtdb.ServerValue.timestamp,
-              'ride_requests/$normalizedRideId/chat_updated_at':
-                  rtdb.ServerValue.timestamp,
-              'ride_requests/$normalizedRideId/has_chat_messages': true,
-              '${canonicalRideChatMetaPath(normalizedRideId)}/rideId':
-                  normalizedRideId,
-              '${canonicalRideChatMetaPath(normalizedRideId)}/rider_id':
-                  user.uid,
-              '${canonicalRideChatMetaPath(normalizedRideId)}/driver_id':
-                  _valueAsText(_currentRideSnapshot?['driver_id']),
-              '${canonicalRideChatMetaPath(normalizedRideId)}/created_at':
-                  rtdb.ServerValue.timestamp,
-              '${canonicalRideChatMetaPath(normalizedRideId)}/updated_at':
-                  rtdb.ServerValue.timestamp,
-              '${canonicalRideChatMetaPath(normalizedRideId)}/last_message':
-                  lastMessageMeta['text'],
-              '${canonicalRideChatMetaPath(normalizedRideId)}/last_message_sender_id':
-                  user.uid,
-              '${canonicalRideChatMetaPath(normalizedRideId)}/last_message_at':
-                  rtdb.ServerValue.timestamp,
-              '${canonicalRideChatMetaPath(normalizedRideId)}/status': 'active',
-            })
-            .timeout(_rideChatSendTimeout);
+        Future<void> writeAttempt() async {
+          await messageNode.set(payload).timeout(_rideChatSendTimeout);
+        }
+
+        try {
+          await writeAttempt();
+        } catch (_) {
+          await writeAttempt();
+        }
+
+        await rootRef.update(<String, dynamic>{
+          '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/uid':
+              user.uid,
+          '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/sender_role':
+              'rider',
+          '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/updated_at':
+              rtdb.ServerValue.timestamp,
+          'ride_requests/$normalizedRideId/chat_last_message': lastMessageMeta,
+          'ride_requests/$normalizedRideId/chat_last_message_text':
+              lastMessageMeta['text'],
+          'ride_requests/$normalizedRideId/chat_last_message_sender_id': user.uid,
+          'ride_requests/$normalizedRideId/chat_last_message_sender_role': 'rider',
+          'ride_requests/$normalizedRideId/chat_last_message_at':
+              rtdb.ServerValue.timestamp,
+          'ride_requests/$normalizedRideId/chat_updated_at':
+              rtdb.ServerValue.timestamp,
+          'ride_requests/$normalizedRideId/has_chat_messages': true,
+          '${canonicalRideChatMetaPath(normalizedRideId)}/rideId': normalizedRideId,
+          '${canonicalRideChatMetaPath(normalizedRideId)}/rider_id': user.uid,
+          '${canonicalRideChatMetaPath(normalizedRideId)}/driver_id':
+              _valueAsText(_currentRideSnapshot?['driver_id']),
+          '${canonicalRideChatMetaPath(normalizedRideId)}/created_at':
+              rtdb.ServerValue.timestamp,
+          '${canonicalRideChatMetaPath(normalizedRideId)}/updated_at':
+              rtdb.ServerValue.timestamp,
+          '${canonicalRideChatMetaPath(normalizedRideId)}/last_message':
+              lastMessageMeta['text'],
+          '${canonicalRideChatMetaPath(normalizedRideId)}/last_message_sender_id':
+              user.uid,
+          '${canonicalRideChatMetaPath(normalizedRideId)}/last_message_at':
+              rtdb.ServerValue.timestamp,
+          '${canonicalRideChatMetaPath(normalizedRideId)}/status': 'active',
+        });
 
         _confirmRiderOptimisticMessageSent(
           rideId: normalizedRideId,
@@ -8583,37 +8575,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'path=${canonicalRideChatMessagesPath(rideId)}',
     );
 
-    final ref = _rideChatMessagesRef(rideId);
-    unawaited(_loadRiderChatSnapshot(rideId, ref));
+    final ref = _rideChatMessagesRef(rideId).orderByChild('timestamp');
     _riderChatSubscriptions.add(
-      ref.onChildAdded.listen(
-        (event) => _onRiderChatChildEvent(rideId, event),
-        onError: (Object error) {
-          _reportRiderChatIssue(rideId, 'listener_child_added_failed', error: error);
-        },
-      ),
-    );
-    _riderChatSubscriptions.add(
-      ref.onChildChanged.listen(
-        (event) => _onRiderChatChildEvent(rideId, event),
-        onError: (Object error) {
-          _reportRiderChatIssue(
-            rideId,
-            'listener_child_changed_failed',
-            error: error,
+      ref.onValue.listen(
+        (event) {
+          final parsed = parseRideChatSnapshot(
+            rideId: rideId,
+            raw: event.snapshot.value,
           );
+          _riderChatMessagesById
+            ..clear()
+            ..addEntries(parsed.messages.map((m) => MapEntry<String, RideChatMessage>(m.id, m)));
+          _flushRiderChatMessageTable(rideId);
         },
-      ),
-    );
-    _riderChatSubscriptions.add(
-      ref.onChildRemoved.listen(
-        (event) => _onRiderChatChildRemoved(rideId, event),
         onError: (Object error) {
-          _reportRiderChatIssue(
-            rideId,
-            'listener_child_removed_stream_failed',
-            error: error,
-          );
+          _reportRiderChatIssue(rideId, 'listener_onvalue_failed', error: error);
         },
       ),
     );

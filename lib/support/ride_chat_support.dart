@@ -103,15 +103,15 @@ RideChatMessage? parseRideChatMessageEntry({
     });
 
     final text = map['text']?.toString().trim() ?? '';
-    final imageUrl = map['image_url']?.toString().trim() ?? '';
+    final imageUrl = (map['imageUrl'] ?? map['image_url'])?.toString().trim() ?? '';
     if (text.isEmpty && imageUrl.isEmpty) {
       return null;
     }
 
-    final senderId = map['sender_id']?.toString().trim() ?? '';
-    final senderRole = _normalizeSenderRole(map['sender_role']);
+    final senderId = (map['senderId'] ?? map['sender_id'])?.toString().trim() ?? '';
+    final senderRole = _normalizeSenderRole(map['senderRole'] ?? map['sender_role']);
     final createdAt = rideChatTimestampFromRaw(
-      primary: map['created_at'],
+      primary: map['timestamp'] ?? map['created_at'],
       fallback: map['created_at_client'],
     );
     final status = rideChatStatusFromMessageMap(map);
@@ -119,8 +119,8 @@ RideChatMessage? parseRideChatMessageEntry({
     return RideChatMessage(
       id: messageId,
       rideId: rideId,
-      messageId: map['message_id']?.toString().trim().isNotEmpty == true
-          ? map['message_id'].toString().trim()
+      messageId: (map['messageId'] ?? map['message_id'])?.toString().trim().isNotEmpty == true
+          ? (map['messageId'] ?? map['message_id']).toString().trim()
           : messageId,
       senderId: senderId,
       senderRole: senderRole,
@@ -130,7 +130,7 @@ RideChatMessage? parseRideChatMessageEntry({
       createdAt: createdAt,
       status: status,
       isRead: map['read'] == true,
-      localTempId: map['local_temp_id']?.toString().trim() ?? '',
+      localTempId: (map['localTempId'] ?? map['local_temp_id'])?.toString().trim() ?? '',
     );
   } catch (_) {
     return null;
@@ -181,16 +181,16 @@ RideChatSnapshot parseRideChatSnapshot({
       });
 
       final text = map['text']?.toString().trim() ?? '';
-      final imageUrl = map['image_url']?.toString().trim() ?? '';
+      final imageUrl = (map['imageUrl'] ?? map['image_url'])?.toString().trim() ?? '';
       if (text.isEmpty && imageUrl.isEmpty) {
         invalidRecordCount += 1;
         return;
       }
 
-      final senderId = map['sender_id']?.toString().trim() ?? '';
-      final senderRole = _normalizeSenderRole(map['sender_role']);
+      final senderId = (map['senderId'] ?? map['sender_id'])?.toString().trim() ?? '';
+      final senderRole = _normalizeSenderRole(map['senderRole'] ?? map['sender_role']);
       final createdAt = rideChatTimestampFromRaw(
-        primary: map['created_at'],
+        primary: map['timestamp'] ?? map['created_at'],
         fallback: map['created_at_client'],
       );
       final status = rideChatStatusFromMessageMap(map);
@@ -199,8 +199,8 @@ RideChatSnapshot parseRideChatSnapshot({
         RideChatMessage(
           id: messageId,
           rideId: rideId,
-          messageId: map['message_id']?.toString().trim().isNotEmpty == true
-              ? map['message_id'].toString().trim()
+          messageId: (map['messageId'] ?? map['message_id'])?.toString().trim().isNotEmpty == true
+              ? (map['messageId'] ?? map['message_id']).toString().trim()
               : messageId,
           senderId: senderId,
           senderRole: senderRole,
@@ -210,7 +210,7 @@ RideChatSnapshot parseRideChatSnapshot({
           createdAt: createdAt,
           status: status,
           isRead: map['read'] == true,
-          localTempId: map['local_temp_id']?.toString().trim() ?? '',
+          localTempId: (map['localTempId'] ?? map['local_temp_id'])?.toString().trim() ?? '',
         ),
       );
     } catch (_) {
