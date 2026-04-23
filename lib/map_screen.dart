@@ -1183,16 +1183,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       !_isCreatingRide &&
       !_isCancellingRide;
 
-  bool get _canChat =>
-      _currentRideId != null &&
-      <String>{
-        'pending_driver_action',
-        'assigned',
-        'accepted',
-        'arriving',
-        'arrived',
-        'on_trip',
-      }.contains(_effectiveRideStatus);
+  bool get _canChat {
+    if (_currentRideId == null) {
+      return false;
+    }
+    final snapshot = _currentRideSnapshot;
+    if (snapshot == null || snapshot.isEmpty) {
+      return TripStateMachine.isChatEligibleUiStatus(_effectiveRideStatus);
+    }
+    return TripStateMachine.isChatEligibleRideSnapshot(snapshot);
+  }
 
   /// After a ride request exists, payment method is fixed for that ride.
   bool get _isRidePaymentMethodLocked {

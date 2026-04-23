@@ -264,6 +264,28 @@ class TripStateMachine {
     return legacyStatusForCanonical(canonicalStateFromSnapshot(rideData));
   }
 
+  /// Chat must remain available for active rider/driver lifecycle statuses,
+  /// including pre-accept assignment handoff states.
+  static bool isChatEligibleUiStatus(String status) {
+    final normalized = _normalizeText(status);
+    return normalized == 'pending_driver_action' ||
+        normalized == 'assigned' ||
+        normalized == 'accepted' ||
+        normalized == 'driver_accepted' ||
+        normalized == 'arriving' ||
+        normalized == 'arrived' ||
+        normalized == 'on_trip' ||
+        normalized == 'in_progress';
+  }
+
+  static bool isChatEligibleRideSnapshot(Map<String, dynamic>? rideData) {
+    if (rideData == null || rideData.isEmpty) {
+      return false;
+    }
+    final uiStatus = riderUiStatusFromRideData(rideData);
+    return isChatEligibleUiStatus(uiStatus);
+  }
+
   /// When RTDB uses legacy `status: cancelled`, infer who cancelled for rider UI.
   static String? refinedRiderTerminalCancelStatus(
     Map<String, dynamic> rideData,

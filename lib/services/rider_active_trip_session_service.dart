@@ -243,7 +243,7 @@ class RiderActiveTripSessionService {
       status: status,
       tripState: tripState,
       riderId: _readText(rideData['rider_id']),
-      driverId: _readText(rideData['driver_id']),
+      driverId: _rideDriverId(rideData),
       pickupAddress: _readText(rideData['pickup_address']),
       destinationAddress: _readText(rideData['destination_address']),
       updatedAt: _activityTs(rideData),
@@ -271,6 +271,14 @@ class RiderActiveTripSessionService {
 
   static String _readText(dynamic value) {
     return value?.toString().trim() ?? '';
+  }
+
+  static String _rideDriverId(Map<String, dynamic> rideData) {
+    final direct = _readText(rideData['driver_id']);
+    if (direct.isNotEmpty && direct.toLowerCase() != 'waiting') {
+      return direct;
+    }
+    return _readText(rideData['matched_driver_id']);
   }
 
   static String _canonicalRiderUiStatus(Map<String, dynamic> rideData) {
