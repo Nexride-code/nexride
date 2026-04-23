@@ -1,12 +1,14 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
-    match /ride_chats/{rideId}/{participantKey}/{senderUid}/{allPaths=**} {
-      allow write: if request.auth != null
-                   && request.auth.uid == senderUid
-                   && participantKey.matches('.*' + request.auth.uid + '.*');
-      allow read: if request.auth != null
-                  && participantKey.matches('.*' + request.auth.uid + '.*');
+    match /ride_chats/{rideId}/{senderUid}/{fileName} {
+      allow write: if request.auth != null && request.auth.uid == senderUid;
+      allow read: if request.auth != null;
+    }
+
+    match /ride_payment_proofs/{rideId}/{uid}/{fileName} {
+      allow write: if request.auth != null && request.auth.uid == uid;
+      allow read: if request.auth != null;
     }
   }
 }

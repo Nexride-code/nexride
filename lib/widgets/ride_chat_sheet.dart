@@ -436,27 +436,17 @@ class _RideChatSheetState extends State<RideChatSheet> {
                         hintText: 'Message your driver',
                         filled: true,
                         fillColor: const Color(0xFFF4F4F4),
+                        prefixIcon: IconButton(
+                          tooltip: 'Attach photo',
+                          onPressed:
+                              _sending ? null : () => unawaited(_handleImageSend()),
+                          icon: const Icon(Icons.photo_camera_outlined),
+                        ),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(16),
                           borderSide: BorderSide.none,
                         ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  SizedBox(
-                    height: 52,
-                    width: 52,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        padding: EdgeInsets.zero,
-                        backgroundColor: const Color(0xFFEEE6DB),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                      ),
-                      onPressed: _sending ? null : () => unawaited(_handleImageSend()),
-                      child: const Icon(Icons.photo_camera_outlined, color: Colors.black87),
                     ),
                   ),
                   const SizedBox(width: 10),

@@ -67,6 +67,24 @@ String canonicalRideChatMetaPath(String rideId) {
   return 'ride_chats/$normalizedRideId/meta';
 }
 
+String canonicalRideChatUnreadCountPath(String rideId, String uid) {
+  final r = rideId.trim();
+  final u = uid.trim();
+  return 'ride_chats/$r/unread/$u/count';
+}
+
+String canonicalRideChatUnreadUpdatedAtPath(String rideId, String uid) {
+  final r = rideId.trim();
+  final u = uid.trim();
+  return 'ride_chats/$r/unread/$u/updated_at';
+}
+
+String canonicalRideChatParticipantPath(String rideId, String uid) {
+  final r = rideId.trim();
+  final u = uid.trim();
+  return 'ride_chats/$r/participants/$u';
+}
+
 RideChatMessage? parseRideChatMessageEntry({
   required String rideId,
   required String messageId,
@@ -257,6 +275,10 @@ String _normalizeStatus(dynamic value) {
 String rideChatStatusFromMessageMap(Map<String, dynamic> map) {
   if (map['server_ack'] == true) {
     return 'sent';
+  }
+  final localStatus = map['local_status']?.toString().trim().toLowerCase() ?? '';
+  if (localStatus == 'sending' || localStatus == 'failed') {
+    return localStatus;
   }
   final rawClientStatus = map['client_status']?.toString().trim().toLowerCase() ?? '';
   if (rawClientStatus == 'failed' || rawClientStatus == 'pending' || rawClientStatus == 'sending') {

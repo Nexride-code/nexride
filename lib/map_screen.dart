@@ -216,7 +216,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Map<String, dynamic> _trustSummary = <String, dynamic>{};
   Map<String, dynamic> _trustRulesConfig = const <String, dynamic>{};
   String _selectedLaunchCity = RiderLaunchScope.defaultBrowseCity;
-  /// Next ride request: `card` or `online` (cash disabled via [RiderFeatureFlags.disableCashTripPayments]).
+  /// Next ride request: `card` or `bank_transfer` (cash disabled via [RiderFeatureFlags.disableCashTripPayments]).
   String _riderTripPaymentMethod = 'card';
 
   static const Color _gold = Color(0xFFD4AF37);
@@ -1234,6 +1234,27 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'arrived',
         'on_trip',
       }.contains(_effectiveRideStatus);
+
+  /// After a ride request exists, payment method is fixed for that ride.
+  bool get _isRidePaymentMethodLocked {
+    final id = _currentRideId?.trim();
+    if (id == null || id.isEmpty) {
+      return false;
+    }
+    if (_searchingDriver || _driverFound || _tripStarted) {
+      return true;
+    }
+    return _valueAsText(_currentRideSnapshot?['payment_method']).isNotEmpty;
+  }
+
+  void _syncRiderPaymentMethodFromRide(Map<String, dynamic> rideData) {
+    final pm = _valueAsText(rideData['payment_method']).toLowerCase();
+    if (pm == 'card') {
+      _riderTripPaymentMethod = 'card';
+    } else if (pm == 'bank_transfer' || pm == 'online') {
+      _riderTripPaymentMethod = 'bank_transfer';
+    }
+  }
 
   String? get _currentRiderUid => FirebaseAuth.instance.currentUser?.uid.trim();
 
@@ -4026,7 +4047,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           const SizedBox(height: 6),
           Text(
             RiderFeatureFlags.disableCashTripPayments
-                ? 'Cash is unavailable for now. Choose card or online payment.'
+                ? 'Cash is unavailable for now. Choose card or bank transfer.'
                 : 'Choose how you will pay.',
             style: const TextStyle(
               color: _panelMutedInk,
@@ -4044,7 +4065,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 label: const Text('Card'),
                 selected: _riderTripPaymentMethod == 'card',
                 onSelected: (selected) {
-                  if (!selected) {
+                  if (!selected || _isRidePaymentMethodLocked) {
                     return;
                   }
                   setState(() => _riderTripPaymentMethod = 'card');
@@ -4063,23 +4084,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 ),
               ),
               ChoiceChip(
-                label: const Text('Online payment'),
-                selected: _riderTripPaymentMethod == 'online',
+                label: const Text('Bank transfer'),
+                selected: _riderTripPaymentMethod == 'bank_transfer',
                 onSelected: (selected) {
-                  if (!selected) {
+                  if (!selected || _isRidePaymentMethodLocked) {
                     return;
                   }
-                  setState(() => _riderTripPaymentMethod = 'online');
+                  setState(() => _riderTripPaymentMethod = 'bank_transfer');
                 },
                 selectedColor: _gold.withValues(alpha: 0.22),
                 labelStyle: TextStyle(
-                  color: _riderTripPaymentMethod == 'online'
+                  color: _riderTripPaymentMethod == 'bank_transfer'
                       ? _panelInk
                       : _panelMutedInk,
                   fontWeight: FontWeight.w700,
                 ),
                 side: BorderSide(
-                  color: _riderTripPaymentMethod == 'online'
+                  color: _riderTripPaymentMethod == 'bank_transfer'
                       ? _gold
                       : _panelBorder,
                 ),
@@ -6002,7 +6023,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'payment_context': <String, dynamic>{
             'method': _riderTripPaymentMethod,
             'channel':
-                _riderTripPaymentMethod == 'card' ? 'card' : 'online_wallet',
+                _riderTripPaymentMethod == 'card' ? 'card' : 'bank_transfer',
           },
         },
       };
@@ -6448,6 +6469,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _currentRideId = rideId;
         _rideStatus = status;
         _currentRideSnapshot = visibleRideData;
+        _syncRiderPaymentMethodFromRide(Map<String, dynamic>.from(data));
         _driverData = nextDriverData;
         _activeTripSessionService.updateFromRideSnapshot(
           rideId,
@@ -6520,6 +6542,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
         if (status == 'completed') {
           _logRideFlow('ride completed rideId=$rideId');
+          final proofRideId = rideId;
+          final proofSnapshot = Map<String, dynamic>.from(data);
+          final proofPaymentMethod =
+              _valueAsText(proofSnapshot['payment_method']).toLowerCase();
           await _endCallForRideLifecycle(rideId: rideId);
           await _saveRiderTrip(rideId, data);
           if (_currentRiderUid?.isNotEmpty ?? false) {
@@ -6540,6 +6566,20 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               completedDriverId != 'waiting' &&
               mounted) {
             Future<void>.microtask(() => _showRatingDialog(completedDriverId));
+          }
+          if (proofPaymentMethod == 'bank_transfer' ||
+              proofPaymentMethod == 'online') {
+            unawaited(
+              Future<void>.delayed(const Duration(seconds: 2)).then((_) async {
+                if (!mounted) {
+                  return;
+                }
+                await _promptBankTransferProofUpload(
+                  rideId: proofRideId,
+                  rideSnapshot: proofSnapshot,
+                );
+              }),
+            );
           }
         } else if (status == 'cancelled' ||
             status == 'driver_cancelled' ||
@@ -7959,15 +7999,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (_riderChatListenerRideId != rideId) {
       return;
     }
+    final existing = _riderChatMessagesById[messageId];
+    final type = existing?.type ?? 'text';
+    final imageUrl = existing?.imageUrl ?? '';
     _riderChatMessagesById[messageId] = RideChatMessage(
       id: messageId,
       rideId: rideId,
       messageId: messageId,
       senderId: senderId,
       senderRole: 'rider',
-      type: 'text',
+      type: type,
       text: text,
-      imageUrl: '',
+      imageUrl: imageUrl,
       createdAt: clientCreatedAt,
       status: 'sent',
       isRead: false,
@@ -7995,7 +8038,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       messageId: messageId,
       senderId: senderId,
       senderRole: 'rider',
-      type: 'text',
+      type: existing.type,
       text: text.isNotEmpty ? text : existing.text,
       imageUrl: existing.imageUrl,
       createdAt: existing.createdAt,
@@ -8102,9 +8145,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'created_at': rtdb.ServerValue.timestamp,
         'created_at_client': clientCreatedAt,
         'client_status': 'sent',
+        'local_status': 'sent',
         'server_ack': true,
         'status': 'sent',
         'read': false,
+        'updated_at': rtdb.ServerValue.timestamp,
       };
       final lastMessageMeta = <String, dynamic>{
         'id': messageId,
@@ -8126,6 +8171,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             .update(<String, dynamic>{
               '${canonicalRideChatMessagesPath(normalizedRideId)}/$messageId':
                   payload,
+              '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/uid':
+                  user.uid,
+              '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/sender_role':
+                  'rider',
+              '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/updated_at':
+                  rtdb.ServerValue.timestamp,
               'ride_requests/$normalizedRideId/chat_last_message':
                   lastMessageMeta,
               'ride_requests/$normalizedRideId/chat_last_message_text':
@@ -8166,6 +8217,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           text: trimmed,
           clientCreatedAt: clientCreatedAt,
         );
+
+        final driverRecipient = _firstNonEmptyText(<dynamic>[
+          _currentRideSnapshot?['driver_id'],
+          _currentRideSnapshot?['matched_driver_id'],
+        ]).trim();
+        if (driverRecipient.isNotEmpty && driverRecipient != 'waiting') {
+          unawaited(
+            _bumpRideChatUnreadForRecipient(
+              rideId: normalizedRideId,
+              recipientUid: driverRecipient,
+            ),
+          );
+        }
 
         unawaited(_mirrorRiderChatToTripRouteLog(
           rideId: normalizedRideId,
@@ -8239,15 +8303,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       '[CHAT_IMAGE_UPLOAD_START] role=rider rideId=$normalizedRideId uid=${user.uid}',
     );
     try {
-      final driverId =
-          _valueAsText(_currentRideSnapshot?['driver_id']).trim().isNotEmpty
-          ? _valueAsText(_currentRideSnapshot?['driver_id']).trim()
-          : _valueAsText(_currentRideSnapshot?['matched_driver_id']).trim();
-      final participantKey = _chatParticipantKey(user.uid, driverId);
       final uploaded = await _dispatchPhotoUploadService.uploadRideChatPhoto(
         rideId: normalizedRideId,
         actorId: user.uid,
-        participantKey: participantKey,
         asset: DispatchPhotoSelectedAsset(
           localPath: picked.path,
           fileName: picked.name.isNotEmpty
@@ -8282,13 +8340,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       return 'Unable to send this image right now.';
     }
-  }
-
-  String _chatParticipantKey(String first, String second) {
-    final a = first.trim();
-    final b = second.trim();
-    final ids = <String>[a, b]..sort();
-    return ids.join('_');
   }
 
   void _setRiderChatMessages(String rideId, List<RideChatMessage> messages) {
@@ -8379,6 +8430,49 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _logRideFlow(
       '[CHAT_UNREAD_CLEAR] role=rider rideId=$rideId uid=${FirebaseAuth.instance.currentUser?.uid ?? ''} unreadCount=0',
     );
+  }
+
+  Future<void> _clearOwnRideChatUnreadRtdb(String rideId, String uid) async {
+    final u = uid.trim();
+    if (u.isEmpty) {
+      return;
+    }
+    try {
+      await _rideRequestsRef.root.update(<String, dynamic>{
+        canonicalRideChatUnreadCountPath(rideId, u): 0,
+        canonicalRideChatUnreadUpdatedAtPath(rideId, u):
+            rtdb.ServerValue.timestamp,
+      });
+    } catch (error) {
+      _logRideFlow('ride chat unread clear failed rideId=$rideId error=$error');
+    }
+  }
+
+  Future<void> _bumpRideChatUnreadForRecipient({
+    required String rideId,
+    required String recipientUid,
+  }) async {
+    final rid = recipientUid.trim();
+    if (rid.isEmpty) {
+      return;
+    }
+    final ref =
+        _rideRequestsRef.root.child(canonicalRideChatUnreadCountPath(rideId, rid));
+    try {
+      await ref.runTransaction((Object? current) {
+        final n =
+            current is int ? current : (current is num ? current.toInt() : 0);
+        return rtdb.Transaction.success(n + 1);
+      });
+      await _rideRequestsRef.root.update(<String, dynamic>{
+        canonicalRideChatUnreadUpdatedAtPath(rideId, rid):
+            rtdb.ServerValue.timestamp,
+      });
+    } catch (error) {
+      _logRideFlow(
+        'ride chat unread bump failed rideId=$rideId recipient=$rid error=$error',
+      );
+    }
   }
 
   void _stopRiderChatListener() {
@@ -8596,6 +8690,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     _logRideFlow('[CHAT_OPEN] role=rider rideId=$rideId');
     _resetRiderUnreadCount(rideId);
+    unawaited(_clearOwnRideChatUnreadRtdb(rideId, user.uid));
     unawaited(
       _markRiderMessagesRead(rideId, messages: _riderChatMessages.value),
     );
@@ -8643,6 +8738,95 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _isRiderChatOpen = false;
       _riderChatDraftByRide.removeWhere((key, _) => key != rideId);
     });
+  }
+
+  Future<void> _promptBankTransferProofUpload({
+    required String rideId,
+    required Map<String, dynamic> rideSnapshot,
+  }) async {
+    if (!mounted) {
+      return;
+    }
+    final riderId = _currentRiderUid ?? '';
+    if (riderId.isEmpty) {
+      return;
+    }
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Bank transfer proof'),
+        content: const Text(
+          'This trip used bank transfer. Upload a screenshot of your transfer so your driver can verify payment.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('NOT NOW'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('UPLOAD'),
+          ),
+        ],
+      ),
+    );
+    if (go != true || !mounted) {
+      return;
+    }
+
+    final picked = await _riderChatImagePicker.pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 2000,
+      imageQuality: 88,
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+
+    try {
+      final asset = DispatchPhotoSelectedAsset(
+        localPath: picked.path,
+        fileName: picked.name.isNotEmpty
+            ? picked.name
+            : picked.path.split('/').last,
+        mimeType: picked.path.toLowerCase().endsWith('.png')
+            ? 'image/png'
+            : 'image/jpeg',
+        fileSizeBytes: await picked.length(),
+        source: 'bank_transfer_proof',
+      );
+      final uploaded = await _dispatchPhotoUploadService.uploadRidePaymentProof(
+        rideId: rideId.trim(),
+        actorId: riderId,
+        asset: asset,
+      );
+      final proofRef = _rideRequestsRef.root
+          .child('ride_payment_proofs/${rideId.trim()}/${riderId.trim()}');
+      final proofId = proofRef.push().key;
+      if (proofId == null || proofId.isEmpty) {
+        _showSnackBar('Could not allocate proof id.');
+        return;
+      }
+      await proofRef.child(proofId).set(<String, dynamic>{
+        'proofId': proofId,
+        'rideId': rideId.trim(),
+        'riderId': riderId,
+        'uploadedBy': riderId,
+        'paymentMethod': 'bank_transfer',
+        'imageUrl': uploaded.fileUrl,
+        'storagePath': uploaded.fileReference,
+        'createdAt': rtdb.ServerValue.timestamp,
+        'status': 'submitted',
+      });
+      if (mounted) {
+        _showSnackBar('Proof uploaded. Thank you.');
+      }
+    } catch (error) {
+      _logRideFlow('bank proof upload failed rideId=$rideId error=$error');
+      if (mounted) {
+        _showSnackBar('Could not upload proof. Please try again.');
+      }
+    }
   }
 
   Future<void> _submitRating(String driverId, double rating) async {
