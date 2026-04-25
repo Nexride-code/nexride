@@ -1,0 +1,4 @@
+# ninja log v5
+0	284	1776944153934494716	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	bc56c6b5ef0919d4
+285	329	1776944153981184761	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/x86/libiris_rendering_android.so	cd2c130ebaa6a75b
+1	61	1776944546613948480	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/x86/libiris_rendering_android.so	cd2c130ebaa6a75b
