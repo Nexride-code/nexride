@@ -58,7 +58,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   final rtdb.DatabaseReference _driverActiveRideRef = rtdb
       .FirebaseDatabase
       .instance
-      .ref('driver_active_ride');
+      .ref('driver_active_rides');
   final RiderTrustBootstrapService _bootstrapService =
       const RiderTrustBootstrapService();
   final RiderTrustRulesService _trustRulesService =
@@ -405,7 +405,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       'drivers/$driverId/activeRideId': null,
       'drivers/$driverId/currentRideId': null,
       'drivers/$driverId/updated_at': rtdb.ServerValue.timestamp,
-      'driver_active_ride/$driverId': null,
+      'driver_active_rides/$driverId': null,
     });
     debugPrint(
       '[Dispatch] driver availability restored requestId=$requestId driverId=$driverId reason=$reason',

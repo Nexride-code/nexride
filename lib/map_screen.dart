@@ -75,7 +75,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final rtdb.DatabaseReference _driverActiveRideRef = rtdb
       .FirebaseDatabase
       .instance
-      .ref('driver_active_ride');
+      .ref('driver_active_rides');
   final rtdb.DatabaseReference _driversRef = rtdb.FirebaseDatabase.instance.ref(
     'drivers',
   );
@@ -692,7 +692,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'drivers/$driverId/activeRideId': null,
       'drivers/$driverId/currentRideId': null,
       'drivers/$driverId/updated_at': rtdb.ServerValue.timestamp,
-      'driver_active_ride/$driverId': null,
+      'driver_active_rides/$driverId': null,
     });
     _logRideFlow(
       'driver availability restored rideId=$rideId driverId=$driverId reason=$reason',
@@ -1013,7 +1013,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       driverRecord['currentRideId'],
     ]);
     if (activeRideId != rideId) {
-      return 'driver_active_ride_mismatch';
+      return 'driver_active_rides_mismatch';
     }
 
     final driverStatus = _normalizedRideStatus(
@@ -1066,7 +1066,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final canonicalFromRide =
         TripStateMachine.canonicalStateFromSnapshot(rideData);
     // After accept, `ride_requests` is authoritative. Cross-checking
-    // `drivers/` + `driver_active_ride/` can briefly lag and incorrectly
+    // `drivers/` + `driver_active_rides/` can briefly lag and incorrectly
     // collapse the UI back to "searching".
     if (TripStateMachine.isDriverActiveState(canonicalFromRide)) {
       _logRideFlow(

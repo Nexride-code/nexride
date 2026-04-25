@@ -217,8 +217,36 @@
       ],
       ".read": "auth != null && (root.child('admins').child(auth.uid).val() === true || root.child('support_staff').child(auth.uid).exists() || (query.orderByChild === 'rider_id' && query.equalTo === auth.uid) || (query.orderByChild === 'driver_id' && query.equalTo === auth.uid) || (query.orderByChild === 'matched_driver_id' && query.equalTo === auth.uid) || (root.child('drivers').child(auth.uid).exists() && query.orderByChild === 'status' && query.equalTo === 'searching') || (root.child('drivers').child(auth.uid).exists() && query.orderByChild === 'market_pool' && (query.equalTo != null || (query.startAt === query.endAt && query.startAt != null))))",
       "$rideId": {
-        ".read": "auth != null && (root.child('admins').child(auth.uid).val() === true || root.child('support_staff').child(auth.uid).exists() || data.child('rider_id').val() === auth.uid || data.child('riderId').val() === auth.uid || data.child('driver_id').val() === auth.uid || data.child('matched_driver_id').val() === auth.uid || data.child('matchedDriverId').val() === auth.uid || (root.child('drivers').child(auth.uid).exists() && data.child('market_pool').val() != null && data.child('market_pool').val() !== ''))",
+        ".read": "auth != null && (root.child('admins').child(auth.uid).val() === true || root.child('support_staff').child(auth.uid).exists() || data.child('rider_id').val() === auth.uid || data.child('riderId').val() === auth.uid || data.child('driver_id').val() === auth.uid || data.child('matched_driver_id').val() === auth.uid || data.child('matchedDriverId').val() === auth.uid || (root.child('drivers').child(auth.uid).exists() && data.child('market_pool').val() != null && data.child('market_pool').val() != ''))",
         ".write": "auth != null && (root.child('admins').child(auth.uid).val() === true || (!data.exists() && (newData.child('rider_id').val() === auth.uid || newData.child('riderId').val() === auth.uid)) || data.child('rider_id').val() === auth.uid || data.child('riderId').val() === auth.uid || data.child('driver_id').val() === auth.uid || data.child('matched_driver_id').val() === auth.uid || (root.child('drivers').child(auth.uid).exists() && data.child('status').val() === 'searching' && (data.child('driver_id').val() === 'waiting' || !data.child('driver_id').exists() || data.child('driver_id').val() === '') && newData.child('driver_id').val() === auth.uid))"
+      }
+    },
+
+    "online_drivers": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)",
+        ".write": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)"
+      }
+    },
+
+    "active_driver_locations": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)",
+        ".write": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)"
+      }
+    },
+
+    "driver_active_rides": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)",
+        ".write": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)"
+      }
+    },
+
+    "rider_active_rides": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)",
+        ".write": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)"
       }
     },
 
@@ -381,6 +409,15 @@
     },
 
     "driver_verifications": {
+      ".read": "auth != null && root.child('admins').child(auth.uid).val() === true",
+      ".write": "auth != null && root.child('admins').child(auth.uid).val() === true",
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)",
+        ".write": "auth != null && (auth.uid === $uid || root.child('admins').child(auth.uid).val() === true)"
+      }
+    },
+
+    "driver_device_fingerprints": {
       ".read": "auth != null && root.child('admins').child(auth.uid).val() === true",
       ".write": "auth != null && root.child('admins').child(auth.uid).val() === true",
       "$uid": {

@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'ride_type_screen.dart';
 import 'services/rider_trust_bootstrap_service.dart';
+import 'support/firebase_rtdb_guard.dart';
 import 'support/startup_rtdb_support.dart';
 
 class RiderSignup extends StatefulWidget {
@@ -43,7 +44,8 @@ class _RiderSignupState extends State<RiderSignup> {
             password: passwordController.text.trim(),
           );
 
-      String uid = userCredential.user!.uid;
+      final authUser = await waitForAuthenticatedUser();
+      String uid = authUser.uid;
 
       final baseUser = <String, dynamic>{
         "uid": uid,
@@ -61,17 +63,20 @@ class _RiderSignupState extends State<RiderSignup> {
         fallbackPhone: phoneController.text.trim(),
       );
 
-      await persistRiderOwnedBootstrap(
-        rootRef: dbRef,
-        riderId: uid,
-        userProfile: <String, dynamic>{
-          ...baseUser,
-          ...bundle.userProfile,
-          "created_at": ServerValue.timestamp,
-        },
-        verification: bundle.verification,
-        deviceFingerprints: bundle.deviceFingerprints,
-        source: 'rider_signup.bootstrap_write',
+      await runWithDatabaseRetry<void>(
+        label: 'rider_signup.bootstrap_write',
+        action: () => persistRiderOwnedBootstrap(
+          rootRef: dbRef,
+          riderId: uid,
+          userProfile: <String, dynamic>{
+            ...baseUser,
+            ...bundle.userProfile,
+            "created_at": ServerValue.timestamp,
+          },
+          verification: bundle.verification,
+          deviceFingerprints: bundle.deviceFingerprints,
+          source: 'rider_signup.bootstrap_write',
+        ),
       );
 
       if (!mounted) {

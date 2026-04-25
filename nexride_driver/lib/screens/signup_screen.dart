@@ -3,6 +3,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import '../services/auth_service.dart';
+import '../services/firebase_rtdb_guard.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -44,15 +45,48 @@ class _SignupScreenState extends State<SignupScreen> {
         password: passwordController.text.trim(),
       );
 
-      String uid = userCredential.user!.uid;
+      final authUser = await waitForAuthenticatedUser();
+      String uid = authUser.uid;
 
       // 🔥 STEP 2: Save to Realtime Database
-      await dbRef.child("drivers").child(uid).set({
-        "uid": uid,
-        "email": emailController.text.trim(),
-        "status": "active",
-        "created_at": DateTime.now().toIso8601String(),
-      });
+      await runWithDatabaseRetry<void>(
+        label: 'driver_signup.bootstrap',
+        action: () async {
+          final updates = <String, Object?>{
+            "drivers/$uid/uid": uid,
+            "drivers/$uid/email": emailController.text.trim(),
+            "drivers/$uid/role": "driver",
+            "drivers/$uid/status": "offline",
+            "drivers/$uid/isOnline": false,
+            "drivers/$uid/isAvailable": false,
+            "drivers/$uid/updated_at": ServerValue.timestamp,
+            "drivers/$uid/created_at": ServerValue.timestamp,
+            "users/$uid/uid": uid,
+            "users/$uid/email": emailController.text.trim(),
+            "users/$uid/role": "driver",
+            "users/$uid/updated_at": ServerValue.timestamp,
+            "users/$uid/created_at": ServerValue.timestamp,
+            "online_drivers/$uid": {
+              "uid": uid,
+              "online": false,
+              "updated_at": ServerValue.timestamp,
+            },
+            "active_driver_locations/$uid": {
+              "uid": uid,
+              "lat": 0,
+              "lng": 0,
+              "heading": 0,
+              "updated_at": ServerValue.timestamp,
+            },
+            "driver_active_rides/$uid": {
+              "uid": uid,
+              "ride_id": null,
+              "updated_at": ServerValue.timestamp,
+            },
+          };
+          await dbRef.update(updates);
+        },
+      );
 
       // ✅ SUCCESS
       ScaffoldMessenger.of(context).showSnackBar(
