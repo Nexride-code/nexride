@@ -89,6 +89,66 @@ Future<T?> runOptionalStartupRead<T>({
   }
 }
 
+Future<Map<String, dynamic>> readUserProfileWithFallback({
+  required rtdb.DatabaseReference rootRef,
+  required String uid,
+  required String source,
+}) async {
+  final normalizedUid = uid.trim();
+  if (normalizedUid.isEmpty) {
+    return <String, dynamic>{};
+  }
+
+  final usersSnapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
+    source: source,
+    path: 'users/$normalizedUid',
+    action: () => rootRef.child('users/$normalizedUid').get(),
+  );
+  final usersMap = usersSnapshot?.value is Map
+      ? Map<String, dynamic>.from(usersSnapshot!.value as Map)
+      : <String, dynamic>{};
+
+  if (usersMap.isNotEmpty) {
+    return usersMap;
+  }
+
+  final legacySnapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
+    source: source,
+    path: 'Users/$normalizedUid',
+    action: () => rootRef.child('Users/$normalizedUid').get(),
+  );
+  final legacyMap = legacySnapshot?.value is Map
+      ? Map<String, dynamic>.from(legacySnapshot!.value as Map)
+      : <String, dynamic>{};
+  return legacyMap;
+}
+
+Future<bool> hasRiderBootstrapArtifacts({
+  required rtdb.DatabaseReference rootRef,
+  required String riderId,
+  required String source,
+}) async {
+  final normalizedRiderId = riderId.trim();
+  if (normalizedRiderId.isEmpty) {
+    return false;
+  }
+
+  final snapshots = await Future.wait(<Future<rtdb.DataSnapshot?>>[
+    runOptionalStartupRead<rtdb.DataSnapshot>(
+      source: source,
+      path: 'rider_verifications/$normalizedRiderId',
+      action: () => rootRef.child('rider_verifications/$normalizedRiderId').get(),
+    ),
+    runOptionalStartupRead<rtdb.DataSnapshot>(
+      source: source,
+      path: 'rider_device_fingerprints/$normalizedRiderId',
+      action: () => rootRef.child('rider_device_fingerprints/$normalizedRiderId').get(),
+    ),
+  ]);
+
+  return (snapshots[0]?.exists ?? false) && (snapshots[1]?.exists ?? false);
+}
+
 Future<void> persistRiderOwnedBootstrap({
   required rtdb.DatabaseReference rootRef,
   required String riderId,

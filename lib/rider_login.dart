@@ -42,20 +42,14 @@ class _RiderLoginState extends State<RiderLogin> {
 
       String uid = userCredential.user!.uid;
 
-      DatabaseReference userRef = FirebaseDatabase.instance.ref("users/$uid");
-
-      final snapshot = await runOptionalStartupRead<DataSnapshot>(
+      final existingUser = await readUserProfileWithFallback(
+        rootRef: dbRef,
+        uid: uid,
         source: 'rider_login.user_profile',
-        path: 'users/$uid',
-        action: () => userRef.get(),
       );
-
-      final existingUser = snapshot?.value is Map
-          ? Map<String, dynamic>.from(snapshot!.value as Map)
-          : <String, dynamic>{};
       final userData = <String, dynamic>{
         ...existingUser,
-        if (snapshot == null || !snapshot.exists) ...<String, dynamic>{
+        if (existingUser.isEmpty) ...<String, dynamic>{
           "uid": uid,
           "name": emailController.text.split("@")[0],
           "email": emailController.text.trim(),
@@ -72,21 +66,32 @@ class _RiderLoginState extends State<RiderLogin> {
         fallbackEmail: emailController.text.trim(),
       );
 
-      await persistRiderOwnedBootstrap(
+      final bootstrapReady = await hasRiderBootstrapArtifacts(
         rootRef: dbRef,
         riderId: uid,
-        userProfile: <String, dynamic>{
-          ...userData,
-          ...bundle.userProfile,
-          "created_at": userData["created_at"] ?? ServerValue.timestamp,
-        },
-        verification: bundle.verification,
-        deviceFingerprints: bundle.deviceFingerprints,
-        source: 'rider_login.bootstrap_write',
+        source: 'rider_login.bootstrap_check',
       );
+      if (!bootstrapReady) {
+        await persistRiderOwnedBootstrap(
+          rootRef: dbRef,
+          riderId: uid,
+          userProfile: <String, dynamic>{
+            ...userData,
+            ...bundle.userProfile,
+            "created_at": userData["created_at"] ?? ServerValue.timestamp,
+          },
+          verification: bundle.verification,
+          deviceFingerprints: bundle.deviceFingerprints,
+          source: 'rider_login.bootstrap_write',
+        );
+      } else {
+        await dbRef.child('users/$uid').update(<String, dynamic>{
+          'updated_at': ServerValue.timestamp,
+        });
+      }
 
       debugPrint(
-        snapshot?.exists == true
+        existingUser.isNotEmpty
             ? "✅ Rider profile found"
             : "✅ Rider profile created",
       );

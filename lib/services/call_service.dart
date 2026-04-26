@@ -571,7 +571,10 @@ class CallService {
     debugPrint('[CALL_TOKEN_FETCH_START] rideId=$rideId uid=$agoraUid');
 
     final uri = Uri.parse(_agoraTokenEndpoint).replace(
-      queryParameters: <String, String>{'channel': rideId, 'uid': agoraUid},
+      queryParameters: <String, String>{
+        'channelName': rideId,
+        'uid': agoraUid,
+      },
     );
 
     try {
@@ -1145,7 +1148,11 @@ String _resolveTokenEndpoint(String? override) {
   }
 
   const endpoint = String.fromEnvironment('AGORA_TOKEN_ENDPOINT');
-  return endpoint.trim();
+  if (endpoint.trim().isNotEmpty) {
+    return endpoint.trim();
+  }
+
+  return 'https://us-central1-nexride-8d5bc.cloudfunctions.net/generateAgoraToken';
 }
 
 String _resolveChannelPrefix() {

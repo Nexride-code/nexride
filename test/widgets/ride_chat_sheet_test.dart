@@ -24,6 +24,12 @@ void main() {
             messagesListenable: messages,
             onSendMessage: (String rideId, String text) async =>
                 'Unable to send message right now.',
+            onRetryMessage: (
+              String rideId,
+              RideChatMessage message,
+            ) async => null,
+            onSendImage: (String rideId, RideChatImageSource source) async =>
+                null,
           ),
         ),
       ),
@@ -60,6 +66,12 @@ void main() {
               sendCount += 1;
               return completer.future;
             },
+            onRetryMessage: (
+              String rideId,
+              RideChatMessage message,
+            ) async => null,
+            onSendImage: (String rideId, RideChatImageSource source) async =>
+                null,
           ),
         ),
       ),
@@ -96,6 +108,12 @@ void main() {
             currentUserId: 'rider-1',
             messagesListenable: messages,
             onSendMessage: (String rideId, String text) => completer.future,
+            onRetryMessage: (
+              String rideId,
+              RideChatMessage message,
+            ) async => null,
+            onSendImage: (String rideId, RideChatImageSource source) async =>
+                null,
           ),
         ),
       ),

@@ -4,3 +4,10 @@ node_modules/
 firebase-debug.log
 build/
 .dart_tool/
+third_party/agora_rtc_engine/**/.cxx/
+android/.gradle/
+android/app/build/
+ios/Pods/
+macos/Flutter/ephemeral/
+windows/flutter/ephemeral/
+linux/flutter/ephemeral/

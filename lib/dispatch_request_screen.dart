@@ -55,7 +55,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   final rtdb.DatabaseReference _driversRef = rtdb.FirebaseDatabase.instance.ref(
     'drivers',
   );
-  final rtdb.DatabaseReference _driverActiveRideRef = rtdb
+  final rtdb.DatabaseReference _driverActiveRidesRef = rtdb
       .FirebaseDatabase
       .instance
       .ref('driver_active_rides');
@@ -382,7 +382,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
     final snapshots = await Future.wait(<Future<rtdb.DataSnapshot>>[
       _driversRef.child(driverId).get(),
-      _driverActiveRideRef.child(driverId).get(),
+      _driverActiveRidesRef.child(driverId).get(),
     ]);
     final driverRecord = _asStringDynamicMap(snapshots[0].value);
     final activeRideRecord = _asStringDynamicMap(snapshots[1].value);
@@ -1187,6 +1187,21 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'deliveredAt': 0,
         'deliveryProofStatus': 'pending',
       };
+      final paymentPlaceholder = <String, dynamic>{
+        'provider': 'flutterwave_ready',
+        'status': 'placeholder_pending',
+        'intent_id': '',
+        'tx_ref': '',
+        'initialized_at': rtdb.ServerValue.timestamp,
+        'updated_at': rtdb.ServerValue.timestamp,
+      };
+      final pricingSnapshot = <String, dynamic>{
+        ...fareBreakdown.toMap(),
+        'traffic_window': fareBreakdown.trafficWindowLabel,
+        'distance_km': fareBreakdown.distanceKm,
+        'duration_min': fareBreakdown.durationMin,
+        'computed_at': rtdb.ServerValue.timestamp,
+      };
 
       final payload = <String, dynamic>{
         'service_type': RiderServiceType.dispatchDelivery.key,
@@ -1244,6 +1259,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         },
         'payment_method': 'cash',
         RtdbRideRequestFields.paymentStatus: 'not_required',
+        'payment_placeholder': paymentPlaceholder,
         'settlement_status': 'pending',
         'support_status': 'normal',
         'accepted_at': null,
@@ -1251,6 +1267,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'completed_at': null,
         'cancel_reason': '',
         'fare_breakdown': fareBreakdown.toMap(),
+        'pricing_snapshot': pricingSnapshot,
         'rider_trust_snapshot': <String, dynamic>{
           'verificationStatus':
               (_trustSummary['verificationStatus']?.toString().isNotEmpty ??

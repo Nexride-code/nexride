@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
-import '../services/auth_service.dart';
 import '../services/firebase_rtdb_guard.dart';
 
 class SignupScreen extends StatefulWidget {
@@ -16,8 +15,6 @@ class _SignupScreenState extends State<SignupScreen> {
 
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
-
-  final AuthService authService = AuthService();
 
   final DatabaseReference dbRef = FirebaseDatabase.instance.ref();
 
@@ -39,7 +36,7 @@ class _SignupScreenState extends State<SignupScreen> {
     try {
 
       // 🔥 STEP 1: Create user
-      UserCredential? userCredential = await FirebaseAuth.instance
+      await FirebaseAuth.instance
           .createUserWithEmailAndPassword(
         email: emailController.text.trim(),
         password: passwordController.text.trim(),

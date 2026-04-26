@@ -191,6 +191,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final Map<String, String> _riderChatDraftByRide = <String, String>{};
   StreamSubscription<rtdb.DatabaseEvent>? _callSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _incomingCallSubscription;
+  String? _incomingCallListenerUid;
   OverlayEntry? _callOverlayEntry;
   RideCallSession? _currentCallSession;
   String? _callListenerRideId;
@@ -2293,6 +2294,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _stopRiderChatListener();
     _callSubscription?.cancel();
     _incomingCallSubscription?.cancel();
+    _incomingCallListenerUid = null;
     _removeCallOverlayEntry();
     _alertSoundService.dispose();
     unawaited(_callService.dispose());
@@ -2834,12 +2836,20 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   void _startIncomingCallListener() {
     final riderUid = _currentRiderUid;
     if (riderUid == null || riderUid.isEmpty) {
+      _incomingCallSubscription?.cancel();
+      _incomingCallSubscription = null;
+      _incomingCallListenerUid = null;
       return;
     }
 
-    if (_incomingCallSubscription != null) {
+    if (_incomingCallSubscription != null &&
+        _incomingCallListenerUid == riderUid) {
       return;
     }
+
+    _incomingCallSubscription?.cancel();
+    _incomingCallSubscription = null;
+    _incomingCallListenerUid = riderUid;
 
     _incomingCallSubscription = _callService
         .observeCallsForReceiver(riderUid)

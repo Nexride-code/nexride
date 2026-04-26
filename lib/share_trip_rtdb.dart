@@ -143,7 +143,7 @@ class ShareTripRtdbService {
       'updated_at': nowMs,
     });
 
-    _log('share created rideId=${payload.rideId} token=$newToken');
+    _log('share created rideId=${payload.rideId}');
 
     return _ShareMeta(
       token: newToken,
@@ -196,6 +196,7 @@ class ShareTripRtdbService {
       'live_location': liveLocation,
       'created_at': shareMeta.createdAt,
       'expires_at': shareMeta.expiresAt,
+      'payment': _buildPaymentSharePayload(rideData),
       'updated_at':
           _asInt(rideData?['updated_at']) ??
           liveLocation?['updated_at'] ??
@@ -535,6 +536,24 @@ class ShareTripRtdbService {
       20,
       (_) => chars[random.nextInt(chars.length)],
     ).join();
+  }
+
+  Map<String, dynamic> _buildPaymentSharePayload(Map<String, dynamic>? rideData) {
+    final paymentMethod = rideData?['payment_method']?.toString().trim() ?? '';
+    final paymentStatus = rideData?['payment_status']?.toString().trim() ?? '';
+    final settlementStatus =
+        rideData?['settlement_status']?.toString().trim() ?? '';
+    final placeholder = _asStringDynamicMap(rideData?['payment_placeholder']);
+    final provider = placeholder?['provider']?.toString().trim() ?? '';
+    final placeholderStatus = placeholder?['status']?.toString().trim() ?? '';
+
+    return <String, dynamic>{
+      'method': paymentMethod,
+      'status': paymentStatus,
+      'settlement_status': settlementStatus,
+      'provider': provider,
+      'provider_status': placeholderStatus,
+    };
   }
 }
 

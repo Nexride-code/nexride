@@ -198,31 +198,33 @@ class _SplashScreenState extends State<SplashScreen> {
         )
         .timeout(_kStartupStepTimeout);
 
-    await persistRiderOwnedBootstrap(
+    final bootstrapReady = await hasRiderBootstrapArtifacts(
       rootRef: _rootRef,
       riderId: user.uid,
-      userProfile: <String, dynamic>{
-        ...existingUser,
-        ...bundle.userProfile,
-        'created_at': existingUser['created_at'] ?? ServerValue.timestamp,
-      },
-      verification: bundle.verification,
-      deviceFingerprints: bundle.deviceFingerprints,
-      source: 'splash_screen.bootstrap_write',
-    ).timeout(_kStartupStepTimeout);
+      source: 'splash_screen.bootstrap_check',
+    );
+    if (!bootstrapReady) {
+      await persistRiderOwnedBootstrap(
+        rootRef: _rootRef,
+        riderId: user.uid,
+        userProfile: <String, dynamic>{
+          ...existingUser,
+          ...bundle.userProfile,
+          'created_at': existingUser['created_at'] ?? ServerValue.timestamp,
+        },
+        verification: bundle.verification,
+        deviceFingerprints: bundle.deviceFingerprints,
+        source: 'splash_screen.bootstrap_write',
+      ).timeout(_kStartupStepTimeout);
+    }
   }
 
   Future<Map<String, dynamic>> _fetchExistingUserProfile(User user) async {
-    final userPath = 'users/${user.uid}';
-    final snapshot = await runOptionalStartupRead<DataSnapshot>(
+    return readUserProfileWithFallback(
+      rootRef: _rootRef,
+      uid: user.uid,
       source: 'splash_screen.user_profile',
-      path: userPath,
-      action: () => _rootRef.child(userPath).get(),
-    ).timeout(_kStartupStepTimeout, onTimeout: () => null);
-
-    return snapshot?.value is Map
-        ? Map<String, dynamic>.from(snapshot!.value as Map)
-        : <String, dynamic>{};
+    ).timeout(_kStartupStepTimeout, onTimeout: () => <String, dynamic>{});
   }
 
   Future<Map<String, dynamic>> _loadStartupConfig() {
