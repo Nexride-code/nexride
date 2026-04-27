@@ -4,6 +4,28 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nexride/services/native_places_service.dart';
 import 'package:nexride/widgets/native_places_autocomplete_field.dart';
 
+/// Pumps frames until [predicate] succeeds or [maxAttempts] is reached.
+/// Prefer this over a fixed [pump]/[pumpAndSettle] for async work (debounce,
+/// platform channels) and for UI that can flicker (overlay show/hide).
+Future<void> pumpUntil(
+  WidgetTester tester,
+  bool Function() predicate, {
+  Duration step = const Duration(milliseconds: 16),
+  int maxAttempts = 500,
+  String? timeoutMessage,
+}) async {
+  for (var i = 0; i < maxAttempts; i++) {
+    await tester.pump(step);
+    if (predicate()) {
+      return;
+    }
+  }
+  fail(
+    timeoutMessage ??
+        'pumpUntil timed out after ${maxAttempts * step.inMilliseconds}ms',
+  );
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -62,14 +84,25 @@ void main() {
 
     await tester.tap(find.byType(TextField));
     await tester.enterText(find.byType(TextField), 'Lekki');
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pumpAndSettle();
+    await pumpUntil(
+      tester,
+      () => find.text('Lekki Phase 1').evaluate().isNotEmpty,
+      timeoutMessage: 'suggestions for "Lekki" should appear (debounce + search)',
+    );
 
     expect(find.text('Lekki Phase 1'), findsOneWidget);
     expect(find.text('Lagos'), findsOneWidget);
 
     await tester.tap(find.text('Lekki Phase 1'));
-    await tester.pumpAndSettle();
+    // Selection clears suggestions; overlay can hide and unfocus in any order.
+    // Assert final state only: controller + callback, not stable intermediate UI.
+    await pumpUntil(
+      tester,
+      () =>
+          controller.text == 'Lekki Phase 1, Lagos' &&
+          tappedSuggestion?.placeId == 'lekki_phase_1',
+      timeoutMessage: 'selection should update controller and onSelected',
+    );
 
     expect(tappedSuggestion?.placeId, 'lekki_phase_1');
     expect(controller.text, 'Lekki Phase 1, Lagos');
@@ -113,8 +146,11 @@ void main() {
 
     await tester.tap(find.byType(TextField));
     await tester.enterText(find.byType(TextField), 'Lekki');
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pumpAndSettle();
+    await pumpUntil(
+      tester,
+      () => find.text('Lekki Phase 1').evaluate().isNotEmpty,
+      timeoutMessage: 'suggestions for "Lekki" should appear over map stack',
+    );
 
     expect(find.text('Lekki Phase 1'), findsOneWidget);
     expect(find.text('Lagos'), findsOneWidget);
