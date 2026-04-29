@@ -5523,22 +5523,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     return trimmed == _effectiveDriverId;
   }
 
-  int _rideExpiryTimestamp(Map<String, dynamic> rideData) {
-    for (final key in <String>[
-      'expires_at',
-      'expiresAt',
-      'timeout_at',
-      'search_timeout_at',
-      'request_expires_at',
-    ]) {
+  ({int value, String field}) _rideExpiryInfo(Map<String, dynamic> rideData) {
+    // Single expiry source: request_expires_at, fallback expires_at.
+    for (final key in <String>['request_expires_at', 'expires_at', 'expiresAt']) {
       final timestamp = _parseCreatedAt(rideData[key]);
       if (timestamp > 0) {
-        return timestamp;
+        return (value: timestamp, field: key);
       }
     }
-
-    return 0;
+    return (value: 0, field: 'none');
   }
+
+  int _rideExpiryTimestamp(Map<String, dynamic> rideData) =>
+      _rideExpiryInfo(rideData).value;
 
   int _assignmentExpiryTimestamp(Map<String, dynamic>? rideData) {
     if (rideData == null) {
@@ -6115,15 +6112,30 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return false;
     }
 
-    final status = _normalizedRideStatus(_valueAsText(rideData['status']));
+    final statusRaw = _valueAsText(rideData['status']).trim().toLowerCase();
+    final tripStateRaw =
+        _valueAsText(rideData['trip_state']).trim().toLowerCase();
+    final status = _normalizedRideStatus(statusRaw);
     if (status == 'accepted' ||
         status == 'cancelled' ||
         status == 'expired' ||
         status == 'completed') {
       return false;
     }
+    final statusOpen = statusRaw == 'requesting' || statusRaw == 'requested';
+    final tripStateOpen =
+        tripStateRaw == 'requesting' || tripStateRaw == 'requested';
+    if (!statusOpen || !tripStateOpen) {
+      return false;
+    }
 
-    final expiresAt = _rideExpiryTimestamp(rideData);
+    final rideMarket = (_rideMarketFromData(rideData) ?? '').trim().toLowerCase();
+    final driverMarket = (_effectiveDriverMarket ?? '').trim().toLowerCase();
+    if (rideMarket.isEmpty || driverMarket.isEmpty || rideMarket != driverMarket) {
+      return false;
+    }
+
+    final expiresAt = _rideExpiryInfo(rideData).value;
     if (expiresAt > 0 &&
         DateTime.now().millisecondsSinceEpoch >= expiresAt) {
       return false;
@@ -6288,13 +6300,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return 'market_mismatch';
     }
 
-    final expiresAt = _rideExpiryTimestamp(rideData);
+    final expiry = _rideExpiryInfo(rideData);
+    final expiresAt = expiry.value;
     final nowTimestamp = DateTime.now().millisecondsSinceEpoch;
     if (expiresAt > 0 && nowTimestamp >= expiresAt) {
-      _logPopupFix('skip reason=expired rideId=$rideId');
+      _logPopupFix(
+        'skip reason=expired rideId=$rideId now_ms=$nowTimestamp expires_at=$expiresAt '
+        'delta_ms=${nowTimestamp - expiresAt} expiry_field=${expiry.field}',
+      );
       _logPopupServerSkip(rideId, rideData, 'expired');
       _logRideReq(
-        '[MATCH_DEBUG][DRIVER_FILTER] rideId=$rideId status=$uiStatus qualifies=false reason=expired',
+        '[MATCH_DEBUG][DRIVER_FILTER] rideId=$rideId status=$uiStatus '
+        'qualifies=false reason=expired now_ms=$nowTimestamp expires_at=$expiresAt '
+        'delta_ms=${nowTimestamp - expiresAt} expiry_field=${expiry.field}',
       );
       return 'expired';
     }
@@ -9712,9 +9730,6 @@ class _DriverMapScreenState extends State<DriverMapScreen>
             final rawDriverId = rideData == null
                 ? ''
                 : _valueAsText(rideData[RtdbRideRequestFields.driverId]);
-            final rawSearchTimeout = rideData == null
-                ? ''
-                : _valueAsText(rideData['search_timeout_at']);
             final rawRequestExpires = rideData == null
                 ? ''
                 : _valueAsText(rideData['request_expires_at']);
@@ -9722,16 +9737,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                 ? ''
                 : _valueAsText(rideData['expires_at']);
             final nowMs = DateTime.now().millisecondsSinceEpoch;
-            final expiresEval = rideData == null
-                ? 0
-                : _rideExpiryTimestamp(rideData);
+            final expiryInfo = rideData == null
+                ? (value: 0, field: 'none')
+                : _rideExpiryInfo(rideData);
+            final expiresEval = expiryInfo.value;
             _logRideReq(
               '[DRIVER_DISCOVERY_REJECT] rideId=$rideId reason='
               '${skipReason.isEmpty ? 'service_type_not_active' : skipReason} '
               'market_expected=$expectedMarket market_actual=$actualMarket '
               'status=$rawStatus trip_state=$rawTripState driver_id=$rawDriverId '
-              'search_timeout_at=$rawSearchTimeout request_expires_at=$rawRequestExpires '
-              'expires_at=$rawExpires expires_eval_ms=$expiresEval now_ms=$nowMs',
+              'request_expires_at=$rawRequestExpires '
+              'expires_at=$rawExpires expires_eval_ms=$expiresEval now_ms=$nowMs '
+              'delta_ms=${expiresEval > 0 ? nowMs - expiresEval : -1} '
+              'chosen_expiry_field=${expiryInfo.field}',
             );
           } else {
             _logRideReq('[DRIVER_DISCOVERY_ACCEPT] rideId=$rideId');
@@ -11503,8 +11521,20 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         final current = _asStringDynamicMap(currentData);
         if (current == null) {
           blockedReason = 'ride_missing';
+          _logRideReq('[DRIVER_ACCEPT_BLOCKED] reason=$blockedReason');
           return rtdb.Transaction.abort();
         }
+        final nowMsInTx = DateTime.now().millisecondsSinceEpoch;
+        _logRideReq(
+          '[DRIVER_ACCEPT_ATTEMPT] rideId=$rideId '
+          'status=${_valueAsText(current['status'])} '
+          'trip_state=${_valueAsText(current['trip_state'])} '
+          'driver_id=${_valueAsText(current['driver_id'])} '
+          'market=${_rideMarketFromData(current) ?? ''} '
+          'expires_at=${_valueAsText(current['expires_at'])} '
+          'request_expires_at=${_valueAsText(current['request_expires_at'])} '
+          'now_ms=$nowMsInTx',
+        );
 
         final currentCanonicalState =
             TripStateMachine.canonicalStateFromSnapshot(current);
@@ -11517,6 +11547,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         if (!_isRideClaimableForDriverAccept(current)) {
           blockedReason = _popupServerSkipReason(rideId, current) ??
               'ride_not_claimable';
+          _logRideReq('[DRIVER_ACCEPT_BLOCKED] reason=$blockedReason');
           return rtdb.Transaction.abort();
         }
 
@@ -11539,10 +11570,13 @@ class _DriverMapScreenState extends State<DriverMapScreen>
               // Rider / legacy UIs (and Firestore-era clients) often key off this phrase.
               'rider_sync_status': 'driver_found',
               'driver_match_confirmed_at': rtdb.ServerValue.timestamp,
+              'status': 'accepted',
+              'trip_state': 'accepted',
               // Leave the open-pool index; [service_area] / [city] still carry market.
               'market': null,
               'market_pool': null,
               'accepted_at': rtdb.ServerValue.timestamp,
+              'updated_at': rtdb.ServerValue.timestamp,
               'assignment_expires_at': null,
               'driver_response_timeout_at': null,
               'assignment_timeout_ms': null,
@@ -11885,6 +11919,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       }
       return true;
     } catch (error) {
+      _logRideReq('[DRIVER_ACCEPT_ERROR] error=$error');
       if (_currentRideId != rideId) {
         _driverActiveRideId = null;
       }

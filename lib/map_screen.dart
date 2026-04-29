@@ -233,7 +233,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   static const Color _panelWarning = Color(0xFFD47A2A);
   static const Color _panelDanger = Color(0xFFD95842);
   static const Duration _countdownDuration = Duration(minutes: 5);
-  static const Duration _rideSearchTimeoutDuration = Duration(seconds: 90);
+  static const Duration _rideSearchTimeoutDuration = Duration(seconds: 180);
   /// Single RTDB [set] ack wait — avoid false "could not confirm" on slow links.
   static const Duration _rideRequestWriteAckTimeout = Duration(seconds: 120);
   /// Server read used to verify a write landed (separate from UI ack).
@@ -451,16 +451,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
-  /// Driver-matching window only: must match fields written on ride create
-  /// (`search_timeout_at` / `request_expires_at`). Do not fall back to
-  /// `expires_at` / `timeout_at` — other subsystems may use those keys with
-  /// different units or semantics and cause false immediate timeouts.
+  /// Driver-matching window source of truth.
+  /// Prefer `request_expires_at`, then fallback `expires_at`.
   int _rideSearchTimeoutAt(Map<String, dynamic>? rideData) {
     if (rideData == null) {
       return 0;
     }
 
-    for (final key in <String>['search_timeout_at', 'request_expires_at']) {
+    for (final key in <String>['request_expires_at', 'expires_at']) {
       final value = _asInt(rideData[key]);
       if (value != null && value > 0) {
         return value;
@@ -1665,8 +1663,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     final expiresAt = _asInt(rideData['request_expires_at']) ??
         _asInt(rideData['expires_at']) ??
-        _asInt(rideData['search_timeout_at']) ??
-        _asInt(rideData['search_timeout']) ??
         0;
     if (expiresAt > 0 &&
         DateTime.now().millisecondsSinceEpoch >= expiresAt) {
@@ -1686,8 +1682,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final driverId = _valueAsText(rideData['driver_id']).trim().toLowerCase();
     final expiresAt = _asInt(rideData['request_expires_at']) ??
         _asInt(rideData['expires_at']) ??
-        _asInt(rideData['search_timeout_at']) ??
-        _asInt(rideData['search_timeout']) ??
         0;
     return market.isNotEmpty &&
         market == marketPool &&
@@ -1824,6 +1818,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> payload,
   }) async {
     try {
+      print('WRITING ride_requests/$rideId');
       debugPrint(
         '[RIDER_REQUEST_WRITE_PATH] path=${rideRef.path}',
       );
@@ -1834,6 +1829,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'rider_id=${payload['rider_id']}',
       );
       await rideRef.set(payload).timeout(_rideRequestWriteAckTimeout);
+      final verifySnapshot = await rideRef.get().timeout(
+        const Duration(seconds: 12),
+      );
+      if (!verifySnapshot.exists) {
+        throw StateError('ride_request_write_missing_after_set');
+      }
+      print('WRITE SUCCESS');
       debugPrint(
         '[RIDER_REQUEST_WRITE_SUCCESS] path=${rideRef.path} rideId=$rideId',
       );
@@ -3731,6 +3733,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           borderRadius: BorderRadius.circular(20),
           onTap: enabled
               ? () {
+                  print('RIDER_REQUEST_BUTTON_TAPPED');
                   unawaited(handlePrimaryRideAction());
                 }
               : null,
@@ -5764,15 +5767,20 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> createRideRequest() async {
-    if (_isCreatingRide || _hasActiveRide) {
+    print('CREATE_RIDE_REQUEST_START');
+    print('CHECKING BLOCKERS');
+    if (_isCreatingRide) {
+      print('BLOCKED_REASON: isCreatingRide');
       _logRideFlow(
-        'createRideRequest skipped isCreatingRide=$_isCreatingRide currentRideId=$_currentRideId status=$_rideStatus',
+        'createRideRequest skipped isCreatingRide=$_isCreatingRide '
+        'currentRideId=$_currentRideId status=$_rideStatus',
       );
       return;
     }
 
     final accessDecision = await _ensureTripRequestAllowed();
     if (accessDecision == null) {
+      print('BLOCKED_REASON: trust_validation');
       _logRideFlow(
         'REQUEST RIDE validation failed reason=trust_validation',
       );
@@ -5781,6 +5789,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     final city = await _validateRideCreationInputs();
     if (city == null) {
+      print('BLOCKED_REASON: input_validation');
       _logRideFlow(
         'REQUEST RIDE validation failed reason=input_validation',
       );
@@ -5789,6 +5798,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     final orderedStops = _buildStopsPayload();
     if (orderedStops.isEmpty) {
+      print('BLOCKED_REASON: stops_payload_empty');
       _logRideFlow('request blocked: unable to build stops payload');
       _showSnackBar('Choose a valid destination before requesting a ride.');
       return;
@@ -5802,6 +5812,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       fieldLabel: 'pickup',
     );
     if (pickupPayloadBase == null) {
+      print('BLOCKED_REASON: pickup_payload_invalid');
       return;
     }
 
@@ -5812,11 +5823,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       fieldLabel: 'destination',
     );
     if (destinationPayloadBase == null) {
+      print('BLOCKED_REASON: destination_payload_invalid');
       return;
     }
 
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
+      print('BLOCKED_REASON: no_auth_user');
       _logRideFlow('createRideRequest blocked reason=no_auth_user');
       rtdbFlowLog(
         '[NEXRIDE_RIDER_RTDB][AUTH]',
@@ -5852,6 +5865,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           _distanceKm <= 0 ||
           _estimatedDurationMin <= 0 ||
           _fare <= 0) {
+        print('BLOCKED_REASON: route_or_fare_not_ready');
         _showSnackBar(
           'We could not load the live road route yet. Please retry.',
         );
@@ -5888,6 +5902,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         }
       }
       if (rideRef == null || rideId == null || rideId.isEmpty) {
+        print('BLOCKED_REASON: ride_id_generation_failed');
         throw StateError('Unable to create ride id');
       }
       _pendingRideRequestSubmissionId = rideId;
@@ -6071,8 +6086,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final searchingPayload = <String, dynamic>{
         ...canonicalSeed,
         ...searchTransition,
-        // Keep [TripStateMachine.buildTransitionUpdate] values (searching + searching_driver).
-        // Open-pool tokens include both `requesting` and `searching_driver` (driver contract).
+        // Keep request open for driver discovery until accept/expiry.
+        // Driver filter accepts `requesting` as an open-pool lifecycle token.
+        'status': 'requesting',
+        'trip_state': 'requesting',
         'search_timeout_at': searchTimeoutAt,
         'request_expires_at': searchTimeoutAt,
         RtdbRideRequestFields.expiresAt: searchTimeoutAt,
@@ -6850,6 +6867,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> handlePrimaryRideAction() async {
+    print('HANDLE_PRIMARY_RIDE_ACTION');
     debugPrint(
       '[RIDER_REQUEST_BUTTON_TAPPED] rideStatus=$_rideStatus '
       'currentRideId=$_currentRideId',
