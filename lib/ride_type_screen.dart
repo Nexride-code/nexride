@@ -42,6 +42,7 @@ class _RideTypeScreenState extends State<RideTypeScreen>
   Map<String, dynamic> _trustSummary = <String, dynamic>{};
   bool _loadingTrust = true;
   bool _serviceNavigationInFlight = false;
+  String _lastRequestUiStateLog = '';
 
   String? get _currentRiderId => FirebaseAuth.instance.currentUser?.uid;
 
@@ -150,6 +151,7 @@ class _RideTypeScreenState extends State<RideTypeScreen>
   }
 
   Future<void> _openBookCarFlow() async {
+    debugPrint('[RIDER_REQUEST_BUTTON_TAPPED] source=ride_type.book_car');
     await _openServiceRoute(
       serviceLabel: 'Book a Car',
       routeName: _bookCarRouteName,
@@ -221,6 +223,28 @@ class _RideTypeScreenState extends State<RideTypeScreen>
     } finally {
       _serviceNavigationInFlight = false;
     }
+  }
+
+  void _logRequestUiState({
+    required RiderActiveTripSession? session,
+  }) {
+    final hasActiveTrip = _activeTripSessionService.hasActiveTrip;
+    final tripState = session?.tripState.trim().isNotEmpty == true
+        ? session!.tripState.trim()
+        : 'idle';
+    final lifecycleState = session?.status.trim().isNotEmpty == true
+        ? session!.status.trim().toLowerCase()
+        : 'idle';
+    final showRequestButton = true; // RideType always exposes service entry cards.
+    final line =
+        '[RIDER_REQUEST_UI_STATE] hasActiveTrip=$hasActiveTrip '
+        'trip_state=$tripState lifecycleState=$lifecycleState '
+        'showRequestButton=$showRequestButton';
+    if (_lastRequestUiStateLog == line) {
+      return;
+    }
+    _lastRequestUiStateLog = line;
+    debugPrint(line);
   }
 
   Future<void> _openProfile() async {
@@ -441,6 +465,7 @@ class _RideTypeScreenState extends State<RideTypeScreen>
                     RiderActiveTripSession? session,
                     Widget? _,
                   ) {
+                    _logRequestUiState(session: session);
                     if (session == null ||
                         !_activeTripSessionService.hasActiveTrip) {
                       return const SizedBox.shrink();

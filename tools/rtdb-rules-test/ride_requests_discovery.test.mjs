@@ -68,6 +68,15 @@ test('ride_requests discovery (market_pool)', async (t) => {
         status: 'rejected',
         trip_state: 'rejected',
       });
+      await admin.ref('ride_requests/completed_lagos_terminal').set({
+        ride_id: 'completed_lagos_terminal',
+        rider_id: 'rider33',
+        driver_id: 'waiting',
+        market: 'lagos',
+        market_pool: 'lagos',
+        status: 'completed',
+        trip_state: 'trip_completed',
+      });
       await admin.ref('users/riderOnly').set({ role: 'rider' });
     });
 
@@ -76,12 +85,18 @@ test('ride_requests discovery (market_pool)', async (t) => {
       await assertSucceeds(db.ref('drivers/driver1').get());
     });
 
-    await t.test('driver can read open lagos ride by direct path', async () => {
+    await t.test('driver cannot directly read open lagos ride (query-only discovery)', async () => {
       const db = testEnv.authenticatedContext('driver1').database();
-      await assertSucceeds(db.ref('ride_requests/open_lagos_pending').get());
+      await assertFails(db.ref('ride_requests/open_lagos_pending').get());
     });
 
     await t.test('driver can read market_pool=lagos discovery query', async () => {
+      const db = testEnv.authenticatedContext('driver1').database();
+      const q = db.ref('ride_requests').orderByChild('market_pool').equalTo('lagos');
+      await assertSucceeds(q.get());
+    });
+
+    await t.test('terminal rides in lagos do not break the discovery query', async () => {
       const db = testEnv.authenticatedContext('driver1').database();
       const q = db.ref('ride_requests').orderByChild('market_pool').equalTo('lagos');
       await assertSucceeds(q.get());

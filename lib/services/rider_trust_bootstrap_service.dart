@@ -1,4 +1,5 @@
 import 'package:firebase_database/firebase_database.dart' as rtdb;
+import 'package:flutter/foundation.dart';
 
 import '../support/rider_trust_support.dart';
 import '../support/startup_rtdb_support.dart';
@@ -75,6 +76,25 @@ class RiderTrustBootstrapService {
           action: () =>
               _rootRef.child('rider_device_fingerprints/$riderId').get(),
         );
+
+    if (riskSnapshot == null) {
+      debugPrint(
+        '[RIDER_TRUST_FALLBACK] path=rider_risk_flags/$riderId '
+        'reason=read_failed_or_denied',
+      );
+    }
+    if (paymentSnapshot == null) {
+      debugPrint(
+        '[RIDER_TRUST_FALLBACK] path=rider_payment_flags/$riderId '
+        'reason=read_failed_or_denied',
+      );
+    }
+    if (reputationSnapshot == null) {
+      debugPrint(
+        '[RIDER_TRUST_FALLBACK] path=rider_reputation/$riderId '
+        'reason=read_failed_or_denied',
+      );
+    }
 
     final verification = buildRiderVerificationDefaults(
       existingUser['verification'],

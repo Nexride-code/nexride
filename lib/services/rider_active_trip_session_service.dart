@@ -44,10 +44,11 @@ class RiderActiveTripSessionService {
   StreamSubscription<rtdb.DatabaseEvent>? _rideSubscription;
   String? _attachedRideId;
   bool _isRestoring = false;
+  // Dev/test recovery: ignore stale open-pool rides so rider can create a new request.
+  static const Duration _staleSearchingRestoreTimeout = Duration(minutes: 3);
 
   static const Set<String> _activeStatuses = <String>{
-    'requested',
-    'searching',
+    // Treat only driver-committed/active-trip states as active for UI gating.
     'pending_driver_action',
     'assigned',
     'accepted',
@@ -111,6 +112,14 @@ class RiderActiveTripSessionService {
           return;
         }
         if (!_activeStatuses.contains(status)) {
+          return;
+        }
+        if (_isStaleSearchingRideForRecovery(status: status, rideData: rideData)) {
+          debugPrint(
+            '[RIDER_ACTIVE_TRIP_RESTORE] source=$source '
+            'rideId=${rawId?.toString() ?? ''} '
+            'status=$status action=ignore_stale_searching',
+          );
           return;
         }
         final ts = _activityTs(rideData);
@@ -283,5 +292,24 @@ class RiderActiveTripSessionService {
 
   static String _canonicalRiderUiStatus(Map<String, dynamic> rideData) {
     return TripStateMachine.riderUiStatusFromRideData(rideData);
+  }
+
+  static bool _isStaleSearchingRideForRecovery({
+    required String status,
+    required Map<String, dynamic> rideData,
+  }) {
+    if (status != 'searching' && status != 'requested') {
+      return false;
+    }
+    final driverId = _rideDriverId(rideData);
+    if (driverId.isNotEmpty) {
+      return false;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final updatedAt = _activityTs(rideData);
+    if (updatedAt <= 0) {
+      return false;
+    }
+    return now - updatedAt > _staleSearchingRestoreTimeout.inMilliseconds;
   }
 }

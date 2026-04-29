@@ -91,6 +91,13 @@
   "storage": {
     "rules": "storage.rules"
   },
+  "emulators": {
+    "database": {
+      "host": "127.0.0.1",
+      "port": 9000,
+      "singleProjectMode": false
+    }
+  },
   "functions": [
     {
       "source": "functions",

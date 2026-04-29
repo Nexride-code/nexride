@@ -1,4 +1,5 @@
 import 'package:firebase_database/firebase_database.dart' as rtdb;
+import 'package:flutter/foundation.dart';
 
 import '../config/rider_app_config.dart';
 import '../support/rider_trust_support.dart';
@@ -57,6 +58,23 @@ class RiderTrustRulesService {
       action: () => _rootRef.child('app_config/rider_trust_rules').get(),
     );
     if (snapshot == null || !snapshot.exists || snapshot.value is! Map) {
+      // Trust config is optional at startup; fall back to local defaults.
+      if (snapshot == null) {
+        debugPrint(
+          '[RIDER_TRUST_FALLBACK] path=app_config/rider_trust_rules '
+          'reason=read_failed_or_denied',
+        );
+      } else if (!snapshot.exists) {
+        debugPrint(
+          '[RIDER_TRUST_FALLBACK] path=app_config/rider_trust_rules '
+          'reason=missing_node',
+        );
+      } else {
+        debugPrint(
+          '[RIDER_TRUST_FALLBACK] path=app_config/rider_trust_rules '
+          'reason=invalid_payload',
+        );
+      }
       return defaultRules;
     }
 

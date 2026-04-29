@@ -271,11 +271,19 @@ void _logStartupRtdb({
   }
 
   final uid = FirebaseAuth.instance.currentUser?.uid ?? 'unauthenticated';
+  final permissionDenied = error != null && isPermissionDeniedError(error);
   debugPrint(
     '[RTDB startup][$phase] source=$source path=$path uid=$uid '
     'optional=$optional'
     '${error == null ? '' : ' error=$error'}',
   );
+  if (optional && permissionDenied) {
+    debugPrint(
+      '[RTDB startup][fallback] source=$source path=$path '
+      'reason=permission_denied using_defaults=true',
+    );
+    return;
+  }
   if (error != null && stackTrace != null) {
     debugPrintStack(
       label: '[RTDB startup][$phase] source=$source path=$path',

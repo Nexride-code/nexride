@@ -87,6 +87,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final RiderAlertSoundService _alertSoundService = RiderAlertSoundService();
   final RiderActiveTripSessionService _activeTripSessionService =
       RiderActiveTripSessionService.instance;
+  static const Duration _staleSearchingRestoreTimeout = Duration(minutes: 3);
+  String _lastRequestUiStateLog = '';
   final ShareTripRtdbService _shareTripRtdbService = ShareTripRtdbService();
   final RiderTrustBootstrapService _bootstrapService =
       const RiderTrustBootstrapService();
@@ -318,19 +320,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'driver_id=${data['driver_id']} service_type=${data['service_type']} '
       'pickup_lat=$plat pickup_lng=$plng dest_lat=$dlat dest_lng=$dlng '
       'firebase_project=$projectId databaseURL=$databaseUrl',
-    );
-  }
-
-  /// Single-line log for rider → RTDB write (filter `[RIDER_REQ_WRITE]`); must match driver `orderByChild('market_pool')`.
-  void _logRiderReqWrite(String rideId, Map<String, dynamic> payload) {
-    debugPrint(
-      '[RIDER_REQ_WRITE] rideId=$rideId city=${payload['city']} market=${payload['market']} '
-      'status=${payload['status']} trip_state=${payload['trip_state']}',
-    );
-    debugPrint(
-      '[RIDER_CREATE] rideId=$rideId rider_id=${payload['rider_id']} '
-      'status=${payload['status']} trip_state=${payload['trip_state']} '
-      'market=${payload['market']} market_pool=${payload['market_pool']}',
     );
   }
 
@@ -1152,12 +1141,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   bool get _hasActiveRide =>
       _currentRideId != null &&
-      _effectiveRideStatus != 'completed' &&
-      _effectiveRideStatus != 'cancelled' &&
-      _effectiveRideStatus != 'driver_cancelled' &&
-      _effectiveRideStatus != 'rider_cancelled' &&
-      _effectiveRideStatus != 'expired' &&
-      _effectiveRideStatus != 'idle';
+      <String>{
+        'pending_driver_action',
+        'assigned',
+        'accepted',
+        'arriving',
+        'arrived',
+        'on_trip',
+      }.contains(_effectiveRideStatus);
 
   /// Open-pool / driver-assignment phase (not yet an accepted on-trip ride for controls).
   bool get _isRiderRequestMatchingPhase {
@@ -1179,10 +1170,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   /// Hide the primary ride control during matching so only **Cancel request** shows.
   bool get _hidePrimaryRideDuringMatchingOnly =>
-      _isRiderRequestMatchingPhase &&
-      !_isSubmittingRideRequest &&
-      !_isCreatingRide &&
-      !_isCancellingRide;
+      false;
 
   bool get _canChat {
     if (_currentRideId == null) {
@@ -1331,23 +1319,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   bool get _primaryRideButtonEnabled {
-    if (_isSubmittingRideRequest || _isCreatingRide || _isCancellingRide) {
-      return false;
-    }
-
-    if (_showCancelRideOnly) {
-      return true;
-    }
-
-    if (_isRiderRequestMatchingPhase) {
-      return false;
-    }
-
-    if (_hasActiveRide) {
-      return false;
-    }
-
-    return _canRequestRide;
+    return !_isSubmittingRideRequest && !_isCreatingRide;
   }
 
   bool get _isPrimaryRideButtonBusy =>
@@ -1374,9 +1346,31 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     final session = _activeTripSessionService.currentSession;
     if (session != null && session.status.trim().isNotEmpty) {
-      return session.status.trim().toLowerCase();
+      final sessionStatus = session.status.trim().toLowerCase();
+      // When stale restore is ignored, treat open-pool fallback session as idle.
+      if (sessionStatus == 'searching' ||
+          sessionStatus == 'requested' ||
+          sessionStatus == 'pending_driver_action') {
+        return 'idle';
+      }
+      return sessionStatus;
     }
     return _rideStatus;
+  }
+
+  void _logRequestUiState() {
+    final tripState = _valueAsText(_currentRideSnapshot?['trip_state']);
+    final lifecycleState = _currentCanonicalRideState;
+    final showRequestButton = !_hidePrimaryRideDuringMatchingOnly;
+    final logLine =
+        '[RIDER_REQUEST_UI_STATE] hasActiveTrip=$_hasActiveRide '
+        'trip_state=${tripState.isEmpty ? 'idle' : tripState} '
+        'lifecycleState=$lifecycleState showRequestButton=$showRequestButton';
+    if (_lastRequestUiStateLog == logLine) {
+      return;
+    }
+    _lastRequestUiStateLog = logLine;
+    debugPrint(logLine);
   }
 
   Color get _rideStateAccentColor {
@@ -1830,7 +1824,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> payload,
   }) async {
     try {
+      debugPrint(
+        '[RIDER_REQUEST_WRITE_PATH] path=${rideRef.path}',
+      );
+      debugPrint(
+        '[RIDER_REQUEST_WRITE_PAYLOAD] rideId=$rideId '
+        'market=${payload['market']} market_pool=${payload['market_pool']} '
+        'status=${payload['status']} trip_state=${payload['trip_state']} '
+        'rider_id=${payload['rider_id']}',
+      );
       await rideRef.set(payload).timeout(_rideRequestWriteAckTimeout);
+      debugPrint(
+        '[RIDER_REQUEST_WRITE_SUCCESS] path=${rideRef.path} rideId=$rideId',
+      );
       return null;
     } on TimeoutException {
       _logRideFlow(
@@ -1840,6 +1846,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final recoveredRide = await _verifyRideWriteSucceeded(rideId);
       if (recoveredRide != null) {
         _logRideFlow('REQUEST RIDE recovered timed out write rideId=$rideId');
+        debugPrint(
+          '[RIDER_REQUEST_WRITE_SUCCESS] path=${rideRef.path} rideId=$rideId '
+          'recovered_after_timeout=true',
+        );
         return recoveredRide;
       }
       rethrow;
@@ -2117,6 +2127,30 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return 0;
   }
 
+  bool _shouldIgnoreStaleSearchingRestore(
+    Map<String, dynamic> rideData, {
+    required String status,
+    required String canonicalState,
+  }) {
+    if (status != 'searching' &&
+        status != 'requested' &&
+        canonicalState != TripLifecycleState.searchingDriver &&
+        canonicalState != TripLifecycleState.requested) {
+      return false;
+    }
+    final assignedDriver = _valueAsText(rideData['driver_id']);
+    if (assignedDriver.isNotEmpty &&
+        assignedDriver.toLowerCase() != 'waiting') {
+      return false;
+    }
+    final ts = _rideActivityTimestamp(rideData);
+    if (ts <= 0) {
+      return false;
+    }
+    final ageMs = DateTime.now().millisecondsSinceEpoch - ts;
+    return ageMs > _staleSearchingRestoreTimeout.inMilliseconds;
+  }
+
   void _setStartingVoiceCall(bool value) {
     if (_isStartingVoiceCall == value) {
       return;
@@ -2156,6 +2190,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       if (rides == null) {
         _logRideFlow('active ride restore found no rides riderId=$riderUid');
         if (_rideStatus != 'idle' ||
+            _effectiveRideStatus != 'idle' ||
             _searchingDriver ||
             _driverFound ||
             _tripStarted) {
@@ -2180,6 +2215,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         final status = TripStateMachine.uiStatusFromSnapshot(rideData);
         if (!_restorableRideStatuses.contains(status) ||
             !TripStateMachine.isRestorable(canonicalState)) {
+          return;
+        }
+        if (_shouldIgnoreStaleSearchingRestore(
+          rideData,
+          status: status,
+          canonicalState: canonicalState,
+        )) {
+          _logRideFlow(
+            'active ride restore ignoring stale searching ride rideId=$rideId '
+            'status=$status canonical=$canonicalState',
+          );
           return;
         }
 
@@ -2208,6 +2254,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'active ride restore found no active ride riderId=$riderUid',
         );
         if (_rideStatus != 'idle' ||
+            _effectiveRideStatus != 'idle' ||
             _searchingDriver ||
             _driverFound ||
             _tripStarted) {
@@ -6024,15 +6071,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final searchingPayload = <String, dynamic>{
         ...canonicalSeed,
         ...searchTransition,
-        // Preserve canonical open-discovery contract for new requests.
-        'status': 'requesting',
-        'trip_state': 'requesting',
+        // Keep [TripStateMachine.buildTransitionUpdate] values (searching + searching_driver).
+        // Open-pool tokens include both `requesting` and `searching_driver` (driver contract).
         'search_timeout_at': searchTimeoutAt,
         'request_expires_at': searchTimeoutAt,
         RtdbRideRequestFields.expiresAt: searchTimeoutAt,
       };
-      searchingPayload['status'] = 'requesting';
-      searchingPayload['trip_state'] = 'requesting';
       searchingPayload['driver_id'] = 'waiting';
       searchingPayload['market'] = dispatchMarket;
       searchingPayload['market_pool'] = dispatchMarket;
@@ -6070,7 +6114,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _discardInFlightRideRequestSubmission(rideId: rideId);
         return;
       }
-      _logRiderReqWrite(rideId, searchingPayload);
       _logRideFlow(
         '[RIDER_REQ] create_pre_write rideId=$rideId '
         'market=${searchingPayload['market']} '
@@ -6419,6 +6462,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'driver_id=${data['driver_id']}',
         );
         if (previousStatus != status) {
+          debugPrint(
+            '[RIDER_REQUEST_STATUS_UPDATED] rideId=$rideId '
+            'from=$previousStatus to=$status '
+            'trip_state=${data['trip_state']} raw_status=${data['status']}',
+          );
           _logRideFlow(
             '[RIDE_LIFECYCLE] status_transition rideId=$rideId '
             'prev=$previousStatus next=$status '
@@ -6802,6 +6850,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> handlePrimaryRideAction() async {
+    debugPrint(
+      '[RIDER_REQUEST_BUTTON_TAPPED] rideStatus=$_rideStatus '
+      'currentRideId=$_currentRideId',
+    );
     _logRideFlow('request button tapped action=request_ride');
     _logRideFlow(
       'rider tap fired action=request_ride status=$_rideStatus currentRideId=$_currentRideId',
@@ -6814,34 +6866,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
-    if (_showCancelRideOnly) {
-      await cancelRide();
-      return;
-    }
-
-    if (_hasActiveRide && !_isRiderRequestMatchingPhase) {
-      _logRideFlow(
-        'REQUEST RIDE blocked because ride is already active status=$_rideStatus rideId=$_currentRideId',
-      );
-      _showSnackBar('You already have an active ride.');
-      return;
-    }
-
-    final blockerMessage = _rideRequestBlockerMessage;
-    if (blockerMessage != null) {
-      _logRideFlow('REQUEST RIDE validation failed reason=$blockerMessage');
-      _showSnackBar(blockerMessage);
-      return;
-    }
-
+    _logRideFlow('REQUEST RIDE temporary bypass forcing request creation');
     _setSubmittingRideRequest(true);
     try {
-      if (await _resumePendingRideSubmissionIfNeeded()) {
-        _logRideFlow(
-          'REQUEST RIDE resumed pending submission rideId=$_currentRideId pendingRideId=$_pendingRideRequestSubmissionId',
-        );
-        return;
-      }
       await createRideRequest();
     } finally {
       _setSubmittingRideRequest(false);
@@ -8965,6 +8992,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Widget _bottomPanel() {
+    _logRequestUiState();
     final effectiveStatus = _effectiveRideStatus;
     final statusText = _rideStatusLabel(effectiveStatus);
     final stopAddresses = _orderedDropOffAddresses();

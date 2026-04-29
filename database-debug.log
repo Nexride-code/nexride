@@ -1,0 +1,24 @@
+01:54:29.845 [NamespaceSystem-akka.actor.default-dispatcher-4] INFO akka.event.slf4j.Slf4jLogger - Slf4jLogger started
+01:54:29.947 [main] INFO com.firebase.server.forge.App$ - Listening at 127.0.0.1:9000
+01:54:30.371 [NamespaceSystem-akka.actor.default-dispatcher-4] INFO com.firebase.core.namespace.NamespaceActor - nexride-8d5bc-default-rtdb successfully activated FBKV (SurveyIdle(0)) wait: 79ms, init: 0ms
+01:54:30.430 [NamespaceSystem-blocking-namespace-operation-dispatcher-6] INFO com.firebase.core.namespace.StateManager - Namespace nexride-8d5bc-default-rtdb status Active to Active
+01:54:30.725 [FirebaseWorkerPool-1-3] WARN com.firebase.core.persistence.backend.dummy.EmulatorMetadataPersistence - Multiple projectIds are not recommended in single project mode. Requested 
+namespace demo-nexride-driver-rtdb, but the emulator is configured for nexride-8d5bc-default-rtdb. To 
+opt-out of single project mode add/set the singleProjectMode: false property in 
+the firebase.json emulators config. 
+01:54:30.727 [NamespaceSystem-akka.actor.default-dispatcher-5] INFO com.firebase.core.namespace.NamespaceActor - demo-nexride-driver-rtdb successfully activated FBKV (SurveyIdle(0)) wait: 1ms, init: 0ms
+01:54:30.737 [NamespaceSystem-blocking-namespace-operation-dispatcher-6] INFO com.firebase.core.namespace.StateManager - Namespace demo-nexride-driver-rtdb status Active to Active
+01:54:31.061 [FirebaseWorkerPool-1-1] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
+01:54:31.103 [FirebaseWorkerPool-1-2] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
+01:54:31.117 [FirebaseWorkerPool-1-3] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
+01:54:31.137 [FirebaseWorkerPool-1-4] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
+01:54:31.159 [FirebaseWorkerPool-1-2] WARN com.firebase.server.forge.App$ - Received service account token eyJh...X19., assuming ownership.
+01:54:31.170 [FirebaseWorkerPool-1-3] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
+01:54:31.180 [FirebaseWorkerPool-1-4] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
+01:54:31.194 [FirebaseWorkerPool-1-1] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
+01:54:31.215 [FirebaseWorkerPool-1-3] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
+01:54:31.742 [Thread-0] INFO com.firebase.server.forge.App$ - Attempting graceful shutdown.
+01:54:31.750 [NamespaceSystem-akka.actor.default-dispatcher-11] INFO com.firebase.core.namespace.Terminator$Terminator - 2 actors left to terminate: nexride-8d5bc-default-rtdb, demo-nexride-driver-rtdb
+01:54:31.753 [NamespaceSystem-akka.actor.default-dispatcher-4] INFO com.firebase.core.namespace.NamespaceActor - stopped namespace actor for nexride-8d5bc-default-rtdb
+01:54:31.753 [NamespaceSystem-akka.actor.default-dispatcher-10] INFO com.firebase.core.namespace.NamespaceActor - stopped namespace actor for demo-nexride-driver-rtdb
+01:54:31.756 [Thread-0] INFO com.firebase.server.forge.App$ - Graceful shutdown complete.

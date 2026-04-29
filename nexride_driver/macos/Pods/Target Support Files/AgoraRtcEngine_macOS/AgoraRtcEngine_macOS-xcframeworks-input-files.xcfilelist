@@ -1,0 +1,25 @@
+${PODS_ROOT}/Target Support Files/AgoraRtcEngine_macOS/AgoraRtcEngine_macOS-xcframeworks.sh
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraAiEchoCancellationExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraAiEchoCancellationLLExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraAiNoiseSuppressionExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraAiNoiseSuppressionLLExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraAudioBeautyExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraClearVisionExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraContentInspectExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraFaceCaptureExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraFaceDetectionExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraLipSyncExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraRtcKit.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/Agorafdkaac.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/Agoraffmpeg.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraSoundTouch.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraScreenCaptureExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraSpatialAudioExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraVideoQualityAnalyzerExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraVideoAv1DecoderExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraVideoAv1EncoderExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraVideoDecoderExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/video_dec.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraVideoEncoderExtension.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/video_enc.xcframework
+${PODS_ROOT}/AgoraRtcEngine_macOS/AgoraVideoSegmentationExtension.xcframework

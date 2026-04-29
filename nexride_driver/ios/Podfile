@@ -1,0 +1,88 @@
+platform :ios, '14.0'
+
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks! :linkage => :static
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+def patch_firebase_database_imports
+  classes = File.expand_path('.symlinks/plugins/firebase_database/ios/Classes', __dir__)
+  return unless Dir.exist?(classes)
+  legacy = '#import <Firebase/Firebase.h>'
+  replacement = "#import <FirebaseCore/FirebaseCore.h>\n#import <FirebaseDatabase/FirebaseDatabase.h>"
+  Dir.glob(File.join(classes, '*.{h,m}')).each do |path|
+    next unless File.file?(path)
+    body = File.read(path)
+    next unless body.include?(legacy)
+    File.chmod(0o644, path)
+    File.write(path, body.sub(legacy, replacement))
+  end
+end
+
+def patch_grpc_basic_seq(pods_root)
+  needle = 'Traits::template CallSeqFactory(f_, *cur_, std::move(arg))'
+  replacement = 'Traits::template CallSeqFactory<>(f_, *cur_, std::move(arg))'
+  %w[
+    gRPC-Core/src/core/lib/promise/detail/basic_seq.h
+    gRPC-C++/src/core/lib/promise/detail/basic_seq.h
+  ].each do |rel|
+    path = File.join(pods_root, rel)
+    next unless File.exist?(path)
+    contents = File.read(path)
+    fixed = contents.gsub(needle, replacement)
+    next if fixed == contents
+    File.chmod(0o644, path)
+    File.write(path, fixed)
+  end
+end
+
+post_install do |installer|
+  patch_grpc_basic_seq(installer.sandbox.root.to_s)
+  patch_firebase_database_imports
+
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
+      config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+    end
+    # Apple Clang mis-parses -GCC_WARN_INHIBIT_ALL_WARNINGS as -G (BoringSSL-GRPC).
+    target.build_phases.each do |phase|
+      next unless phase.respond_to?(:files)
+      phase.files.each do |build_file|
+        flags = build_file.settings && build_file.settings['COMPILER_FLAGS']
+        next if flags.nil? || !flags.include?('GCC_WARN_INHIBIT_ALL_WARNINGS')
+        build_file.settings['COMPILER_FLAGS'] = flags.gsub(/\s*-GCC_WARN_INHIBIT_ALL_WARNINGS\s*/, ' ').squeeze(' ').strip
+      end
+    end
+  end
+end
