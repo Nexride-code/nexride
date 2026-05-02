@@ -13,12 +13,12 @@
 /// [RtdbRideRequestFields.tripState] (plus terminal guards and `drivers/{uid}`).
 /// Keep this set in sync with the `market_pool` branch in `database.rules.json`.
 const Set<String> kRtdbOpenPoolDiscoveryLifecycleTokens = <String>{
+  'searching',
   'requested',
   'requesting',
   'searching_driver',
   'pending_driver_acceptance',
   'pending_driver_action',
-  'searching',
   'awaiting_match',
   'matching',
   'offered',

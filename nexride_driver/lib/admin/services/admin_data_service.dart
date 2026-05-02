@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 
@@ -12,19 +11,15 @@ import '../models/admin_models.dart';
 class AdminDataService {
   AdminDataService({
     rtdb.FirebaseDatabase? database,
-    FirebaseFirestore? firestore,
-  })  : _database = database,
-        _firestore = firestore;
+  }) : _database = database;
 
   static const Duration _sourceTimeout = Duration(seconds: 8);
   static AdminPanelSnapshot? _cachedSnapshot;
 
   final rtdb.FirebaseDatabase? _database;
-  final FirebaseFirestore? _firestore;
 
   rtdb.FirebaseDatabase get database =>
       _database ?? rtdb.FirebaseDatabase.instance;
-  FirebaseFirestore get firestore => _firestore ?? FirebaseFirestore.instance;
   AdminPanelSnapshot? get cachedSnapshot => _cachedSnapshot;
 
   rtdb.DatabaseReference get _rootRef => database.ref();
@@ -145,11 +140,6 @@ class AdminDataService {
       eagerError: true,
     );
 
-    final firestoreTrips = await _safeFirestoreRideRequests(
-      adminUid: adminUid,
-      adminEmail: adminEmail,
-    );
-
     final usersData = results[0];
     final driversData = results[1];
     final rideRequestsData = results[2];
@@ -176,7 +166,6 @@ class AdminDataService {
 
     final trips = _buildTrips(
       rtdbTrips: rideRequestsData,
-      firestoreTrips: firestoreTrips,
       routeLogs: tripRouteLogsData,
       settlementHooks: settlementHooksData,
       driversData: driversData,
@@ -272,7 +261,7 @@ class AdminDataService {
       liveDataSections: <String, bool>{
         'riders': usersData.isNotEmpty,
         'drivers': driversData.isNotEmpty,
-        'trips': rideRequestsData.isNotEmpty || firestoreTrips.isNotEmpty,
+        'trips': rideRequestsData.isNotEmpty,
         'wallets': walletsData.isNotEmpty,
         'withdrawals': withdrawalsData.isNotEmpty,
         'verification': driverVerificationsData.isNotEmpty,
@@ -627,50 +616,8 @@ class AdminDataService {
     }
   }
 
-  Future<Map<String, Map<String, dynamic>>> _safeFirestoreRideRequests({
-    required String adminUid,
-    required String adminEmail,
-  }) async {
-    debugPrint(
-      '[AdminData] query start source=firestore path=ride_requests adminUid=$adminUid adminEmail=$adminEmail',
-    );
-    try {
-      final snapshot = await firestore
-          .collection('ride_requests')
-          .get()
-          .timeout(_sourceTimeout);
-      final mapped = <String, Map<String, dynamic>>{
-        for (final doc in snapshot.docs)
-          doc.id: <String, dynamic>{'id': doc.id, ...doc.data()},
-      };
-      debugPrint(
-        '[AdminData] query success source=firestore path=ride_requests records=${mapped.length}',
-      );
-      return mapped;
-    } on TimeoutException catch (error, stackTrace) {
-      debugPrint(
-        '[AdminData] query timeout source=firestore path=ride_requests error=$error',
-      );
-      debugPrintStack(
-        label: '[AdminData] firestore timeout stack',
-        stackTrace: stackTrace,
-      );
-      return const <String, Map<String, dynamic>>{};
-    } catch (error, stackTrace) {
-      debugPrint(
-        '[AdminData] query failure source=firestore path=ride_requests error=$error',
-      );
-      debugPrintStack(
-        label: '[AdminData] firestore failure stack',
-        stackTrace: stackTrace,
-      );
-      return const <String, Map<String, dynamic>>{};
-    }
-  }
-
   List<AdminTripRecord> _buildTrips({
     required Map<String, dynamic> rtdbTrips,
-    required Map<String, Map<String, dynamic>> firestoreTrips,
     required Map<String, dynamic> routeLogs,
     required Map<String, dynamic> settlementHooks,
     required Map<String, dynamic> driversData,
@@ -678,7 +625,6 @@ class AdminDataService {
   }) {
     final tripIds = <String>{
       ...rtdbTrips.keys,
-      ...firestoreTrips.keys,
       ...routeLogs.keys,
       ...settlementHooks.keys,
     };
@@ -686,14 +632,12 @@ class AdminDataService {
     final trips = <AdminTripRecord>[];
     for (final tripId in tripIds) {
       final rtdbTrip = _map(rtdbTrips[tripId]);
-      final firestoreTrip = _map(firestoreTrips[tripId]);
       final routeLog = _map(routeLogs[tripId]);
       final settlementHook = _map(settlementHooks[tripId]);
       final settlement = _map(settlementHook['settlement']);
       final settlementContext =
           settlement.isNotEmpty ? settlement : settlementHook;
       final merged = <String, dynamic>{
-        ...firestoreTrip,
         ...rtdbTrip,
         if (settlementContext.isNotEmpty) 'settlement': settlementContext,
         if (routeLog.isNotEmpty) 'routeLog': routeLog,
@@ -791,13 +735,7 @@ class AdminDataService {
       trips.add(
         AdminTripRecord(
           id: tripId,
-          source: rtdbTrip.isNotEmpty && firestoreTrip.isNotEmpty
-              ? 'rtdb+firestore'
-              : rtdbTrip.isNotEmpty
-                  ? 'rtdb'
-                  : firestoreTrip.isNotEmpty
-                      ? 'firestore'
-                      : 'derived',
+          source: rtdbTrip.isNotEmpty ? 'rtdb' : 'derived',
           status: normalizedStatus,
           city: _resolveTripCity(merged),
           serviceType: _normalizeServiceType(
@@ -869,7 +807,6 @@ class AdminDataService {
             merged['requested_at'],
             merged['created_at'],
             merged['createdAt'],
-            firestoreTrip['createdAt'],
           ]),
           acceptedAt: _dateFromCandidates(<dynamic>[
             merged['accepted_at'],
@@ -2146,9 +2083,13 @@ class AdminDataService {
     if (value == null) {
       return null;
     }
-    if (value is Timestamp) {
-      return value.toDate().toLocal();
-    }
+    try {
+      final dynamic ts = value;
+      final asDate = ts.toDate();
+      if (asDate is DateTime) {
+        return asDate.toLocal();
+      }
+    } catch (_) {}
     if (value is DateTime) {
       return value.toLocal();
     }

@@ -23,6 +23,13 @@ class _DriverSignupState extends State<DriverSignup> {
   final DatabaseReference dbRef = FirebaseDatabase.instance.ref();
 
   bool isLoading = false;
+  final Set<String> _selectedDriverServiceTypes = <String>{'car_driver'};
+
+  static const Map<String, String> _driverServiceToRequestServiceType =
+      <String, String>{
+    'car_driver': 'ride',
+    'dispatch_driver': 'dispatch_delivery',
+  };
 
   InputDecoration _inputDecoration({
     required String label,
@@ -62,6 +69,10 @@ class _DriverSignupState extends State<DriverSignup> {
       showMessage("Password must be at least 6 characters");
       return;
     }
+    if (_selectedDriverServiceTypes.isEmpty) {
+      showMessage("Select at least one driver service type");
+      return;
+    }
 
     setState(() => isLoading = true);
 
@@ -91,6 +102,15 @@ class _DriverSignupState extends State<DriverSignup> {
         fallbackPhone: phoneController.text.trim(),
         pricingConfig: pricingConfig,
       );
+      final selectedDriverServiceTypes = _selectedDriverServiceTypes.toList(
+        growable: false,
+      )..sort();
+      final requestServiceTypes = selectedDriverServiceTypes
+          .map((String type) => _driverServiceToRequestServiceType[type] ?? '')
+          .where((String type) => type.isNotEmpty)
+          .toSet()
+          .toList(growable: false)
+        ..sort();
       debugPrint(
         '[DriverSignup] profile write started uid=$uid path=$profilePath verificationPath=$verificationPath',
       );
@@ -98,6 +118,8 @@ class _DriverSignupState extends State<DriverSignup> {
       await dbRef.update({
         profilePath: {
           ...profileRecord,
+          "driver_service_types": selectedDriverServiceTypes,
+          "serviceTypes": requestServiceTypes,
           "created_at": ServerValue.timestamp,
           "updated_at": ServerValue.timestamp,
         },
@@ -276,6 +298,60 @@ class _DriverSignupState extends State<DriverSignup> {
                       label: "Password",
                       hint: "Minimum 6 characters",
                     ),
+                  ),
+                  const SizedBox(height: 16),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Driver service type',
+                      style: TextStyle(
+                        color: Colors.black.withValues(alpha: 0.78),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  CheckboxListTile(
+                    value: _selectedDriverServiceTypes.contains('car_driver'),
+                    onChanged: isLoading
+                        ? null
+                        : (bool? value) {
+                            setState(() {
+                              if (value == true) {
+                                _selectedDriverServiceTypes.add('car_driver');
+                              } else {
+                                _selectedDriverServiceTypes
+                                    .remove('car_driver');
+                              }
+                            });
+                          },
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Car driver'),
+                  ),
+                  CheckboxListTile(
+                    value:
+                        _selectedDriverServiceTypes.contains('dispatch_driver'),
+                    onChanged: isLoading
+                        ? null
+                        : (bool? value) {
+                            setState(() {
+                              if (value == true) {
+                                _selectedDriverServiceTypes.add(
+                                  'dispatch_driver',
+                                );
+                              } else {
+                                _selectedDriverServiceTypes.remove(
+                                  'dispatch_driver',
+                                );
+                              }
+                            });
+                          },
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Dispatch driver'),
                   ),
                   const SizedBox(height: 22),
                   SizedBox(

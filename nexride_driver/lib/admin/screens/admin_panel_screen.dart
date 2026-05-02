@@ -883,7 +883,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       return const AdminEmptyState(
         title: 'No trip records yet',
         message:
-            'Trip management is connected to RTDB and Firestore ride request sources. As soon as live ride records exist, you will see lifecycle status, settlement details, route logs, and timestamps here.',
+            'Trip management reads live ride data from Realtime Database. When records exist, you will see lifecycle status, settlement details, route logs, and timestamps here.',
         icon: Icons.route_outlined,
       );
     }

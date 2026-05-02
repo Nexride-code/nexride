@@ -3732,9 +3732,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         child: InkWell(
           borderRadius: BorderRadius.circular(20),
           onTap: enabled
-              ? () {
+              ? () async {
                   print('RIDER_REQUEST_BUTTON_TAPPED');
-                  unawaited(handlePrimaryRideAction());
+                  await handlePrimaryRideAction();
                 }
               : null,
           child: AnimatedContainer(

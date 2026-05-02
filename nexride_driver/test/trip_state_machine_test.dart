@@ -30,45 +30,52 @@ void main() {
     );
   });
 
-  test('pending driver action remains distinct while allowing atomic accept', () {
+  test(
+    'driver_assigned reconciles legacy status tokens; no client offer-reserve state',
+    () {
     expect(
       TripStateMachine.canonicalStateFromValues(status: 'assigned'),
-      TripLifecycleState.pendingDriverAction,
+      TripLifecycleState.driverAssigned,
     );
     expect(
       TripStateMachine.canonicalStateFromValues(
         status: 'pending_driver_acceptance',
       ),
-      TripLifecycleState.pendingDriverAction,
+      TripLifecycleState.driverAssigned,
     );
     expect(
       TripStateMachine.canonicalStateFromValues(
-          status: 'pending_driver_action'),
+        status: 'pending_driver_action',
+      ),
+      TripLifecycleState.driverAssigned,
+    );
+    expect(
       TripLifecycleState.pendingDriverAction,
+      TripLifecycleState.driverAssigned,
     );
     expect(
       TripStateMachine.legacyStatusForCanonical(
         TripLifecycleState.pendingDriverAction,
       ),
-      'pending_driver_action',
+      'accepted',
     );
     expect(
       TripStateMachine.isPendingDriverAssignmentState(
         TripLifecycleState.pendingDriverAction,
       ),
-      isTrue,
+      isFalse,
     );
     expect(
       TripStateMachine.isDriverActiveState(
         TripLifecycleState.pendingDriverAction,
       ),
-      isFalse,
+      isTrue,
     );
     expect(
       TripStateMachine.isRestorable(
         TripLifecycleState.pendingDriverAction,
       ),
-      isFalse,
+      isTrue,
     );
     expect(
       TripStateMachine.canTransition(
@@ -125,43 +132,44 @@ void main() {
     expect(decision.invalidTrip, isTrue);
   });
 
-  test('driver reservation transitions cleanly into acceptance', () {
+  test('searching transitions to driver_assigned then driver_arriving', () {
     final assignedAt = DateTime(2026, 1, 1, 12).millisecondsSinceEpoch;
     final assignmentUpdate = TripStateMachine.buildTransitionUpdate(
       currentRide: <String, dynamic>{
         'trip_state': TripLifecycleState.searchingDriver,
         'status': 'searching',
       },
-      nextCanonicalState: TripLifecycleState.pendingDriverAction,
+      nextCanonicalState: TripLifecycleState.driverAssigned,
       timestampValue: assignedAt,
-      transitionSource: 'driver_assignment_reserve',
-      transitionActor: 'system',
+      transitionSource: 'acceptRideRequest',
+      transitionActor: 'driver',
     );
 
     expect(
       assignmentUpdate['trip_state'],
-      TripLifecycleState.pendingDriverAction,
+      TripLifecycleState.driverAssigned,
     );
-    expect(assignmentUpdate['status'], 'pending_driver_action');
+    expect(assignmentUpdate['status'], 'accepted');
     expect(assignmentUpdate['assigned_at'], assignedAt);
+    expect(assignmentUpdate['accepted_at'], assignedAt);
 
-    final acceptedAt = assignedAt + 1500;
-    final acceptUpdate = TripStateMachine.buildTransitionUpdate(
+    final enrouteAt = assignedAt + 1500;
+    final enrouteUpdate = TripStateMachine.buildTransitionUpdate(
       currentRide: <String, dynamic>{
-        'trip_state': TripLifecycleState.pendingDriverAction,
-        'status': 'pending_driver_action',
+        'trip_state': TripLifecycleState.driverAssigned,
+        'status': 'accepted',
         'assigned_at': assignedAt,
+        'accepted_at': assignedAt,
       },
-      nextCanonicalState: TripLifecycleState.driverAccepted,
-      timestampValue: acceptedAt,
-      transitionSource: 'driver_accept',
+      nextCanonicalState: TripLifecycleState.driverArriving,
+      timestampValue: enrouteAt,
+      transitionSource: 'driverEnroute',
       transitionActor: 'driver',
     );
 
-    expect(acceptUpdate['trip_state'], TripLifecycleState.driverAccepted);
-    expect(acceptUpdate['status'], 'accepted');
-    expect(acceptUpdate['accepted_at'], acceptedAt);
-    expect(acceptUpdate.containsKey('assigned_at'), isFalse);
+    expect(enrouteUpdate['trip_state'], TripLifecycleState.driverArriving);
+    expect(enrouteUpdate['status'], 'arriving');
+    expect(enrouteUpdate['arriving_at'], enrouteAt);
   });
 
   test('legacy driver_found status maps to driver accepted', () {
