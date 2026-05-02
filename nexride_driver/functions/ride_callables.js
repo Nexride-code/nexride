@@ -208,6 +208,61 @@ async function createRideRequest(data, context, db) {
     service_type: String(data?.service_type ?? data?.serviceType ?? "ride").trim(),
   };
 
+  const RIDER_CREATE_METADATA_ALLOW = new Set([
+    "stops",
+    "stop_count",
+    "rider_trust_snapshot",
+    "route_basis",
+    "pickup_address",
+    "destination_address",
+    "final_destination",
+    "final_destination_address",
+    "city",
+    "country",
+    "country_code",
+    "area",
+    "zone",
+    "community",
+    "pickup_area",
+    "pickup_zone",
+    "pickup_community",
+    "destination_area",
+    "destination_zone",
+    "destination_community",
+    "service_area",
+    "pickup_scope",
+    "destination_scope",
+    "fare_breakdown",
+    "requested_at",
+    "search_timeout_at",
+    "request_expires_at",
+    "payment_context",
+    "settlement_status",
+    "support_status",
+    "destination",
+    "state_machine_version",
+    "duration_min",
+    "cancel_reason",
+    "pricing_snapshot",
+    "packagePhotoUrl",
+    "packagePhotoSubmittedAt",
+    "payment_placeholder",
+    "search_started_at",
+    "pickupConfirmedAt",
+    "deliveredAt",
+    "dispatch_details",
+  ]);
+
+  const md = data?.ride_metadata ?? data?.rideMetadata;
+  if (md && typeof md === "object") {
+    for (const [k, v] of Object.entries(md)) {
+      if (!RIDER_CREATE_METADATA_ALLOW.has(k)) {
+        continue;
+      }
+      payload[k] = v;
+    }
+  }
+
   await rideRef.set(payload);
   await writeAudit(db, {
     type: "ride_create",
@@ -613,12 +668,28 @@ async function expireRideRequest(data, context, db) {
 const PATCHABLE_TOP_LEVEL = new Set([
   "chat_ready",
   "chat_ready_at",
+  "chat_last_message",
+  "chat_last_message_text",
+  "chat_last_message_sender_id",
+  "chat_last_message_sender_role",
+  "chat_last_message_at",
+  "chat_updated_at",
+  "has_chat_messages",
   "deliveryProofPhotoUrl",
   "deliveryProofSubmittedAt",
   "deliveryProofStatus",
   "deliveredAt",
   "rider_safety_alert",
+  "fare",
+  "fare_breakdown",
+  "duration_min",
+  "route_basis",
   "updated_at",
+  "route_log_updated_at",
+  "route_log_last_event_at",
+  "route_log_last_event_status",
+  "route_log_last_event_source",
+  "has_route_logs",
 ]);
 
 function isAllowedPatchKey(k) {
@@ -627,7 +698,8 @@ function isAllowedPatchKey(k) {
   }
   return k.startsWith("dispatch_details/deliveryProof") ||
     k.startsWith("dispatch_details/pickupConfirmed") ||
-    k.startsWith("dispatch_details/deliveredAt");
+    k.startsWith("dispatch_details/deliveredAt") ||
+    k.startsWith("route_basis/");
 }
 
 async function patchRideRequestMetadata(data, context, db) {

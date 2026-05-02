@@ -1,6 +1,7 @@
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
+import 'rider_ride_cloud_functions_service.dart';
 import 'rider_trust_rules_service.dart';
 import 'support_ticket_bridge_service.dart';
 
@@ -32,29 +33,37 @@ class TripSafetyTelemetryService {
         )
         .toList();
 
+    final routeBasis = <String, dynamic>{
+      'serviceType': serviceType,
+      'market': ridePayload['market'] ?? ridePayload['city'],
+      'pickup': ridePayload['pickup'],
+      'destination': ridePayload['destination'],
+      'finalDestination': ridePayload['final_destination'],
+      'stops': ridePayload['stops'] ?? <dynamic>[],
+      'distanceKm': ridePayload['distance_km'],
+      'fareEstimate': ridePayload['fare'],
+      'fareBreakdown': ridePayload['fare_breakdown'] ?? <String, dynamic>{},
+      'expectedRoutePoints': routePoints,
+      'createdAt': DateTime.now().millisecondsSinceEpoch,
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    };
+    final now = DateTime.now().millisecondsSinceEpoch;
+    try {
+      await RiderRideCloudFunctionsService.instance.patchRideRequestMetadata(
+        rideId: rideId,
+        patch: <String, dynamic>{
+          'route_basis': routeBasis,
+          'route_log_updated_at': now,
+          'route_log_last_event_at': now,
+          'route_log_last_event_status':
+              ridePayload['status']?.toString() ?? 'searching',
+          'route_log_last_event_source': 'rider_request_created',
+          'has_route_logs': true,
+        },
+      );
+    } catch (_) {}
+
     await _rootRef.update(<String, dynamic>{
-      'ride_requests/$rideId/route_basis': <String, dynamic>{
-        'serviceType': serviceType,
-        'market': ridePayload['market'] ?? ridePayload['city'],
-        'pickup': ridePayload['pickup'],
-        'destination': ridePayload['destination'],
-        'finalDestination': ridePayload['final_destination'],
-        'stops': ridePayload['stops'] ?? <dynamic>[],
-        'distanceKm': ridePayload['distance_km'],
-        'fareEstimate': ridePayload['fare'],
-        'fareBreakdown': ridePayload['fare_breakdown'] ?? <String, dynamic>{},
-        'expectedRoutePoints': routePoints,
-        'createdAt': rtdb.ServerValue.timestamp,
-        'updatedAt': rtdb.ServerValue.timestamp,
-      },
-      'ride_requests/$rideId/route_log_updated_at': rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_last_event_at':
-          rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_last_event_status':
-          ridePayload['status'] ?? 'searching',
-      'ride_requests/$rideId/route_log_last_event_source':
-          'rider_request_created',
-      'ride_requests/$rideId/has_route_logs': true,
       'trip_route_logs/$rideId': <String, dynamic>{
         'rideId': rideId,
         'riderId': riderId,
@@ -98,6 +107,7 @@ class TripSafetyTelemetryService {
     Map<String, dynamic>? rideData,
   }) async {
     final eventRef = _rootRef.child('trip_route_logs/$rideId/events').push();
+    final now = DateTime.now().millisecondsSinceEpoch;
     await _rootRef.update(<String, dynamic>{
       'trip_route_logs/$rideId/rideId': rideId,
       'trip_route_logs/$rideId/riderId': riderId,
@@ -121,13 +131,19 @@ class TripSafetyTelemetryService {
             rideData?['final_destination_address'],
         'createdAt': rtdb.ServerValue.timestamp,
       },
-      'ride_requests/$rideId/route_log_updated_at': rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_last_event_at':
-          rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_last_event_status': status,
-      'ride_requests/$rideId/route_log_last_event_source': source,
-      'ride_requests/$rideId/has_route_logs': true,
     });
+    try {
+      await RiderRideCloudFunctionsService.instance.patchRideRequestMetadata(
+        rideId: rideId,
+        patch: <String, dynamic>{
+          'route_log_updated_at': now,
+          'route_log_last_event_at': now,
+          'route_log_last_event_status': status,
+          'route_log_last_event_source': source,
+          'has_route_logs': true,
+        },
+      );
+    } catch (_) {}
   }
 
   Future<void> logCheckpoint({

@@ -13,6 +13,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'config/rider_app_config.dart';
 import 'config/rtdb_ride_request_contract.dart';
+import 'services/rider_ride_cloud_functions_service.dart';
+import 'support/ride_create_metadata.dart';
 import 'services/dispatch_photo_upload_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
@@ -65,6 +67,8 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       const RiderTrustRulesService();
   final DispatchPhotoUploadService _dispatchPhotoUploadService =
       const DispatchPhotoUploadService();
+  final RiderRideCloudFunctionsService _rideCloud =
+      RiderRideCloudFunctionsService();
   final TripSafetyTelemetryService _tripSafetyService =
       TripSafetyTelemetryService();
 
@@ -799,98 +803,13 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     return timeoutAt > 0 && DateTime.now().millisecondsSinceEpoch >= timeoutAt;
   }
 
-  int _assignmentTimeoutAt(Map<String, dynamic>? request) {
-    if (request == null) {
-      return 0;
-    }
-    for (final key in <String>[
-      'assignment_expires_at',
-      'driver_response_timeout_at',
-    ]) {
-      final value = _parseTimestamp(request[key]);
-      if (value > 0) {
-        return value;
-      }
-    }
-    return 0;
-  }
-
-  bool _assignmentHasTimedOut(Map<String, dynamic>? request) {
-    final timeoutAt = _assignmentTimeoutAt(request);
-    return timeoutAt > 0 && DateTime.now().millisecondsSinceEpoch >= timeoutAt;
-  }
-
   Future<bool> _releaseExpiredAssignedDispatchRequestIfNeeded(
     String requestId,
     Map<String, dynamic>? request,
   ) async {
-    if (request == null ||
-        !TripStateMachine.isPendingDriverAssignmentState(
-          TripStateMachine.canonicalStateFromSnapshot(request),
-        ) ||
-        !_assignmentHasTimedOut(request)) {
-      return false;
-    }
-
-    if (_requestHasTimedOut(request)) {
-      return _cancelTimedOutDispatchRequestIfNeeded(requestId, request);
-    }
-
-    final transactionResult = await _rideRequestsRef
-        .child(requestId)
-        .runTransaction((currentData) {
-          final currentRequest = _asStringDynamicMap(currentData);
-          if (currentRequest == null ||
-              !TripStateMachine.isPendingDriverAssignmentState(
-                TripStateMachine.canonicalStateFromSnapshot(currentRequest),
-              ) ||
-              !_assignmentHasTimedOut(currentRequest)) {
-            return rtdb.Transaction.abort();
-          }
-
-          final timedOutDriverId =
-              currentRequest['driver_id']?.toString() ?? '';
-          final updates = TripStateMachine.buildTransitionUpdate(
-            currentRide: currentRequest,
-            nextCanonicalState: TripLifecycleState.searchingDriver,
-            timestampValue: rtdb.ServerValue.timestamp,
-            transitionSource: 'assignment_timeout_cleanup',
-            transitionActor: 'system',
-          );
-          return rtdb.Transaction.success(
-            Map<String, dynamic>.from(currentRequest)
-              ..addAll(updates)
-              ..addAll(<String, dynamic>{
-                'driver_id': 'waiting',
-                'driver_name': null,
-                'car': null,
-                'plate': null,
-                'rating': null,
-                'driver_lat': null,
-                'driver_lng': null,
-                'driver_heading': null,
-                'assignment_expires_at': null,
-                'assignment_timeout_ms': null,
-                'last_assignment_driver_id': timedOutDriverId,
-                'last_assignment_release_reason': 'driver_response_timeout',
-              }),
-          );
-        }, applyLocally: false);
-
-    if (!transactionResult.committed) {
-      return false;
-    }
-
-    final timedOutDriverId = request['driver_id']?.toString() ?? '';
-    await _restoreDriverAvailabilityIfRideMatches(
-      requestId: requestId,
-      driverId: timedOutDriverId,
-      reason: 'driver_response_timeout',
-    );
-    debugPrint(
-      '[Dispatch] assignment timeout released requestId=$requestId reason=driver_response_timeout',
-    );
-    return true;
+    // Client-side RTDB transactions for assignment release are disabled; lifecycle
+    // is enforced by Cloud Functions.
+    return false;
   }
 
   Future<bool> _cancelTimedOutDispatchRequestIfNeeded(
@@ -903,17 +822,18 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       return false;
     }
 
-    final updates = TripStateMachine.buildTransitionUpdate(
-      currentRide: request,
-      nextCanonicalState: TripLifecycleState.tripCancelled,
-      timestampValue: rtdb.ServerValue.timestamp,
-      transitionSource: 'system_search_timeout',
-      transitionActor: 'system',
-      cancellationActor: 'system',
-      cancellationReason: 'no_drivers_available',
-    );
-    updates['cancel_source'] = 'system_search_timeout';
-    await _rideRequestsRef.child(requestId).update(updates);
+    Map<String, dynamic>? expireRes;
+    try {
+      expireRes = await _rideCloud.expireRideRequest(rideId: requestId);
+    } catch (_) {}
+    if (!riderRideCallableSucceeded(expireRes)) {
+      try {
+        await _rideCloud.cancelRideRequest(
+          rideId: requestId,
+          cancelReason: 'no_drivers_available',
+        );
+      } catch (_) {}
+    }
     final driverId = request['driver_id']?.toString() ?? '';
     await _restoreDriverAvailabilityIfRideMatches(
       requestId: requestId,
@@ -1338,7 +1258,34 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         'status=${payload['status']} trip_state=${payload['trip_state']} '
         'market=${payload['market']} market_pool=${payload[RtdbRideRequestFields.marketPool]}',
       );
-      await requestRef.set(payload);
+      final createRes = await _rideCloud
+          .createRideRequest(<String, dynamic>{
+            'ride_id': requestId,
+            'market': dispatchSlug,
+            'pickup': payload['pickup'],
+            'dropoff': payload['dropoff'],
+            'fare': payload['fare'],
+            'currency': 'NGN',
+            'distance_km': payload['distance_km'],
+            'eta_min': payload[RtdbRideRequestFields.etaMin],
+            'payment_method': payload['payment_method'],
+            'payment_status': payload[RtdbRideRequestFields.paymentStatus],
+            'expires_at': payload[RtdbRideRequestFields.expiresAt],
+            'service_type': RiderServiceType.dispatchDelivery.key,
+            'ride_metadata': rideMetadataSubset(payload),
+          })
+          .timeout(const Duration(seconds: 45));
+      if (!riderRideCallableSucceeded(createRes)) {
+        throw StateError(riderRideCallableReason(createRes));
+      }
+      final liveSnap = await _rideRequestsRef.child(requestId.trim()).get();
+      if (!liveSnap.exists) {
+        throw StateError('dispatch_missing_after_create');
+      }
+      final livePayload = _asStringDynamicMap(liveSnap.value);
+      if (livePayload == null) {
+        throw StateError('dispatch_invalid_after_create');
+      }
       try {
         final payloadDriverId = payload['driver_id']?.toString().trim() ?? '';
         final payloadMarket = payload['market']?.toString().trim() ?? '';
@@ -1397,7 +1344,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         rideId: requestId,
         riderId: user.uid,
         serviceType: RiderServiceType.dispatchDelivery.key,
-        ridePayload: payload,
+        ridePayload: livePayload,
         expectedRoutePoints: <LatLng>[
           LatLng(pickup.lat, pickup.lng),
           LatLng(dropoff.lat, dropoff.lng),
@@ -1412,7 +1359,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
       setState(() {
         _activeRequestId = requestId;
-        _activeRequest = payload;
+        _activeRequest = livePayload;
       });
 
       _showMessage('Dispatch request sent successfully.');

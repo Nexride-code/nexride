@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nexride/trip_sync/trip_state_machine.dart';
 
 void main() {
-  test('idle status stays neutral instead of searching', () {
+  test('driver trip state treats idle as neutral', () {
     expect(
       TripStateMachine.canonicalStateFromValues(status: 'idle'),
       TripLifecycleState.requested,
@@ -30,37 +30,51 @@ void main() {
     );
   });
 
-  test('rider keeps pending driver action separate from acceptance', () {
+  test(
+    'driver_assigned reconciles legacy status tokens; no client offer-reserve state',
+    () {
     expect(
       TripStateMachine.canonicalStateFromValues(status: 'assigned'),
-      TripLifecycleState.pendingDriverAction,
+      TripLifecycleState.driverAssigned,
     );
     expect(
       TripStateMachine.canonicalStateFromValues(
         status: 'pending_driver_acceptance',
       ),
-      TripLifecycleState.pendingDriverAction,
+      TripLifecycleState.driverAssigned,
     );
     expect(
       TripStateMachine.canonicalStateFromValues(
         status: 'pending_driver_action',
       ),
+      TripLifecycleState.driverAssigned,
+    );
+    expect(
       TripLifecycleState.pendingDriverAction,
+      TripLifecycleState.driverAssigned,
     );
     expect(
       TripStateMachine.legacyStatusForCanonical(
         TripLifecycleState.pendingDriverAction,
       ),
-      'pending_driver_action',
+      'accepted',
     );
     expect(
       TripStateMachine.isPendingDriverAssignmentState(
         TripLifecycleState.pendingDriverAction,
       ),
+      isFalse,
+    );
+    expect(
+      TripStateMachine.isDriverActiveState(
+        TripLifecycleState.pendingDriverAction,
+      ),
       isTrue,
     );
     expect(
-      TripStateMachine.isRestorable(TripLifecycleState.pendingDriverAction),
+      TripStateMachine.isRestorable(
+        TripLifecycleState.pendingDriverAction,
+      ),
       isTrue,
     );
     expect(
@@ -79,7 +93,7 @@ void main() {
     );
   });
 
-  test('accepted rides expire if pickup never starts', () {
+  test('accepted driver rides time out when pickup never starts', () {
     final acceptedAt = DateTime(2026, 1, 1, 12).millisecondsSinceEpoch;
     final decision = TripStateMachine.timeoutCancellationDecision(
       <String, dynamic>{
@@ -99,59 +113,99 @@ void main() {
     );
   });
 
-  test('started rides without started-route checkpoints expire quickly', () {
+  test('started driver rides without started checkpoints time out', () {
     final startedAt = DateTime(2026, 1, 1, 12).millisecondsSinceEpoch;
     final timeoutAt =
         startedAt + TripStateMachine.routeLogTimeout.inMilliseconds;
-    final decision =
-        TripStateMachine.timeoutCancellationDecision(<String, dynamic>{
-          'trip_state': TripLifecycleState.tripStarted,
-          'status': 'on_trip',
-          'started_at': startedAt,
-          'route_log_timeout_at': timeoutAt,
-        }, nowMs: timeoutAt);
+    final decision = TripStateMachine.timeoutCancellationDecision(
+      <String, dynamic>{
+        'trip_state': TripLifecycleState.tripStarted,
+        'status': 'on_trip',
+        'started_at': startedAt,
+        'route_log_timeout_at': timeoutAt,
+      },
+      nowMs: timeoutAt,
+    );
 
     expect(decision, isNotNull);
     expect(decision!.reason, 'no_route_logs');
     expect(decision.invalidTrip, isTrue);
   });
 
-  test('pending driver assignment advances cleanly into accepted', () {
+  test('searching transitions to driver_assigned then driver_arriving', () {
     final assignedAt = DateTime(2026, 1, 1, 12).millisecondsSinceEpoch;
     final assignmentUpdate = TripStateMachine.buildTransitionUpdate(
       currentRide: <String, dynamic>{
         'trip_state': TripLifecycleState.searchingDriver,
         'status': 'searching',
       },
-      nextCanonicalState: TripLifecycleState.pendingDriverAction,
+      nextCanonicalState: TripLifecycleState.driverAssigned,
       timestampValue: assignedAt,
-      transitionSource: 'driver_assignment_reserve',
-      transitionActor: 'system',
+      transitionSource: 'acceptRideRequest',
+      transitionActor: 'driver',
     );
 
     expect(
       assignmentUpdate['trip_state'],
-      TripLifecycleState.pendingDriverAction,
+      TripLifecycleState.driverAssigned,
     );
-    expect(assignmentUpdate['status'], 'pending_driver_action');
+    expect(assignmentUpdate['status'], 'accepted');
     expect(assignmentUpdate['assigned_at'], assignedAt);
+    expect(assignmentUpdate['accepted_at'], assignedAt);
 
-    final acceptedAt = assignedAt + 1500;
-    final acceptUpdate = TripStateMachine.buildTransitionUpdate(
+    final enrouteAt = assignedAt + 1500;
+    final enrouteUpdate = TripStateMachine.buildTransitionUpdate(
       currentRide: <String, dynamic>{
-        'trip_state': TripLifecycleState.pendingDriverAction,
-        'status': 'pending_driver_action',
+        'trip_state': TripLifecycleState.driverAssigned,
+        'status': 'accepted',
         'assigned_at': assignedAt,
+        'accepted_at': assignedAt,
       },
-      nextCanonicalState: TripLifecycleState.driverAccepted,
-      timestampValue: acceptedAt,
-      transitionSource: 'driver_accept',
+      nextCanonicalState: TripLifecycleState.driverArriving,
+      timestampValue: enrouteAt,
+      transitionSource: 'driverEnroute',
       transitionActor: 'driver',
     );
 
-    expect(acceptUpdate['trip_state'], TripLifecycleState.driverAccepted);
-    expect(acceptUpdate['status'], 'accepted');
-    expect(acceptUpdate['accepted_at'], acceptedAt);
-    expect(acceptUpdate.containsKey('assigned_at'), isFalse);
+    expect(enrouteUpdate['trip_state'], TripLifecycleState.driverArriving);
+    expect(enrouteUpdate['status'], 'arriving');
+    expect(enrouteUpdate['arriving_at'], enrouteAt);
+  });
+
+  test('legacy driver_found status maps to driver accepted', () {
+    expect(
+      TripStateMachine.canonicalStateFromValues(status: 'driver_found'),
+      TripLifecycleState.driverAccepted,
+    );
+    expect(
+      TripStateMachine.uiStatusFromSnapshot(<String, dynamic>{
+        'status': 'driver_found',
+        'driver_id': 'd1',
+      }),
+      'accepted',
+    );
+  });
+
+  test('lifecycle proof accepts camelCase acceptedAt', () {
+    expect(
+      TripStateMachine.lifecycleProofReason(
+        <String, dynamic>{
+          'trip_state': TripLifecycleState.driverAccepted,
+          'acceptedAt': 1700000000000,
+        },
+      ),
+      isNull,
+    );
+  });
+
+  test('bound driver_id uplifts stale searching trip_state for rider stability', () {
+    expect(
+      TripStateMachine.canonicalStateFromValues(
+        tripState: TripLifecycleState.searchingDriver,
+        status: 'searching',
+        assignedDriverId: 'driver_abc',
+      ),
+      TripLifecycleState.pendingDriverAction,
+    );
   });
 }

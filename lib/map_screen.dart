@@ -16,6 +16,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'config/rider_app_config.dart';
+import 'config/rider_trip_status_messages.dart';
 import 'config/rtdb_ride_request_contract.dart';
 import 'services/call_permissions.dart';
 import 'services/call_service.dart';
@@ -26,12 +27,14 @@ import 'services/rider_alert_sound_service.dart';
 import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
+import 'services/rider_ride_cloud_functions_service.dart';
 import 'services/trip_safety_service.dart';
 import 'service_type.dart';
 import 'share_trip_rtdb.dart';
 import 'support/rider_fare_support.dart';
 import 'support/ride_chat_support.dart';
 import 'support/rider_trust_support.dart';
+import 'support/ride_create_metadata.dart';
 import 'support/rtdb_flow_debug_log.dart';
 import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
@@ -94,6 +97,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       const RiderTrustBootstrapService();
   final RiderTrustRulesService _trustRulesService =
       const RiderTrustRulesService();
+  final RiderRideCloudFunctionsService _rideCloud =
+      RiderRideCloudFunctionsService();
   final TripSafetyTelemetryService _tripSafetyService =
       TripSafetyTelemetryService();
   final NativePlacesService _nativePlacesService = NativePlacesService.instance;
@@ -615,26 +620,37 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
-    final updates = TripStateMachine.buildTransitionUpdate(
-      currentRide: rideData,
-      nextCanonicalState: TripLifecycleState.tripCancelled,
-      timestampValue: rtdb.ServerValue.timestamp,
-      transitionSource: 'system_search_timeout',
-      transitionActor: 'system',
-      cancellationActor: 'system',
-      cancellationReason: 'no_drivers_available',
-    );
-    updates.addAll(
-      _cancelledRideMetadata(
-        rideData: rideData,
-        cancelSource: 'system_search_timeout',
-        effectiveAt: _rideSearchTimeoutAt(rideData),
-      ),
-    );
-    await _rideRequestsRef.child(rideId).update(updates);
+    Map<String, dynamic>? expireRes;
+    try {
+      expireRes = await _rideCloud.expireRideRequest(rideId: rideId);
+    } catch (error) {
+      _logRideFlow(
+        '[RIDE_LIFECYCLE] expireRideRequest failed rideId=$rideId error=$error',
+      );
+    }
+    if (!riderRideCallableSucceeded(expireRes)) {
+      try {
+        await _rideCloud.cancelRideRequest(
+          rideId: rideId,
+          cancelReason: 'no_drivers_available',
+        );
+      } catch (error) {
+        _logRideFlow(
+          '[RIDE_LIFECYCLE] cancelRideRequest failed rideId=$rideId error=$error',
+        );
+      }
+    }
+    Map<String, dynamic> merged = Map<String, dynamic>.from(rideData);
+    try {
+      final snap = await _rideRequestsRef.child(rideId).get();
+      final live = _asStringDynamicMap(snap.value);
+      if (live != null) {
+        merged = live;
+      }
+    } catch (_) {}
     await _syncRideOperationalViews(
       rideId: rideId,
-      rideData: <String, dynamic>{...rideData, ...updates},
+      rideData: merged,
       lastEvent: 'system_search_timeout',
     );
     await _restoreDriverAvailabilityIfRideMatches(
@@ -869,83 +885,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     required String source,
   }) async {
-    final canonicalState = TripStateMachine.canonicalStateFromSnapshot(
-      rideData,
-    );
-    if (!TripStateMachine.isPendingDriverAssignmentState(canonicalState) ||
-        !_rideAssignmentHasTimedOut(rideData)) {
-      return false;
-    }
-
-    if (_rideHasTimedOut(rideData)) {
-      await _markRideNoDriversAvailable(
-        rideId: rideId,
-        rideData: rideData,
-        force: true,
-      );
-      return true;
-    }
-
-    final releaseReason = 'driver_response_timeout';
-    final transactionResult = await _rideRequestsRef
-        .child(rideId)
-        .runTransaction((currentData) {
-          final currentRide = _asStringDynamicMap(currentData);
-          if (currentRide == null) {
-            return rtdb.Transaction.abort();
-          }
-
-          final currentCanonicalState =
-              TripStateMachine.canonicalStateFromSnapshot(currentRide);
-          if (!TripStateMachine.isPendingDriverAssignmentState(
-                currentCanonicalState,
-              ) ||
-              !_rideAssignmentHasTimedOut(currentRide)) {
-            return rtdb.Transaction.abort();
-          }
-
-          final timedOutDriverId = _valueAsText(currentRide['driver_id']);
-          final updates = TripStateMachine.buildTransitionUpdate(
-            currentRide: currentRide,
-            nextCanonicalState: TripLifecycleState.searchingDriver,
-            timestampValue: rtdb.ServerValue.timestamp,
-            transitionSource: 'assignment_timeout_cleanup',
-            transitionActor: 'system',
-          );
-          return rtdb.Transaction.success(
-            Map<String, dynamic>.from(currentRide)
-              ..addAll(updates)
-              ..addAll(<String, dynamic>{
-                'driver_id': 'waiting',
-                'driver_name': null,
-                'car': null,
-                'plate': null,
-                'rating': null,
-                'driver_lat': null,
-                'driver_lng': null,
-                'driver_heading': null,
-                'assignment_expires_at': null,
-                'assignment_timeout_ms': null,
-                'last_assignment_driver_id': timedOutDriverId,
-                'last_assignment_release_reason': releaseReason,
-              }),
-          );
-        }, applyLocally: false);
-
-    if (!transactionResult.committed) {
-      return false;
-    }
-
-    final timedOutDriverId = _valueAsText(rideData['driver_id']);
-    await _restoreDriverAvailabilityIfRideMatches(
-      rideId: rideId,
-      driverId: timedOutDriverId,
-      reason: releaseReason,
-    );
-    _logRideFlow(
-      'assigned ride released ts=${DateTime.now().toIso8601String()} source=$source rideId=$rideId reason=$releaseReason',
-    );
-    return true;
+    // Assignment release previously used client RTDB transactions; lifecycle is
+    // server-owned now. Do not mutate `ride_requests` from the rider client.
+    return false;
   }
 
   Future<String?> _assignedDriverInvalidReason({
@@ -1118,23 +1060,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     required _RiderRideStatusDecision decision,
   }) {
-    final snapshot = Map<String, dynamic>.from(rideData);
-    if (decision.reason == null || decision.status != 'searching') {
-      snapshot['status'] = decision.status;
-      return snapshot;
-    }
-
-    snapshot['status'] = 'searching';
-    snapshot['trip_state'] = TripLifecycleState.searchingDriver;
-    snapshot['driver_id'] = 'waiting';
-    snapshot['driver_name'] = null;
-    snapshot['car'] = null;
-    snapshot['plate'] = null;
-    snapshot['rating'] = null;
-    snapshot['driver_lat'] = null;
-    snapshot['driver_lng'] = null;
-    snapshot['driver_heading'] = null;
-    return snapshot;
+    // RTDB + Cloud Functions are the source of truth; never fabricate a return
+    // to "searching" when the server has already assigned a driver.
+    return Map<String, dynamic>.from(rideData);
   }
 
   bool get _hasActiveRide =>
@@ -1374,13 +1302,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Color get _rideStateAccentColor {
     return switch (_currentCanonicalRideState) {
       TripLifecycleState.searchingDriver => _gold,
-      TripLifecycleState.pendingDriverAction => _routeShadow,
       TripLifecycleState.driverAccepted => _panelSuccess,
       TripLifecycleState.driverArriving => _panelSuccess,
       TripLifecycleState.driverArrived => _panelWarning,
       TripLifecycleState.tripStarted => _panelInk,
       TripLifecycleState.tripCompleted => _panelSuccess,
       TripLifecycleState.tripCancelled => _panelDanger,
+      TripLifecycleState.expired => _panelDanger,
       _ => _gold,
     };
   }
@@ -1392,13 +1320,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     TripLifecycleState.driverAccepted ||
     TripLifecycleState.driverArriving => const Color(0xFFEDF8F2),
     TripLifecycleState.driverArrived => const Color(0xFFFFF1E3),
-    TripLifecycleState.pendingDriverAction => const Color(0xFFF4EBDD),
+    TripLifecycleState.expired => const Color(0xFFFBE8E3),
     _ => const Color(0xFFF9F0E0),
   };
 
   IconData get _rideStateIcon => switch (_currentCanonicalRideState) {
     TripLifecycleState.searchingDriver => Icons.radar_rounded,
-    TripLifecycleState.pendingDriverAction => Icons.pending_actions_rounded,
     TripLifecycleState.driverAccepted => Icons.verified_user_rounded,
     TripLifecycleState.driverArriving => Icons.local_taxi_rounded,
     TripLifecycleState.driverArrived => Icons.place_rounded,
@@ -1410,30 +1337,28 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   String get _rideStateEyebrow => switch (_currentCanonicalRideState) {
     TripLifecycleState.searchingDriver => 'MATCHING YOUR RIDE',
-    TripLifecycleState.pendingDriverAction => 'DRIVER MATCHED',
-    TripLifecycleState.driverAccepted => 'DRIVER ACCEPTED',
+    TripLifecycleState.driverAccepted => 'DRIVER ASSIGNED',
     TripLifecycleState.driverArriving => 'ON THE WAY',
     TripLifecycleState.driverArrived => 'DRIVER ARRIVED',
     TripLifecycleState.tripStarted => 'TRIP STARTED',
     TripLifecycleState.tripCompleted => 'TRIP COMPLETED',
     TripLifecycleState.tripCancelled => 'REQUEST CLOSED',
+    TripLifecycleState.expired => 'REQUEST EXPIRED',
     _ => _hasRoutePreviewReady ? 'READY TO REQUEST' : 'PLAN YOUR RIDE',
   };
 
   String get _rideStateSupportText {
     if (_isSubmittingRideRequest || _isCreatingRide) {
-      return 'We are packaging your trip details and notifying nearby drivers.';
+      return RiderTripStatusMessages.creatingRide;
     }
 
     return switch (_currentCanonicalRideState) {
       TripLifecycleState.searchingDriver =>
-        'Nearby eligible drivers are being notified in real time now.',
-      TripLifecycleState.pendingDriverAction =>
-        'Your matched driver has the trip details and is choosing whether to accept.',
+        RiderTripStatusMessages.searchingForDriver,
       TripLifecycleState.driverAccepted =>
-        'Your driver is confirmed. Chat and trip sharing are now ready.',
+        RiderTripStatusMessages.driverAssigned,
       TripLifecycleState.driverArriving =>
-        'Watch your driver approach the pickup point on the live map.',
+        RiderTripStatusMessages.driverArriving,
       TripLifecycleState.driverArrived =>
         _waitingCharged
             ? 'Your driver is waiting at pickup and the waiting charge has started.'
@@ -1443,7 +1368,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       TripLifecycleState.tripCompleted =>
         'This ride is complete. You can plan another trip anytime.',
       TripLifecycleState.tripCancelled =>
-        'This trip is no longer active. Update the route and request again when ready.',
+        RiderTripStatusMessages.cancelled,
+      TripLifecycleState.expired => RiderTripStatusMessages.cancelled,
       _ =>
         _routePreviewError != null
             ? _routePreviewError!
@@ -1869,10 +1795,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _clearRideSearchTimeout(reason: 'user_abort_before_write');
     if (rideId.isNotEmpty) {
       try {
-        await _rideRequestsRef.child(rideId).remove();
+        await _rideCloud.cancelRideRequest(
+          rideId: rideId,
+          cancelReason: 'rider_abort_before_submit',
+        );
       } catch (error) {
         _logRideFlow(
-          'discard submission remove failed rideId=$rideId error=$error',
+          'discard submission cancel failed rideId=$rideId error=$error',
         );
       }
     }
@@ -1905,29 +1834,26 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required String cancellationReasonDisplay,
   }) async {
     final driverId = currentRide['driver_id']?.toString();
-    final updates = TripStateMachine.buildTransitionUpdate(
-      currentRide: currentRide,
-      nextCanonicalState: TripLifecycleState.tripCancelled,
-      timestampValue: rtdb.ServerValue.timestamp,
-      transitionSource: transitionSource,
-      transitionActor: 'rider',
-      cancellationActor: 'rider',
-      cancellationReason: cancellationReasonDisplay,
-    );
-    updates.addAll(
-      _cancelledRideMetadata(
-        rideData: currentRide,
-        cancelSource: cancelMetadataSource,
-      ),
-    );
-    updates['cancelled_by'] = 'rider';
-    updates['cancelled_at'] = rtdb.ServerValue.timestamp;
-    await _rideRequestsRef.child(rideId).update(updates).timeout(
-          const Duration(seconds: 18),
-        );
+    final cancelRes = await _rideCloud
+        .cancelRideRequest(
+          rideId: rideId,
+          cancelReason: cancellationReasonDisplay,
+        )
+        .timeout(const Duration(seconds: 22));
+    if (!riderRideCallableSucceeded(cancelRes)) {
+      throw StateError(riderRideCallableReason(cancelRes));
+    }
+    Map<String, dynamic> merged = Map<String, dynamic>.from(currentRide);
+    try {
+      final snap = await _rideRequestsRef.child(rideId).get();
+      final live = _asStringDynamicMap(snap.value);
+      if (live != null) {
+        merged = live;
+      }
+    } catch (_) {}
     await _syncRideOperationalViews(
       rideId: rideId,
-      rideData: <String, dynamic>{...currentRide, ...updates},
+      rideData: merged,
       lastEvent: 'rider_cancel',
     );
     _logRideFlow(
@@ -4432,7 +4358,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   String _rideStatusLabel(String status) {
     if (_isSubmittingRideRequest || _isCreatingRide) {
-      return 'Preparing your ride request';
+      return RiderTripStatusMessages.creatingRide;
     }
 
     if (status.trim().toLowerCase() == 'idle') {
@@ -4468,16 +4394,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _currentRideSnapshot ?? const <String, dynamic>{},
     );
     return switch (canonicalState) {
-      TripLifecycleState.requested => 'Preparing your trip request',
-      TripLifecycleState.searchingDriver => 'Matching your ride',
-      TripLifecycleState.pendingDriverAction =>
-        'Driver matched — confirming',
-      TripLifecycleState.driverAccepted => 'Driver accepted',
-      TripLifecycleState.driverArriving => 'Driver is on the way',
-      TripLifecycleState.driverArrived => 'Driver arrived',
-      TripLifecycleState.tripStarted => 'Trip started',
-      TripLifecycleState.tripCompleted => 'Trip completed',
-      TripLifecycleState.tripCancelled => 'Trip cancelled',
+      TripLifecycleState.searchingDriver =>
+        RiderTripStatusMessages.searchingForDriver,
+      TripLifecycleState.driverAccepted =>
+        RiderTripStatusMessages.driverAssigned,
+      TripLifecycleState.driverArriving =>
+        RiderTripStatusMessages.driverArriving,
+      TripLifecycleState.driverArrived => RiderTripStatusMessages.arrived,
+      TripLifecycleState.tripStarted => RiderTripStatusMessages.tripStarted,
+      TripLifecycleState.tripCompleted => RiderTripStatusMessages.tripCompleted,
+      TripLifecycleState.tripCancelled => RiderTripStatusMessages.cancelled,
+      TripLifecycleState.expired => RiderTripStatusMessages.cancelled,
       _ => 'Ready when you are',
     };
   }
@@ -6079,17 +6006,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final searchTransition = TripStateMachine.buildTransitionUpdate(
         currentRide: canonicalSeed,
         nextCanonicalState: TripLifecycleState.searchingDriver,
-        timestampValue: rtdb.ServerValue.timestamp,
+        timestampValue: DateTime.now().millisecondsSinceEpoch,
         transitionSource: 'rider_request_search_start',
         transitionActor: 'rider',
       );
       final searchingPayload = <String, dynamic>{
         ...canonicalSeed,
         ...searchTransition,
-        // Keep request open for driver discovery until accept/expiry.
-        // Driver filter accepts `requesting` as an open-pool lifecycle token.
-        'status': 'requesting',
-        'trip_state': 'requesting',
         'search_timeout_at': searchTimeoutAt,
         'request_expires_at': searchTimeoutAt,
         RtdbRideRequestFields.expiresAt: searchTimeoutAt,
@@ -6106,33 +6029,33 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'market=$dispatchMarket status=${searchingPayload[RtdbRideRequestFields.status]} '
         'trip_state=${searchingPayload[RtdbRideRequestFields.tripState]}',
       );
-      _logRideFlow('createRideRequest before write path=ride_requests/$rideId');
+      _logRideFlow('createRideRequest before callable rideId=$rideId');
       _logRideFlow('request payload prepared rideId=$rideId');
-      _logRideFlow('createRideRequest before write payload=$searchingPayload');
+      _logRideFlow('createRideRequest local preview payload=$searchingPayload');
       _logRideFlow(
-        'REQUEST RIDE payload rideId=$rideId payload=$searchingPayload',
+        'REQUEST RIDE callable payload rideId=$rideId preview=$searchingPayload',
       );
       _logRideFlow(
-        '[RIDER_CREATE] payload=$searchingPayload',
+        '[RIDER_CREATE] preview=$searchingPayload',
       );
       _logRideFlow(
-        'REQUEST RIDE RTDB write started rideId=$rideId path=ride_requests/$rideId',
+        'REQUEST RIDE createRideRequest started rideId=$rideId',
       );
       _logRideFlow(
-        '[MATCH_DEBUG][RIDER_WRITE] rideId=$rideId path=ride_requests/$rideId '
+        '[MATCH_DEBUG][RIDER_CALLABLE_CREATE] rideId=$rideId '
         'status=${searchingPayload['status']} trip_state=${searchingPayload['trip_state']} '
         'market=${searchingPayload['market']} market_pool=${searchingPayload['market_pool']}',
       );
-      _logRideFlow('RTDB write started path=ride_requests/$rideId');
       if (_rideRequestUserAborted) {
         _logRideFlow(
-          'createRideRequest user aborted before write rideId=$rideId',
+          'createRideRequest user aborted before callable rideId=$rideId',
         );
         await _discardInFlightRideRequestSubmission(rideId: rideId);
         return;
       }
+      _showSnackBar(RiderTripStatusMessages.creatingRide);
       _logRideFlow(
-        '[RIDER_REQ] create_pre_write rideId=$rideId '
+        '[RIDER_REQ] create_pre_callable rideId=$rideId '
         'market=${searchingPayload['market']} '
         'market_pool=${searchingPayload[RtdbRideRequestFields.marketPool]} '
         'status=${searchingPayload['status']} trip_state=${searchingPayload['trip_state']} '
@@ -6142,28 +6065,54 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'request_expires_at=${searchingPayload['request_expires_at']}',
       );
       _logDiscoveryRideRequestPayload(
-        'before_write',
+        'before_callable',
         rideId,
         Map<String, dynamic>.from(searchingPayload),
       );
-      final committedRideData = await _writeRideRequestWithRecovery(
-        rideRef: rideRef,
-        rideId: rideId,
-        payload: searchingPayload,
-      );
+      final createRes = await _rideCloud
+          .createRideRequest(<String, dynamic>{
+            'ride_id': rideId,
+            'market': dispatchMarket,
+            'pickup': pickupPayload,
+            'dropoff': destinationPayload,
+            'fare': fareBreakdown.totalFare,
+            'currency': 'NGN',
+            'distance_km': fareBreakdown.distanceKm,
+            'eta_min': fareBreakdown.durationMin,
+            'payment_method': searchingPayload['payment_method'],
+            'payment_status':
+                searchingPayload[RtdbRideRequestFields.paymentStatus],
+            'expires_at': searchTimeoutAt,
+            'service_type': RiderServiceType.ride.key,
+            'ride_metadata': rideMetadataSubset(searchingPayload),
+          })
+          .timeout(const Duration(seconds: 45));
+      if (!riderRideCallableSucceeded(createRes)) {
+        throw StateError(riderRideCallableReason(createRes));
+      }
+      final verifySnapshot = await _rideRequestsRef.child(rideId).get().timeout(
+            const Duration(seconds: 18),
+          );
+      if (!verifySnapshot.exists) {
+        throw StateError('ride_missing_after_create');
+      }
+      final committedRideData = _asStringDynamicMap(verifySnapshot.value);
+      if (committedRideData == null) {
+        throw StateError('ride_invalid_after_create');
+      }
       await _syncRideOperationalViews(
         rideId: rideId,
-        rideData: Map<String, dynamic>.from(committedRideData ?? searchingPayload),
+        rideData: Map<String, dynamic>.from(committedRideData),
         lastEvent: 'rider_create',
       );
       _logDiscoveryRideRequestPayload(
-        'after_write',
+        'after_callable',
         rideId,
-        Map<String, dynamic>.from(committedRideData ?? searchingPayload),
+        Map<String, dynamic>.from(committedRideData),
       );
       {
         final eff = Map<String, dynamic>.from(
-          committedRideData ?? searchingPayload,
+          committedRideData,
         );
         _logRideFlow(
           '[RIDER_REQ] create_post_write_payment_lock_subset rideId=$rideId '
@@ -6182,7 +6131,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           await _performRiderRtdbCancellationUpdate(
             rideId: rideId,
             currentRide: Map<String, dynamic>.from(
-              committedRideData ?? searchingPayload,
+              committedRideData,
             ),
             transitionSource: 'rider_cancel',
             cancelMetadataSource: 'rider_abort_during_submit',
@@ -6199,12 +6148,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _resetRideState(clearDestination: true);
         return;
       }
-      _logRideFlow('REQUEST RIDE RTDB write succeeded rideId=$rideId');
-      _logRideFlow('RTDB write succeeded rideId=$rideId');
+      _logRideFlow('REQUEST RIDE createRideRequest succeeded rideId=$rideId');
+      _logRideFlow('RTDB snapshot confirmed rideId=$rideId');
       _logRideFlow(
-        '[MATCH_DEBUG][RIDER_WRITE_OK] rideId=$rideId path=ride_requests/$rideId '
-        'status=${(committedRideData ?? searchingPayload)['status']} '
-        'trip_state=${(committedRideData ?? searchingPayload)['trip_state']}',
+        '[MATCH_DEBUG][RIDER_CREATE_OK] rideId=$rideId path=ride_requests/$rideId '
+        'status=${committedRideData['status']} '
+        'trip_state=${committedRideData['trip_state']}',
       );
       _logRideFlow(
         '[RIDER_CREATE_OK] rideId=$rideId',
@@ -6218,7 +6167,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               rideId: rideId,
               riderId: user.uid,
               serviceType: RiderServiceType.ride.key,
-              ridePayload: searchingPayload,
+              ridePayload: committedRideData,
               expectedRoutePoints: expectedRoutePoints,
             )
             .catchError((Object error) {
@@ -6228,11 +6177,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             }),
       );
 
-      _logRideFlow('createRideRequest write success rideId=$rideId');
+      _logRideFlow('createRideRequest callable success rideId=$rideId');
       {
         final nowMs = DateTime.now().millisecondsSinceEpoch;
         final eff = Map<String, dynamic>.from(
-          committedRideData ?? searchingPayload,
+          committedRideData,
         );
         final sto = _asInt(eff['search_timeout_at']);
         final reo = _asInt(eff['request_expires_at']);
@@ -6249,7 +6198,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           _currentRideId = rideId;
           _pendingRideRequestSubmissionId = null;
           _currentRideSnapshot = Map<String, dynamic>.from(
-            committedRideData ?? searchingPayload,
+            committedRideData,
           );
           _rideStatus = 'searching';
           _searchingDriver = true;
@@ -6260,7 +6209,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _currentRideId = rideId;
         _pendingRideRequestSubmissionId = null;
         _currentRideSnapshot = Map<String, dynamic>.from(
-          committedRideData ?? searchingPayload,
+          committedRideData,
         );
         _rideStatus = 'searching';
         _searchingDriver = true;
@@ -6277,7 +6226,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _startCallListener(rideId);
         _scheduleRideSearchTimeout(
           rideId: rideId,
-          rideData: committedRideData ?? searchingPayload,
+          rideData: committedRideData,
         );
         listenToRide(rideId);
       } catch (error, stackTrace) {
@@ -6289,18 +6238,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           stackTrace: stackTrace,
         );
       }
-      unawaited(
-        _enrichRideRequestMetadata(
-          rideId: rideId,
-          city: city,
-          pickupPayloadBase: pickupPayload,
-          destinationPayloadBase: destinationPayload,
-          orderedStops: orderedStops,
-          stops: stops,
-          expectedRoutePoints: expectedRoutePoints,
-          fareBreakdown: fareBreakdown,
-        ),
-      );
+      _showSnackBar(RiderTripStatusMessages.searchingForDriver);
     } catch (error, stackTrace) {
       if (_rideRequestUserAborted) {
         _logRideFlow(
@@ -6315,12 +6253,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         return;
       }
       _logRideFlow(
-        'RTDB write failed error=$error rideId=${rideId ?? 'unknown'}',
+        'createRideRequest failed error=$error rideId=${rideId ?? 'unknown'}',
       );
       _logRideFlow(
-        'REQUEST RIDE RTDB write failed rideId=${rideId ?? 'unknown'} exact_error_type=${error.runtimeType} exact_error=$error',
+        'REQUEST RIDE create failed rideId=${rideId ?? 'unknown'} exact_error_type=${error.runtimeType} exact_error=$error',
       );
-      _logRideFlow('createRideRequest write failure error=$error');
+      _logRideFlow('createRideRequest callable failure error=$error');
       _logRideFlow('REQUEST RIDE caught exception error=$error');
       _logRideFlow(
         '[RIDER_CREATE_FAIL] rideId=${rideId ?? 'unknown'} error=$error',
@@ -7100,13 +7038,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     routeBasis['fare_breakdown'] = routeFareBreakdown;
 
     try {
-      await _rideRequestsRef.child(rideId).update(<String, dynamic>{
-        'fare': _fare,
-        'fare_breakdown': fareBreakdown,
-        'route_basis/fare_estimate': _fare,
-        'route_basis/fare_breakdown': routeFareBreakdown,
-        'updated_at': rtdb.ServerValue.timestamp,
-      });
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final patchRes = await _rideCloud.patchRideRequestMetadata(
+        rideId: rideId,
+        patch: <String, dynamic>{
+          'fare': _fare,
+          'fare_breakdown': fareBreakdown,
+          'route_basis/fare_estimate': _fare,
+          'route_basis/fare_breakdown': routeFareBreakdown,
+          'duration_min': _estimatedDurationMin,
+          'updated_at': now,
+        },
+      );
+      if (!riderRideCallableSucceeded(patchRes)) {
+        _logRideFlow(
+          'waiting charge patch failed rideId=$rideId reason=${riderRideCallableReason(patchRes)}',
+        );
+        return;
+      }
 
       _currentRideSnapshot = <String, dynamic>{
         ...currentRideData,
@@ -8157,7 +8106,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'imageUrl': normalizedImageUrl.isEmpty ? null : normalizedImageUrl,
         'timestamp': rtdb.ServerValue.timestamp,
       };
-      final lastMessageMeta = <String, dynamic>{
+      final lastMessageMetaPlain = <String, dynamic>{
         'id': messageId,
         'ride_id': normalizedRideId,
         'sender_id': user.uid,
@@ -8165,7 +8114,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'text': _rideChatPreview(
           trimmed.isEmpty ? 'Photo' : trimmed,
         ),
-        'created_at': rtdb.ServerValue.timestamp,
+        'created_at': clientCreatedAt,
         'created_at_client': clientCreatedAt,
       };
       _logRideFlow(
@@ -8190,16 +8139,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               'rider',
           '${canonicalRideChatParticipantPath(normalizedRideId, user.uid)}/updated_at':
               rtdb.ServerValue.timestamp,
-          'ride_requests/$normalizedRideId/chat_last_message': lastMessageMeta,
-          'ride_requests/$normalizedRideId/chat_last_message_text':
-              lastMessageMeta['text'],
-          'ride_requests/$normalizedRideId/chat_last_message_sender_id': user.uid,
-          'ride_requests/$normalizedRideId/chat_last_message_sender_role': 'rider',
-          'ride_requests/$normalizedRideId/chat_last_message_at':
-              rtdb.ServerValue.timestamp,
-          'ride_requests/$normalizedRideId/chat_updated_at':
-              rtdb.ServerValue.timestamp,
-          'ride_requests/$normalizedRideId/has_chat_messages': true,
           '${canonicalRideChatMetaPath(normalizedRideId)}/rideId': normalizedRideId,
           '${canonicalRideChatMetaPath(normalizedRideId)}/rider_id': user.uid,
           '${canonicalRideChatMetaPath(normalizedRideId)}/driver_id':
@@ -8209,13 +8148,28 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           '${canonicalRideChatMetaPath(normalizedRideId)}/updated_at':
               rtdb.ServerValue.timestamp,
           '${canonicalRideChatMetaPath(normalizedRideId)}/last_message':
-              lastMessageMeta['text'],
+              lastMessageMetaPlain['text'],
           '${canonicalRideChatMetaPath(normalizedRideId)}/last_message_sender_id':
               user.uid,
           '${canonicalRideChatMetaPath(normalizedRideId)}/last_message_at':
               rtdb.ServerValue.timestamp,
           '${canonicalRideChatMetaPath(normalizedRideId)}/status': 'active',
         });
+        final patchRes = await _rideCloud.patchRideRequestMetadata(
+          rideId: normalizedRideId,
+          patch: <String, dynamic>{
+            'chat_last_message': lastMessageMetaPlain,
+            'chat_last_message_text': lastMessageMetaPlain['text'],
+            'chat_last_message_sender_id': user.uid,
+            'chat_last_message_sender_role': 'rider',
+            'chat_last_message_at': clientCreatedAt,
+            'chat_updated_at': clientCreatedAt,
+            'has_chat_messages': true,
+          },
+        );
+        if (!riderRideCallableSucceeded(patchRes)) {
+          return 'Unable to sync this message to the trip right now.';
+        }
 
         _confirmRiderOptimisticMessageSent(
           rideId: normalizedRideId,
@@ -8242,7 +8196,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           rideId: normalizedRideId,
           messageId: messageId,
           payload: payload,
-          lastMessageMeta: lastMessageMeta,
+          lastMessageMeta: lastMessageMetaPlain,
         ));
 
         _logRideFlow(
