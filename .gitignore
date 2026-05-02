@@ -10,4 +10,6 @@ android/app/build/
 ios/Pods/
 macos/Flutter/ephemeral/
 windows/flutter/ephemeral/
-linux/flutter/ephemeral/
+linux/flutter/ephemeral/ios/Pods/
+macos/Pods/
+android/.gradle/

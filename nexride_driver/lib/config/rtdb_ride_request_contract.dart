@@ -2,16 +2,13 @@
 /// Rider and driver apps use **snake_case** for all fields below.
 /// Rules also accept legacy `riderId` / `matchedDriverId` for creates and reads.
 ///
-/// **Discovery (driver):** `orderByChild('market_pool').equalTo(citySlug)` only.
-/// - While a request is in the open pool, set [marketPool] to the same canonical
-///   slug as [market] (e.g. `lagos`). Clear [marketPool] (null) when a driver is
-///   reserved or the trip leaves the pool so other drivers’ queries are not denied.
-/// - Keep [market] for analytics / UI even when not indexed for discovery.
+/// **Discovery (driver):** server fan-out only — drivers read
+/// `driver_offer_queue/{driverId}/{rideId}` (see Cloud Functions + rules).
+/// [marketPool] / [market] remain on `ride_requests` for backend indexing and
+/// admin tooling; clients do not scan `ride_requests` for matching.
 ///
-/// **Security rules:** `database.rules.json` open-pool discovery allows only
-/// these lifecycle tokens on [RtdbRideRequestFields.status] or
-/// [RtdbRideRequestFields.tripState] (plus terminal guards and `drivers/{uid}`).
-/// Keep this set in sync with the `market_pool` branch in `database.rules.json`.
+/// **Security rules:** `ride_requests` has no public read; riders/drivers read
+/// only their assigned `ride_requests/{rideId}`.
 const Set<String> kRtdbOpenPoolDiscoveryLifecycleTokens = <String>{
   'searching',
   'requested',

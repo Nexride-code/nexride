@@ -12,6 +12,8 @@
     "logs": "firebase functions:log"
   },
   "dependencies": {
+    "agora-token": "^2.0.4",
+    "dotenv": "^16.6.1",
     "firebase-admin": "^12.7.0",
     "firebase-functions": "^4.9.0"
   }

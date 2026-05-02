@@ -202,6 +202,7 @@ class TripStateMachine {
         'trip_cancelled' => TripLifecycleState.cancelled,
         'driver_arrived' => TripLifecycleState.arrived,
         'driver_assigned' => TripLifecycleState.driverAssigned,
+        'accepted' => TripLifecycleState.driverAssigned,
         'in_progress' => TripLifecycleState.inProgress,
         'arrived' => TripLifecycleState.arrived,
         'expired' => TripLifecycleState.expired,

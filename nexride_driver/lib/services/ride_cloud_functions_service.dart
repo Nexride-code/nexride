@@ -26,14 +26,18 @@ class RideCloudFunctionsService {
     return <String, dynamic>{};
   }
 
+  /// Backend-controlled accept (driver uid from auth).
+  Future<Map<String, dynamic>> acceptRide({required String rideId}) =>
+      _call('acceptRide', <String, dynamic>{
+        'rideId': rideId,
+      });
+
+  /// @deprecated Prefer [acceptRide] — [driverId] is ignored; auth uid is used.
   Future<Map<String, dynamic>> acceptRideRequest({
     required String rideId,
     required String driverId,
   }) =>
-      _call('acceptRideRequest', <String, dynamic>{
-        'rideId': rideId,
-        'driverId': driverId,
-      });
+      acceptRide(rideId: rideId);
 
   Future<Map<String, dynamic>> driverEnroute({required String rideId}) =>
       _call('driverEnroute', <String, dynamic>{'rideId': rideId});
@@ -47,14 +51,21 @@ class RideCloudFunctionsService {
   Future<Map<String, dynamic>> completeTrip({required String rideId}) =>
       _call('completeTrip', <String, dynamic>{'rideId': rideId});
 
+  Future<Map<String, dynamic>> cancelRide({
+    required String rideId,
+    required String cancelReason,
+  }) =>
+      _call('cancelRide', <String, dynamic>{
+        'rideId': rideId,
+        'cancel_reason': cancelReason,
+      });
+
+  /// @deprecated Prefer [cancelRide]
   Future<Map<String, dynamic>> cancelRideRequest({
     required String rideId,
     required String cancelReason,
   }) =>
-      _call('cancelRideRequest', <String, dynamic>{
-        'rideId': rideId,
-        'cancel_reason': cancelReason,
-      });
+      cancelRide(rideId: rideId, cancelReason: cancelReason);
 
   Future<Map<String, dynamic>> patchRideRequestMetadata({
     required String rideId,
@@ -63,6 +74,32 @@ class RideCloudFunctionsService {
       _call('patchRideRequestMetadata', <String, dynamic>{
         'rideId': rideId,
         'patch': patch,
+      });
+
+  Future<Map<String, dynamic>> initiateFlutterwavePayment({
+    required String rideId,
+    required double amount,
+    String currency = 'NGN',
+    String? redirectUrl,
+    String? customerName,
+    String? email,
+  }) =>
+      _call('initiateFlutterwavePayment', <String, dynamic>{
+        'rideId': rideId,
+        'amount': amount,
+        'currency': currency,
+        if (redirectUrl != null) 'redirect_url': redirectUrl,
+        if (customerName != null) 'customer_name': customerName,
+        if (email != null) 'email': email,
+      });
+
+  Future<Map<String, dynamic>> verifyFlutterwavePayment({
+    required String rideId,
+    required String reference,
+  }) =>
+      _call('verifyFlutterwavePayment', <String, dynamic>{
+        'rideId': rideId,
+        'reference': reference,
       });
 }
 
