@@ -9,12 +9,15 @@ bool isRideRequestFreshForDispatch({
   required int expiresAtMs,
   required int nowMs,
   int maxAgeMs = 90000,
+  /// Aligns with driver offer-queue handling: treat as stale only after this
+  /// past [expiresAtMs] (clock skew / write latency).
+  int dispatchExpiryGraceMs = 10000,
 }) {
   if (createdAtMs <= 0 && requestedAtMs <= 0) {
     return false;
   }
 
-  if (expiresAtMs > 0 && expiresAtMs <= nowMs) {
+  if (expiresAtMs > 0 && nowMs > expiresAtMs + dispatchExpiryGraceMs) {
     return false;
   }
 

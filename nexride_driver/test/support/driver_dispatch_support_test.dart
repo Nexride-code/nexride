@@ -18,6 +18,32 @@ void main() {
     );
   });
 
+  test('dispatch expiry grace keeps ride fresh shortly after expiresAt', () {
+    final now = DateTime(2026, 4, 14, 9).millisecondsSinceEpoch;
+    final createdAt = now - const Duration(minutes: 2).inMilliseconds;
+    final expiresAt = now - 5000;
+
+    expect(
+      isRideRequestFreshForDispatch(
+        createdAtMs: createdAt,
+        requestedAtMs: 0,
+        expiresAtMs: expiresAt,
+        nowMs: now,
+      ),
+      isTrue,
+    );
+
+    expect(
+      isRideRequestFreshForDispatch(
+        createdAtMs: createdAt,
+        requestedAtMs: 0,
+        expiresAtMs: now - 25000,
+        nowMs: now,
+      ),
+      isFalse,
+    );
+  });
+
   test('legacy ride without expiry is dispatchable within max age', () {
     final now = DateTime(2026, 4, 14, 9).millisecondsSinceEpoch;
     final createdAt = now - const Duration(seconds: 20).inMilliseconds;

@@ -1260,7 +1260,6 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       );
       final createRes = await _rideCloud
           .createRideRequest(<String, dynamic>{
-            'ride_id': requestId,
             'market': dispatchSlug,
             'pickup': payload['pickup'],
             'dropoff': payload['dropoff'],
@@ -1268,8 +1267,8 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             'currency': 'NGN',
             'distance_km': payload['distance_km'],
             'eta_min': payload[RtdbRideRequestFields.etaMin],
+            'eta_minutes': payload[RtdbRideRequestFields.etaMin],
             'payment_method': payload['payment_method'],
-            'payment_status': payload[RtdbRideRequestFields.paymentStatus],
             'expires_at': payload[RtdbRideRequestFields.expiresAt],
             'service_type': RiderServiceType.dispatchDelivery.key,
             'ride_metadata': rideMetadataSubset(payload),
@@ -1278,7 +1277,25 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       if (!riderRideCallableSucceeded(createRes)) {
         throw StateError(riderRideCallableReason(createRes));
       }
-      final liveSnap = await _rideRequestsRef.child(requestId.trim()).get();
+      // Match server [createRideRequest]: ride row is created under push() on the
+      // backend, not necessarily the client prefetch key.
+      final effectiveRequestId = () {
+        final fromServer = (createRes['rideId'] ?? createRes['ride_id'] ?? '')
+            .toString()
+            .trim();
+        if (fromServer.isNotEmpty) {
+          return fromServer;
+        }
+        return requestId.trim();
+      }();
+      if (effectiveRequestId != requestId.trim()) {
+        debugPrint(
+          '[Dispatch] server ride id=$effectiveRequestId '
+          '(client prefetch was $requestId)',
+        );
+      }
+      final liveSnap =
+          await _rideRequestsRef.child(effectiveRequestId).get();
       if (!liveSnap.exists) {
         throw StateError('dispatch_missing_after_create');
       }
@@ -1286,62 +1303,13 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       if (livePayload == null) {
         throw StateError('dispatch_invalid_after_create');
       }
-      try {
-        final payloadDriverId = payload['driver_id']?.toString().trim() ?? '';
-        final payloadMarket = payload['market']?.toString().trim() ?? '';
-        final payloadStatus = payload['status']?.toString().trim() ?? '';
-        final payloadTripState = payload['trip_state']?.toString().trim() ?? '';
-        final payloadPaymentMethod =
-            payload['payment_method']?.toString().trim() ?? '';
-        final payloadPaymentStatus =
-            payload['payment_status']?.toString().trim() ?? '';
-        final payloadSettlementStatus =
-            payload['settlement_status']?.toString().trim() ?? '';
-        final payloadSupportStatus =
-            payload['support_status']?.toString().trim() ?? '';
-        final payloadCancelReason =
-            payload['cancel_reason']?.toString().trim() ?? '';
-        await requestRef.root.update(<String, dynamic>{
-          'admin_rides/$requestId/summary/ride_id': requestId,
-          'admin_rides/$requestId/summary/rider_id': user.uid,
-          'admin_rides/$requestId/summary/driver_id': payloadDriverId,
-          'admin_rides/$requestId/summary/market': payloadMarket,
-          'admin_rides/$requestId/summary/status': payloadStatus,
-          'admin_rides/$requestId/summary/trip_state': payloadTripState,
-          'admin_rides/$requestId/summary/payment_method': payloadPaymentMethod,
-          'admin_rides/$requestId/summary/payment_status': payloadPaymentStatus,
-          'admin_rides/$requestId/summary/settlement_status': payloadSettlementStatus,
-          'admin_rides/$requestId/summary/support_status': payloadSupportStatus,
-          'admin_rides/$requestId/summary/created_at': payload['created_at'],
-          'admin_rides/$requestId/summary/accepted_at': payload['accepted_at'],
-          'admin_rides/$requestId/summary/cancelled_at': payload['cancelled_at'],
-          'admin_rides/$requestId/summary/completed_at': payload['completed_at'],
-          'admin_rides/$requestId/summary/cancel_reason': payloadCancelReason,
-          'admin_rides/$requestId/summary/updated_at': rtdb.ServerValue.timestamp,
-          'support_queue/$requestId/ride_id': requestId,
-          'support_queue/$requestId/rider_id': user.uid,
-          'support_queue/$requestId/driver_id': payloadDriverId,
-          'support_queue/$requestId/status': payloadStatus,
-          'support_queue/$requestId/trip_state': payloadTripState,
-          'support_queue/$requestId/payment_status': payloadPaymentStatus,
-          'support_queue/$requestId/settlement_status': payloadSettlementStatus,
-          'support_queue/$requestId/support_status': payloadSupportStatus,
-          'support_queue/$requestId/created_at': payload['created_at'],
-          'support_queue/$requestId/accepted_at': payload['accepted_at'],
-          'support_queue/$requestId/cancelled_at': payload['cancelled_at'],
-          'support_queue/$requestId/completed_at': payload['completed_at'],
-          'support_queue/$requestId/cancel_reason': payloadCancelReason,
-          'support_queue/$requestId/last_event': 'rider_create_dispatch',
-          'support_queue/$requestId/updated_at': rtdb.ServerValue.timestamp,
-        });
-      } catch (error) {
-        debugPrint(
-          '[OPS_MIRROR] dispatch_create sync_failed rideId=$requestId error=$error',
-        );
-      }
-      debugPrint('[Dispatch] request created requestId=$requestId');
+      debugPrint(
+        '[OPS_MIRROR] dispatch_create skipped rideId=$effectiveRequestId '
+        '(rider does not write admin_rides/support_queue)',
+      );
+      debugPrint('[Dispatch] request created requestId=$effectiveRequestId');
       await _tripSafetyService.registerRideRequest(
-        rideId: requestId,
+        rideId: effectiveRequestId,
         riderId: user.uid,
         serviceType: RiderServiceType.dispatchDelivery.key,
         ridePayload: livePayload,
@@ -1351,14 +1319,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         ],
       );
 
-      await _watchRequest(requestId);
+      await _watchRequest(effectiveRequestId);
 
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _activeRequestId = requestId;
+        _activeRequestId = effectiveRequestId;
         _activeRequest = livePayload;
       });
 

@@ -1,6 +1,8 @@
 import 'package:firebase_database/firebase_database.dart' as rtdb;
+import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
+import '../support/startup_rtdb_support.dart';
 import 'rider_ride_cloud_functions_service.dart';
 import 'rider_trust_rules_service.dart';
 import 'support_ticket_bridge_service.dart';
@@ -63,28 +65,40 @@ class TripSafetyTelemetryService {
       );
     } catch (_) {}
 
-    await _rootRef.update(<String, dynamic>{
-      'trip_route_logs/$rideId': <String, dynamic>{
-        'rideId': rideId,
-        'riderId': riderId,
-        'driverId': ridePayload['driver_id'] ?? '',
-        'serviceType': serviceType,
-        'status': ridePayload['status'] ?? 'searching',
-        'trip_state': ridePayload['trip_state'],
-        'routeBasis': <String, dynamic>{
-          'market': ridePayload['market'] ?? ridePayload['city'],
-          'pickupAddress': ridePayload['pickup_address'],
-          'destinationAddress': ridePayload['destination_address'],
-          'stopCount': ridePayload['stop_count'] ?? 1,
-          'distanceKm': ridePayload['distance_km'],
-          'fareEstimate': ridePayload['fare'],
-          'fareBreakdown': ridePayload['fare_breakdown'] ?? <String, dynamic>{},
-          'expectedRoutePoints': routePoints,
+    try {
+      await _rootRef.update(<String, dynamic>{
+        'trip_route_logs/$rideId': <String, dynamic>{
+          'rideId': rideId,
+          'riderId': riderId,
+          'driverId': ridePayload['driver_id'] ?? '',
+          'serviceType': serviceType,
+          'status': ridePayload['status'] ?? 'searching',
+          'trip_state': ridePayload['trip_state'],
+          'routeBasis': <String, dynamic>{
+            'market': ridePayload['market'] ?? ridePayload['city'],
+            'pickupAddress': ridePayload['pickup_address'],
+            'destinationAddress': ridePayload['destination_address'],
+            'stopCount': ridePayload['stop_count'] ?? 1,
+            'distanceKm': ridePayload['distance_km'],
+            'fareEstimate': ridePayload['fare'],
+            'fareBreakdown':
+                ridePayload['fare_breakdown'] ?? <String, dynamic>{},
+            'expectedRoutePoints': routePoints,
+          },
+          'createdAt': rtdb.ServerValue.timestamp,
+          'updatedAt': rtdb.ServerValue.timestamp,
         },
-        'createdAt': rtdb.ServerValue.timestamp,
-        'updatedAt': rtdb.ServerValue.timestamp,
-      },
-    });
+      });
+    } catch (e) {
+      if (isPermissionDeniedError(e)) {
+        debugPrint(
+          'RIDER_TELEMETRY_SKIPPED_PERMISSION_DENIED '
+          'phase=registerRideRequest_root rideId=$rideId',
+        );
+      } else {
+        rethrow;
+      }
+    }
 
     await logRideStateChange(
       rideId: rideId,
@@ -108,30 +122,41 @@ class TripSafetyTelemetryService {
   }) async {
     final eventRef = _rootRef.child('trip_route_logs/$rideId/events').push();
     final now = DateTime.now().millisecondsSinceEpoch;
-    await _rootRef.update(<String, dynamic>{
-      'trip_route_logs/$rideId/rideId': rideId,
-      'trip_route_logs/$rideId/riderId': riderId,
-      'trip_route_logs/$rideId/driverId': driverId,
-      'trip_route_logs/$rideId/serviceType': serviceType,
-      'trip_route_logs/$rideId/status': status,
-      'trip_route_logs/$rideId/trip_state': rideData?['trip_state'],
-      'trip_route_logs/$rideId/updatedAt': rtdb.ServerValue.timestamp,
-      'trip_route_logs/$rideId/events/${eventRef.key}': <String, dynamic>{
-        'eventId': eventRef.key,
-        'rideId': rideId,
-        'riderId': riderId,
-        'driverId': driverId,
-        'serviceType': serviceType,
-        'status': status,
-        'trip_state': rideData?['trip_state'],
-        'source': source,
-        'pickupAddress': rideData?['pickup_address'],
-        'destinationAddress':
-            rideData?['destination_address'] ??
-            rideData?['final_destination_address'],
-        'createdAt': rtdb.ServerValue.timestamp,
-      },
-    });
+    try {
+      await _rootRef.update(<String, dynamic>{
+        'trip_route_logs/$rideId/rideId': rideId,
+        'trip_route_logs/$rideId/riderId': riderId,
+        'trip_route_logs/$rideId/driverId': driverId,
+        'trip_route_logs/$rideId/serviceType': serviceType,
+        'trip_route_logs/$rideId/status': status,
+        'trip_route_logs/$rideId/trip_state': rideData?['trip_state'],
+        'trip_route_logs/$rideId/updatedAt': rtdb.ServerValue.timestamp,
+        'trip_route_logs/$rideId/events/${eventRef.key}': <String, dynamic>{
+          'eventId': eventRef.key,
+          'rideId': rideId,
+          'riderId': riderId,
+          'driverId': driverId,
+          'serviceType': serviceType,
+          'status': status,
+          'trip_state': rideData?['trip_state'],
+          'source': source,
+          'pickupAddress': rideData?['pickup_address'],
+          'destinationAddress':
+              rideData?['destination_address'] ??
+              rideData?['final_destination_address'],
+          'createdAt': rtdb.ServerValue.timestamp,
+        },
+      });
+    } catch (e) {
+      if (isPermissionDeniedError(e)) {
+        debugPrint(
+          'RIDER_TELEMETRY_SKIPPED_PERMISSION_DENIED '
+          'phase=logRideStateChange rideId=$rideId',
+        );
+        return;
+      }
+      rethrow;
+    }
     try {
       await RiderRideCloudFunctionsService.instance.patchRideRequestMetadata(
         rideId: rideId,
@@ -158,29 +183,40 @@ class TripSafetyTelemetryService {
     final checkpointRef = _rootRef
         .child('trip_route_logs/$rideId/checkpoints')
         .push();
-    await _rootRef.update(<String, dynamic>{
-      'trip_route_logs/$rideId/checkpoints/${checkpointRef.key}':
-          <String, dynamic>{
-            'checkpointId': checkpointRef.key,
-            'rideId': rideId,
-            'riderId': riderId,
-            'driverId': driverId,
-            'serviceType': serviceType,
-            'status': status,
-            'source': source,
-            'lat': position.latitude,
-            'lng': position.longitude,
-            'createdAt': rtdb.ServerValue.timestamp,
-          },
-      'trip_route_logs/$rideId/lastCheckpoint': <String, dynamic>{
-        'lat': position.latitude,
-        'lng': position.longitude,
-        'status': status,
-        'source': source,
-        'updatedAt': rtdb.ServerValue.timestamp,
-      },
-      'trip_route_logs/$rideId/updatedAt': rtdb.ServerValue.timestamp,
-    });
+    try {
+      await _rootRef.update(<String, dynamic>{
+        'trip_route_logs/$rideId/checkpoints/${checkpointRef.key}':
+            <String, dynamic>{
+              'checkpointId': checkpointRef.key,
+              'rideId': rideId,
+              'riderId': riderId,
+              'driverId': driverId,
+              'serviceType': serviceType,
+              'status': status,
+              'source': source,
+              'lat': position.latitude,
+              'lng': position.longitude,
+              'createdAt': rtdb.ServerValue.timestamp,
+            },
+        'trip_route_logs/$rideId/lastCheckpoint': <String, dynamic>{
+          'lat': position.latitude,
+          'lng': position.longitude,
+          'status': status,
+          'source': source,
+          'updatedAt': rtdb.ServerValue.timestamp,
+        },
+        'trip_route_logs/$rideId/updatedAt': rtdb.ServerValue.timestamp,
+      });
+    } catch (e) {
+      if (isPermissionDeniedError(e)) {
+        debugPrint(
+          'RIDER_TELEMETRY_SKIPPED_PERMISSION_DENIED '
+          'phase=logCheckpoint rideId=$rideId',
+        );
+        return;
+      }
+      rethrow;
+    }
   }
 
   Future<void> createSafetyFlag({

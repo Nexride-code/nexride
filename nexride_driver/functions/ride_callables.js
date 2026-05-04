@@ -8,7 +8,13 @@ const { platformFeeNgn } = require("./params");
 const { syncRideTrackPublic } = require("./track_public");
 const { isNexRideAdmin } = require("./admin_auth");
 const { createWalletTransactionInternal } = require("./wallet_core");
-const { evaluateDriverForOffer, loadDispatchGates } = require("./driver_dispatch_gates");
+const { ServerValue } = require("firebase-admin/database");
+const {
+  evaluateDriverForOffer,
+  evaluateDriverForOfferSoft,
+  loadDispatchGates,
+  summarizeDriverForFanout,
+} = require("./driver_dispatch_gates");
 const { ensureRideChatThread } = require("./ride_chat_admin");
 
 const TRIP_STATE = {
@@ -166,12 +172,52 @@ function coordsInNgBox(lat, lng) {
   return lat >= MIN_LAT_NG && lat <= MAX_LAT_NG && lng >= MIN_LNG_NG && lng <= MAX_LNG_NG;
 }
 
-async function riderProfileRequirementOk(db, riderId, gates) {
+/**
+ * When require_users_node is explicitly enabled, ensure users/{uid} exists.
+ * Riders often have Firebase Auth but no RTDB profile yet; provisioning avoids
+ * false "please sign in again" UX while keeping an explicit audit trail row.
+ *
+ * @param {import("firebase-admin").database.Database} db
+ * @param {string} riderId
+ * @param {{ require_riders_users_node: boolean }} gates
+ * @param {{ token?: Record<string, unknown> }} [authLike]
+ */
+async function riderProfileRequirementOk(db, riderId, gates, authLike) {
   if (!gates.require_riders_users_node) {
     return true;
   }
-  const snap = await db.ref(`users/${normUid(riderId)}`).get();
-  return snap.exists();
+  const uid = normUid(riderId);
+  const ref = db.ref(`users/${uid}`);
+  const snap = await ref.get();
+  if (snap.exists()) {
+    return true;
+  }
+  const token = authLike?.token;
+  if (!token || typeof token !== "object") {
+    return false;
+  }
+  try {
+    const email = String(token.email ?? "").trim();
+    const name = String(token.name ?? "").trim();
+    const displayName =
+      name || (email ? email.split("@")[0] : "") || "Rider";
+    await ref.set({
+      uid,
+      role: "rider",
+      ...(email ? { email } : {}),
+      displayName,
+      created_at: Date.now(),
+      provisioned_via: "createRideRequest",
+    });
+    return true;
+  } catch (e) {
+    console.warn(
+      "RIDER_USER_PROVISION_FAIL",
+      uid,
+      e && typeof e === "object" && "message" in e ? e.message : e,
+    );
+    return false;
+  }
 }
 
 async function clearFanoutAndOffers(db, rideId) {
@@ -187,6 +233,7 @@ async function clearFanoutAndOffers(db, rideId) {
     const d = normUid(driverId);
     if (!d) continue;
     updates[`driver_offer_queue/${d}/${rid}`] = null;
+    updates[`driver_offer_queue_debug/${d}/${rid}`] = null;
     updates[`ride_offer_fanout/${rid}/${d}`] = null;
   }
   if (Object.keys(updates).length) {
@@ -200,91 +247,288 @@ async function loadRiderCreateGates(db) {
     const v = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
     const maxFare = Number(v.max_fare_ngn ?? MAX_FARE_NGN_DEFAULT);
     return {
-      require_riders_users_node: v.require_users_node !== false,
+      /** Opt-in: only block when app_config sets require_users_node === true */
+      require_riders_users_node: v.require_users_node === true,
       max_fare_ngn: Number.isFinite(maxFare) && maxFare > 0 ? maxFare : MAX_FARE_NGN_DEFAULT,
       require_ng_pickup: v.require_pickup_in_nigeria_bbox !== false,
     };
   } catch (_) {
     return {
-      require_riders_users_node: true,
+      require_riders_users_node: false,
       max_fare_ngn: MAX_FARE_NGN_DEFAULT,
       require_ng_pickup: true,
     };
   }
 }
 
+/** True when client session flags say the driver is on-session (Flutter / RTDB). */
+function driverSessionPresenceOnline(profile) {
+  const p = profile && typeof profile === "object" ? profile : {};
+  return (
+    p.isOnline === true || p.is_online === true || p.online === true
+  );
+}
+
+/**
+ * Dispatch availability — aligned with driver GO ONLINE, but session presence
+ * (is_online / online) wins over a stale legacy `status: offline` string.
+ */
+function driverAvailabilityGate(profile) {
+  const p = profile && typeof profile === "object" ? profile : {};
+  const dispatchState = String(p.dispatch_state ?? "").trim().toLowerCase();
+  if (dispatchState && dispatchState !== "available") {
+    return { ok: false, reason: `dispatch_state_not_available:${dispatchState}` };
+  }
+  if (driverSessionPresenceOnline(p)) {
+    return { ok: true };
+  }
+  const status = String(p.status ?? "").trim().toLowerCase();
+  if (status && status !== "available") {
+    return { ok: false, reason: `status_not_available:${status}` };
+  }
+  return { ok: true };
+}
+
+function addressFromPlace(o) {
+  if (!o || typeof o !== "object") return "";
+  return String(o.address ?? o.formatted_address ?? o.description ?? "").trim();
+}
+
+function buildFanoutOfferPayload({
+  rid,
+  riderId,
+  driverUid,
+  market,
+  ridePayload,
+  pickup,
+  dropoff,
+  now,
+  expiresAt,
+}) {
+  const fare = Number(ridePayload.fare ?? 0) || 0;
+  const distanceKm = Number(ridePayload.distance_km ?? ridePayload.distanceKm ?? 0) || 0;
+  const etaMin = Number(ridePayload.eta_min ?? ridePayload.etaMin ?? 0) || 0;
+  const pickupAddr =
+    addressFromPlace(pickup) ||
+    String(ridePayload.pickup_address ?? "").trim() ||
+    "";
+  const dropAddr =
+    addressFromPlace(dropoff) ||
+    String(
+      ridePayload.dropoff_address ??
+        ridePayload.destination_address ??
+        ridePayload.final_destination_address ??
+        "",
+    ).trim() ||
+    "";
+  return {
+    ride_id: rid,
+    rider_id: riderId || null,
+    driver_id: driverUid,
+    status: "open",
+    market,
+    market_pool: market,
+    created_at: now,
+    expires_at: expiresAt,
+    pickup_address: pickupAddr || null,
+    dropoff_address: dropAddr || null,
+    fare,
+    distance_km: distanceKm,
+    eta_minutes: etaMin,
+    currency: String(ridePayload.currency ?? "NGN").trim().toUpperCase() || "NGN",
+    service_type: String(ridePayload.service_type ?? "ride").trim(),
+    payment_method: String(ridePayload.payment_method ?? "").trim().toLowerCase(),
+    payment_status: String(ridePayload.payment_status ?? "").trim().toLowerCase(),
+    pickup,
+    dropoff,
+    trip_state: TRIP_STATE.searching,
+    request_status: "searching",
+  };
+}
+
+async function writeDriverOfferPaths(db, rid, riderId, d, market, ridePayload, pickup, dropoff, now, expiresAt) {
+  const payload = buildFanoutOfferPayload({
+    rid,
+    riderId,
+    driverUid: d,
+    market,
+    ridePayload,
+    pickup,
+    dropoff,
+    now,
+    expiresAt,
+  });
+  const qPath = `driver_offer_queue/${d}/${rid}`;
+  console.log("OFFER_WRITE_START", `path=${qPath}`);
+  try {
+    await db.ref().update({
+      [`ride_offer_fanout/${rid}/${d}`]: true,
+      [`driver_offer_queue/${d}/${rid}`]: payload,
+      [`driver_offer_queue_debug/${d}/${rid}`]: payload,
+    });
+    console.log("OFFER_WRITE_SUCCESS", `path=${qPath}`);
+    return true;
+  } catch (e) {
+    const msg = e && typeof e === "object" && "message" in e ? String(e.message) : String(e);
+    console.log("OFFER_WRITE_FAIL", `path=${qPath}`, `error=${msg}`);
+    return false;
+  }
+}
+
 async function fanOutDriverOffersIfEligible(db, rideId, ridePayload) {
   const rid = normUid(rideId);
+  const riderId = normUid(ridePayload.rider_id ?? ridePayload.riderId);
   const market = canonicalDispatchMarket(
     ridePayload.market_pool ?? ridePayload.market ?? "",
   );
   if (!rid || !market) {
+    console.log(
+      "MATCH_FANOUT_ABORT",
+      `rideId=${rid || "(empty)"}`,
+      `market=${market || "(empty)"}`,
+      "reason=bad_ride_or_market",
+    );
     return;
   }
   if (!paymentAllowsDispatch(ridePayload)) {
+    console.log(
+      "MATCH_FANOUT_ABORT",
+      `rideId=${rid}`,
+      `market=${market}`,
+      "reason=payment_not_allowed_for_dispatch",
+    );
     return;
   }
-  console.log("MATCH_FANOUT_START", rid, market);
+  console.log("MATCH_FANOUT_START", `rideId=${rid}`, `market=${market}`);
+
   const gates = await loadDispatchGates(db);
-  const driversSnap = await db.ref("drivers").orderByChild("dispatch_market").equalTo(market).once("value");
-  const raw = driversSnap.val() || {};
-  const now = nowMs();
-  const updates = {};
+  const useSoft = Boolean(gates.soft_verification);
+
   const pickup = ridePayload.pickup && typeof ridePayload.pickup === "object" ? ridePayload.pickup : {};
   const dropoff =
     ridePayload.dropoff && typeof ridePayload.dropoff === "object" ? ridePayload.dropoff : null;
-  for (const [driverId, profile] of Object.entries(raw)) {
-    if (!profile || typeof profile !== "object") {
-      continue;
-    }
-    const online =
-      profile.isOnline === true ||
-      profile.is_online === true ||
-      profile.online === true;
-    if (!online) {
-      continue;
-    }
+  const now = nowMs();
+  const expiresAt = now + 180000;
+
+  const writtenUids = new Set();
+  let offersWritten = 0;
+
+  async function tryOfferDriver(driverId, profile) {
     const d = normUid(driverId);
-    if (!d) {
-      continue;
+    if (!d || !profile || typeof profile !== "object") {
+      return;
+    }
+    if (writtenUids.has(d)) {
+      return;
+    }
+    const snap = summarizeDriverForFanout(d, profile);
+    console.log(
+      "MATCH_DRIVER_CANDIDATE",
+      `uid=${snap.uid}`,
+      `dispatch_market=${snap.dispatch_market}`,
+      `online=${snap.online}`,
+      `status=${snap.status}`,
+      `dispatch_state=${snap.dispatch_state}`,
+    );
+
+    if (snap.suspended) {
+      console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, "reason=suspended");
+      return;
     }
 
-    const eligibility = evaluateDriverForOffer(profile, gates, ridePayload);
-    if (!eligibility.ok) {
-      console.log(
-        "MATCH_DRIVER_FILTERED",
-        d,
-        eligibility.log,
-        eligibility.detail,
-        "ride_id=",
-        rid,
-      );
-      continue;
+    if (useSoft) {
+      const softEl = evaluateDriverForOfferSoft(profile, ridePayload);
+      if (!softEl.ok) {
+        const reason = `${softEl.log || "filtered"}:${softEl.detail || "unknown"}`;
+        console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, `reason=${reason}`);
+        return;
+      }
+    } else {
+      if (!snap.online) {
+        console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, "reason=not_online");
+        return;
+      }
+      const avail = driverAvailabilityGate(profile);
+      if (!avail.ok) {
+        console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, `reason=${avail.reason}`);
+        return;
+      }
+      const eligibility = evaluateDriverForOffer(profile, gates, ridePayload);
+      if (!eligibility.ok) {
+        const reason = `${eligibility.log || "filtered"}:${eligibility.detail || "unknown"}`;
+        console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, `reason=${reason}`);
+        return;
+      }
     }
-    console.log("MATCH_DRIVER_ELIGIBLE", d, rid);
 
-    updates[`ride_offer_fanout/${rid}/${d}`] = true;
-    updates[`driver_offer_queue/${d}/${rid}`] = {
-      ride_id: rid,
-      status: "open",
+    console.log("MATCH_DRIVER_ELIGIBLE", `uid=${d}`);
+    const ok = await writeDriverOfferPaths(
+      db,
+      rid,
+      riderId,
+      d,
       market,
-      market_pool: market,
-      fare: Number(ridePayload.fare ?? 0) || 0,
-      currency: String(ridePayload.currency ?? "NGN").trim().toUpperCase() || "NGN",
-      service_type: String(ridePayload.service_type ?? "ride").trim(),
-      payment_method: String(ridePayload.payment_method ?? "").trim().toLowerCase(),
-      payment_status: String(ridePayload.payment_status ?? "").trim().toLowerCase(),
+      ridePayload,
       pickup,
       dropoff,
-      expires_at: Number(ridePayload.expires_at ?? 0) || 0,
-      created_at: now,
-      trip_state: TRIP_STATE.searching,
-      request_status: "searching",
-    };
-    console.log("OFFER_WRITTEN", rid, d);
+      now,
+      expiresAt,
+    );
+    if (ok) {
+      writtenUids.add(d);
+      offersWritten += 1;
+    }
   }
-  if (Object.keys(updates).length) {
-    await db.ref().update(updates);
+
+  const driversSnap = await db
+    .ref("drivers")
+    .orderByChild("dispatch_market")
+    .equalTo(market)
+    .once("value");
+  const raw = driversSnap.val() || {};
+  const scanCount = Object.keys(raw).length;
+  console.log("MATCH_DRIVER_SCAN_COUNT", `count=${scanCount}`);
+  if (scanCount === 0) {
+    console.log(
+      "MATCH_FANOUT_HINT",
+      "no_drivers_in_query",
+      `dispatch_market_index_empty_for_market=${market}`,
+      "ensure_drivers/{uid}/dispatch_market matches ride market (canonical slug)",
+    );
+  }
+
+  for (const [driverId, profile] of Object.entries(raw)) {
+    await tryOfferDriver(driverId, profile);
+  }
+
+  if (useSoft && offersWritten === 0) {
+    const allSnap = await db.ref("drivers").once("value");
+    const allDrivers = allSnap.val() && typeof allSnap.val() === "object" ? allSnap.val() : {};
+    const nAll = Object.keys(allDrivers).length;
+    console.log("MATCH_FANOUT_HINT", `full_driver_tree_scan rideId=${rid} keys=${nAll}`);
+    for (const [driverId, profile] of Object.entries(allDrivers)) {
+      await tryOfferDriver(driverId, profile);
+    }
+  }
+
+  if (offersWritten === 0) {
+    await db.ref(`ride_requests/${rid}/match_debug`).set({
+      offers_written: 0,
+      reason: "no_eligible_drivers",
+      checked_at: ServerValue.TIMESTAMP,
+    });
+  }
+
+  console.log("MATCH_FANOUT_DONE", `rideId=${rid}`, `offersWritten=${offersWritten}`);
+
+  if (offersWritten === 0 && !useSoft) {
+    console.log(
+      "MATCH_FANOUT_HINT",
+      "verification_may_block_test_drivers",
+      "set_RTDB_app_config/nexride_dispatch",
+      "soft_verification=true",
+      "require_bvn_verification=false",
+    );
   }
 }
 
@@ -500,7 +744,7 @@ async function createRideRequest(data, context, db) {
     return { success: false, reason: "rider_mismatch" };
   }
 
-  if (!(await riderProfileRequirementOk(db, riderId, riderGates))) {
+  if (!(await riderProfileRequirementOk(db, riderId, riderGates, context.auth))) {
     console.log("RIDER_CREATE_FAIL", riderId, "no_user_profile");
     return { success: false, reason: "rider_profile_required" };
   }
@@ -583,9 +827,7 @@ async function createRideRequest(data, context, db) {
     console.log("RIDER_CREATE_FAIL", riderId, "invalid_eta");
     return { success: false, reason: "invalid_eta" };
   }
-  const expiresAt =
-    Number(data?.expires_at ?? data?.expiresAt ?? 0) ||
-    nowMs() + 15 * 60 * 1000;
+  const expiresAt = nowMs() + 180000;
 
   const rideRef = db.ref("ride_requests").push();
   const rideId = normUid(rideRef.key);
@@ -689,6 +931,7 @@ async function createRideRequest(data, context, db) {
     phase: "searching",
     updated_at: ts,
   });
+  console.log("RIDER_CREATE_SUCCESS", rideId, market);
   await fanOutDriverOffersIfEligible(db, rideId, payload);
   await writeAudit(db, {
     type: "ride_create",
@@ -699,7 +942,6 @@ async function createRideRequest(data, context, db) {
 
   await syncRideTrackPublic(db, rideId);
 
-  console.log("RIDER_CREATE_SUCCESS", rideId, riderId);
   return { success: true, rideId, trackToken, reason: "created" };
 }
 

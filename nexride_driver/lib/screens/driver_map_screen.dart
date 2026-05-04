@@ -310,6 +310,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   GoogleMapController? _mapController;
   StreamSubscription<Position>? _positionStream;
   StreamSubscription<rtdb.DatabaseEvent>? _rideRequestSubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _driverOfferQueueChildRemovedSubscription;
+
+  /// Incremental mirror of RTDB `driver_offer_queue/{uid}/*` for ChildAdded/Removed processing.
+  final Map<String, dynamic> _driverOfferQueueReplica = <String, dynamic>{};
 
   /// City key for the active discovery listener (debug / legacy logging).
   String? _rideRequestsListenerBoundCity;
@@ -319,6 +323,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   final Map<String, Map<String, dynamic>> _driverOfferRideCache =
       <String, Map<String, dynamic>>{};
   final Set<String> _loggedDriverOfferReceivedRideIds = <String>{};
+  /// One-shot RTDB read of `driver_offer_queue/{uid}` after go-online (debug).
+  bool _driverOfferQueuePostOnlineProbeDone = false;
   int _rideRequestListenerToken = 0;
 
   /// Serializes discovery attach/cancel so two callers cannot overlap native query setup.
@@ -922,6 +928,40 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _log(
         'startup session released pending assignment in offline-safe mode driverId=$driverId rideId=$recoveredPendingRideId',
       );
+    }
+
+    final remoteSessionStartedAt =
+        _parseCreatedAt(driverRecord['online_session_started_at']);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final sessionAgeMs = remoteSessionStartedAt > 0
+        ? nowMs - remoteSessionStartedAt
+        : 1 << 62;
+    const maxRehydrateSessionMs = 7 * 24 * 60 * 60 * 1000;
+    final canRehydrateOnlineSession = remoteOnline &&
+        lastIntentOnline &&
+        remoteSessionStartedAt > 0 &&
+        sessionAgeMs < maxRehydrateSessionMs;
+    if (canRehydrateOnlineSession) {
+      _onlineSessionStartedAt = remoteSessionStartedAt;
+      _lastAvailabilityIntentOnline = lastIntentOnline;
+      _isOnline = true;
+      _rideStatus = 'idle';
+      if (mounted) {
+        setState(() {
+          _isOnline = true;
+          _lastAvailabilityIntentOnline = lastIntentOnline;
+          _rideStatus = 'idle';
+        });
+      }
+      _updateDriverMarker();
+      _startLiveLocationStream();
+      _log(
+        'startup session rehydrated online driverId=$driverId '
+        'online_session_started_at=$_onlineSessionStartedAt '
+        '(skipped RTDB offline wipe — server still shows available session)',
+      );
+      unawaited(_listenForRideRequests(reason: 'startup_rehydrate_online'));
+      return;
     }
 
     await _clearDriverActiveRideNode(
@@ -1680,7 +1720,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _lastApiCallStatus = status;
     if (errorMessage != null) {
       _lastActionError = errorMessage;
-    } else if (status == 'success') {
+    } else if (status == 'success' || status == 'listening') {
       _lastActionError = '';
     }
     if (mounted) {
@@ -2209,6 +2249,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _positionStream?.cancel();
     _rideRequestListenerToken += 1;
     _rideRequestSubscription?.cancel();
+    _driverOfferQueueChildRemovedSubscription?.cancel();
     _rideDiscoveryReattachTimer?.cancel();
     _rideDiscoveryPollingTimer?.cancel();
     _rideRequestsListenerBoundCity = null;
@@ -5744,6 +5785,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   int _rideExpiryTimestamp(Map<String, dynamic> rideData) =>
       _rideExpiryInfo(rideData).value;
 
+  /// Server [expires_at] plus grace so a just-written queue offer is not dropped.
+  bool _rideExpiredWithOfferGrace(Map<String, dynamic> rideData) {
+    const graceMs = 10000;
+    final expiresAt = _rideExpiryTimestamp(rideData);
+    if (expiresAt <= 0) {
+      return false;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return now > expiresAt + graceMs;
+  }
+
   int _assignmentExpiryTimestamp(Map<String, dynamic>? rideData) {
     if (rideData == null) {
       return 0;
@@ -6548,27 +6600,31 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _logPopupServerSkip(rideId, rideData, 'missing_market');
       return 'missing_market';
     }
-    if (driverMarket == null ||
-        driverMarket.isEmpty ||
-        rideMarket != driverMarket) {
-      _logPopupFix('skip reason=market_mismatch rideId=$rideId');
-      _logPopupServerSkip(rideId, rideData, 'market_mismatch');
-      return 'market_mismatch';
+    final fromOfferQueue = rideData['__nexride_from_offer_queue'] == true;
+    if (!fromOfferQueue) {
+      if (driverMarket == null ||
+          driverMarket.isEmpty ||
+          rideMarket != driverMarket) {
+        _logPopupFix('skip reason=market_mismatch rideId=$rideId');
+        _logPopupServerSkip(rideId, rideData, 'market_mismatch');
+        return 'market_mismatch';
+      }
     }
 
     final expiry = _rideExpiryInfo(rideData);
     final expiresAt = expiry.value;
     final nowTimestamp = DateTime.now().millisecondsSinceEpoch;
-    if (expiresAt > 0 && nowTimestamp >= expiresAt) {
+    if (_rideExpiredWithOfferGrace(rideData)) {
       _logPopupFix(
         'skip reason=expired rideId=$rideId now_ms=$nowTimestamp expires_at=$expiresAt '
-        'delta_ms=${nowTimestamp - expiresAt} expiry_field=${expiry.field}',
+        'delta_ms=${expiresAt > 0 ? nowTimestamp - expiresAt : -1} expiry_field=${expiry.field} '
+        'grace_ms=10000',
       );
       _logPopupServerSkip(rideId, rideData, 'expired');
       _logRideReq(
         '[MATCH_DEBUG][DRIVER_FILTER] rideId=$rideId status=$uiStatus '
         'qualifies=false reason=expired now_ms=$nowTimestamp expires_at=$expiresAt '
-        'delta_ms=${nowTimestamp - expiresAt} expiry_field=${expiry.field}',
+        'delta_ms=${expiresAt > 0 ? nowTimestamp - expiresAt : -1} expiry_field=${expiry.field}',
       );
       return 'expired';
     }
@@ -6719,23 +6775,28 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return 'missing_market';
     }
 
-    if (driverMarket == null ||
-        driverMarket.isEmpty ||
-        rideMarket != driverMarket) {
-      _logPopupServerSkip(rideId, rideData, 'market_mismatch');
-      return 'market_mismatch';
+    final fromOfferQueueStrict = rideData['__nexride_from_offer_queue'] == true;
+    if (!fromOfferQueueStrict) {
+      if (driverMarket == null ||
+          driverMarket.isEmpty ||
+          rideMarket != driverMarket) {
+        _logPopupServerSkip(rideId, rideData, 'market_mismatch');
+        return 'market_mismatch';
+      }
     }
 
-    final expiresAt = _rideExpiryTimestamp(rideData);
-    final nowTimestamp = DateTime.now().millisecondsSinceEpoch;
-    if (expiresAt > 0 && nowTimestamp >= expiresAt) {
+    if (_rideExpiredWithOfferGrace(rideData)) {
       _logPopupServerSkip(rideId, rideData, 'expired');
       return 'expired';
     }
 
+    final expiresAt = _rideExpiryTimestamp(rideData);
+    final nowTimestamp = DateTime.now().millisecondsSinceEpoch;
+
     final createdAt = _parseCreatedAt(rideData['created_at']);
     final requestedAt = _parseCreatedAt(rideData['requested_at']);
-    final hasActiveSearchWindow = expiresAt > 0 && nowTimestamp < expiresAt;
+    final hasActiveSearchWindow =
+        expiresAt > 0 && !_rideExpiredWithOfferGrace(rideData);
     // Server timestamps may still be placeholders in snapshots; a valid future
     // search window proves the request is live for dispatch.
     if (createdAt <= 0 && requestedAt <= 0 && !hasActiveSearchWindow) {
@@ -7500,7 +7561,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   Future<void> _cancelRideRequestListener({
     required String reason,
   }) async {
-    final hadListener = _rideRequestSubscription != null;
+    final hadListener = _rideRequestSubscription != null ||
+        _driverOfferQueueChildRemovedSubscription != null;
     final previousCity = _rideRequestsListenerBoundCity;
     _rideRequestListenerToken += 1;
     final invalidatedToken = _rideRequestListenerToken;
@@ -7513,12 +7575,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       );
     }
     final subscription = _rideRequestSubscription;
+    final removedSub = _driverOfferQueueChildRemovedSubscription;
     _rideRequestSubscription = null;
+    _driverOfferQueueChildRemovedSubscription = null;
+    _driverOfferQueueReplica.clear();
     _rideDiscoveryListenerHealthy = false;
     _socketStatus = 'disconnected';
+    _setApiStatus('idle');
     _rideRequestsListenerBoundCity = null;
     _driverOfferQueueBoundUid = null;
     await subscription?.cancel();
+    await removedSub?.cancel();
     if (hadListener) {
       _logRideReq(
         '[MATCH_DEBUG][QUERY_DETACH:ride_requests?orderByChild=market_pool&equalTo=${previousCity ?? 'none'}] '
@@ -7559,6 +7626,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _loggedDriverOfferReceivedRideIds.clear();
     _rideRequestPopupQueue.clear();
     _onlineSessionStartedAt = 0;
+    _driverOfferQueuePostOnlineProbeDone = false;
 
     _logRtdb('hard reset before listener attach');
   }
@@ -8401,6 +8469,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     String rideId, {
     bool logSkips = true,
     bool ignoreLocalState = false,
+    Map<String, dynamic>? offerQueueFallbackData,
   }) async {
     if (_isTerminalSelfAcceptedRide(rideId)) {
       _logRideReq(
@@ -8411,17 +8480,34 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
     final snapshot =
         await _rideRequestChildGetIosSafe(rideId, 'load_live_popup_ride');
-    final liveRide = _matchRideForPopup(
-      rideId,
-      snapshot.value,
-      ignoreLocalState: ignoreLocalState,
-      logSkips: false,
-    );
-    if (liveRide != null) {
-      return liveRide;
+    final liveMap = _asStringDynamicMap(snapshot.value);
+    final fb = offerQueueFallbackData;
+    final useOfferFlow =
+        fb != null && fb['__nexride_from_offer_queue'] == true;
+
+    Map<String, dynamic>? mergedPayload = liveMap;
+    if (useOfferFlow) {
+      if (liveMap == null || liveMap.isEmpty) {
+        debugPrint('DRIVER_OFFER_PAYLOAD_USED rideId=$rideId');
+        mergedPayload = Map<String, dynamic>.from(fb);
+      } else {
+        mergedPayload = <String, dynamic>{...fb, ...liveMap}
+          ..['__nexride_from_offer_queue'] = true;
+      }
     }
 
-    final rideData = _asStringDynamicMap(snapshot.value);
+    final matched = _matchRideForPopup(
+      rideId,
+      mergedPayload ?? snapshot.value,
+      ignoreLocalState: ignoreLocalState,
+      logSkips: false,
+      marketDiscoveryCandidate: useOfferFlow,
+    );
+    if (matched != null) {
+      return matched;
+    }
+
+    final rideData = mergedPayload ?? _asStringDynamicMap(snapshot.value);
     final skipReason =
         _popupServerSkipReason(rideId, rideData) ?? 'unavailable';
     _logInvalidRideBlocked(rideId: rideId, reason: skipReason);
@@ -8532,7 +8618,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     var publishedPresence = false;
     _log(
         'goOnline requested ts=${DateTime.now().toIso8601String()} auth=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} driverId=$driverId');
-    print('DRIVER_ONLINE_START');
+    debugPrint(
+      'DRIVER_ONLINE_START driverId=$driverId '
+      'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'}',
+    );
 
     Future<Map<String, dynamic>>? profileReconcileFuture;
     var onlinePublishAttempted = false;
@@ -8692,6 +8781,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         return;
       }
       cityToSave = repairedMarket;
+      // Fanout indexes drivers by `dispatch_market`; must match the rider ride `market` (never force a single city).
       _driverCity = cityToSave;
       _selectedLaunchCity = cityToSave;
       if (_deviceLocationOutsideLaunchArea) {
@@ -8756,41 +8846,61 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
       _logRtdb('online publish start driverId=$driverId');
       onlinePublishAttempted = true;
-      await _driversRef.child(driverId).update({
-        'id': driverId,
-        'uid': driverId,
-        'name': name,
-        'car': car,
-        'plate': plate,
-        'serviceTypes': profile['serviceTypes'],
-        'businessModel': businessModel,
-        'verification': verification,
-        'online_session_started_at': _onlineSessionStartedAt,
-        'isOnline': true,
-        'is_online': true,
-        'isAvailable': true,
-        'available': true,
-        'status': 'idle',
-        'activeRideId': null,
-        'currentRideId': null,
-        'lat': latitude,
-        'lng': longitude,
-        'country': driverScope['country'],
-        'country_code': driverScope['country_code'],
-        'market': cityToSave,
-        'city': cityToSave,
-        'area': driverScope['area'],
-        'zone': driverScope['zone'],
-        'community': driverScope['community'],
-        'service_area': driverScope,
-        'launch_market_city': cityToSave,
-        'launch_market_country': DriverLaunchScope.countryName,
-        'last_availability_intent': 'online',
-        'last_availability_intent_at': rtdb.ServerValue.timestamp,
-        'launch_market_updated_at': rtdb.ServerValue.timestamp,
-        'last_active_at': rtdb.ServerValue.timestamp,
-        'updated_at': rtdb.ServerValue.timestamp,
-      }).timeout(const Duration(seconds: 12));
+      try {
+        await _driversRef.child(driverId).update({
+          'id': driverId,
+          'uid': driverId,
+          'name': name,
+          'car': car,
+          'plate': plate,
+          'serviceTypes': profile['serviceTypes'],
+          'businessModel': businessModel,
+          'verification': verification,
+          'online_session_started_at': _onlineSessionStartedAt,
+          'isOnline': true,
+          'is_online': true,
+          'online': true,
+          'isAvailable': true,
+          'available': true,
+          'status': 'available',
+          'dispatch_state': 'available',
+          'active_services': <String>['ride', 'dispatch_delivery'],
+          'market': cityToSave,
+          'market_pool': cityToSave,
+          'dispatch_market': cityToSave,
+          'city': cityToSave,
+          'activeRideId': null,
+          'currentRideId': null,
+          'lat': latitude,
+          'lng': longitude,
+          'country': driverScope['country'],
+          'country_code': driverScope['country_code'],
+          'area': driverScope['area'],
+          'zone': driverScope['zone'],
+          'community': driverScope['community'],
+          'service_area': driverScope,
+          'launch_market_city': cityToSave,
+          'launch_market_country': DriverLaunchScope.countryName,
+          'last_seen_at': rtdb.ServerValue.timestamp,
+          'last_availability_intent': 'online',
+          'last_availability_intent_at': rtdb.ServerValue.timestamp,
+          'launch_market_updated_at': rtdb.ServerValue.timestamp,
+          'last_active_at': rtdb.ServerValue.timestamp,
+          'updated_at': rtdb.ServerValue.timestamp,
+        }).timeout(const Duration(seconds: 12));
+        debugPrint(
+          'DRIVER_PROFILE_WRITE_OK uid=$driverId path=drivers/$driverId market=$cityToSave',
+        );
+      } catch (profileWriteError, profileWriteStack) {
+        debugPrint(
+          'DRIVER_PROFILE_WRITE_FAIL uid=$driverId path=drivers/$driverId error=$profileWriteError',
+        );
+        debugPrintStack(
+          label: 'DRIVER_PROFILE_WRITE_FAIL',
+          stackTrace: profileWriteStack,
+        );
+        rethrow;
+      }
       publishedPresence = true;
       _log('[LAST_ACTIVE] updated source=go_online driverId=$driverId');
       _logRtdb('online publish success driverId=$driverId');
@@ -8851,7 +8961,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       }
       // Await first market prime inside [_listenForRideRequests] so [driver_active_ride]
       // cannot populate [_driverActiveRideId] before the initial open-pool snapshot runs.
-      final discoveryReady = await _listenForRideRequests(reason: 'goOnline');
+      var discoveryReady = await _listenForRideRequests(reason: 'goOnline');
+      if (!discoveryReady) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        discoveryReady = await _listenForRideRequests(reason: 'goOnline_retry');
+      }
+      debugPrint(
+        'DRIVER_ONLINE_SUCCESS driverId=$driverId '
+        'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
+        'discoveryReady=$discoveryReady socket=$_socketStatus',
+      );
+      unawaited(_runDriverOfferQueueOnlineProbeOnce());
       _logDiscoveryChain(
         'go_online listener_attach_succeeded=$discoveryReady '
         'query_market=${_effectiveDriverMarket ?? 'null'}',
@@ -9457,9 +9577,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (pickupMap == null) {
       return null;
     }
+    final riderId = _valueAsText(offer['rider_id']);
+    final pickupAddr = _valueAsText(offer['pickup_address']);
+    final dropAddr = _valueAsText(offer['dropoff_address']);
     return <String, dynamic>{
       RtdbRideRequestFields.rideId: rideId,
-      RtdbRideRequestFields.riderId: '',
+      RtdbRideRequestFields.riderId: riderId,
       RtdbRideRequestFields.driverId: null,
       RtdbRideRequestFields.marketPool: pool,
       RtdbRideRequestFields.market: pool,
@@ -9467,13 +9590,195 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       RtdbRideRequestFields.tripState: TripLifecycleState.searching,
       RtdbRideRequestFields.pickup: pickupMap,
       RtdbRideRequestFields.dropoff: offer['dropoff'],
+      'pickup_address': pickupAddr.isEmpty ? null : pickupAddr,
+      'dropoff_address': dropAddr.isEmpty ? null : dropAddr,
+      'destination_address': dropAddr.isEmpty ? null : dropAddr,
       RtdbRideRequestFields.fare: offer['fare'],
+      'distance_km': offer['distance_km'],
+      'eta_minutes': offer['eta_minutes'],
       'service_type': offer['service_type'],
       RtdbRideRequestFields.paymentMethod: offer['payment_method'],
       RtdbRideRequestFields.paymentStatus: offer['payment_status'],
       RtdbRideRequestFields.expiresAt: offer['expires_at'],
       RtdbRideRequestFields.createdAt: offer['created_at'],
+      '__nexride_from_offer_queue': true,
     };
+  }
+
+  Future<void> _handleOfferQueueChildStreamError({
+    required Object error,
+    required String discoveryUid,
+    required String driverCity,
+    required int listenerToken,
+  }) async {
+    final staleCallback = listenerToken != _rideRequestListenerToken ||
+        _driverOfferQueueBoundUid != discoveryUid;
+    if (staleCallback) {
+      _logRideReq(
+        '[DRIVER_DISCOVERY_TRACE] stale_listener_error_ignored token=$listenerToken '
+        'activeToken=$_rideRequestListenerToken boundUid=${_driverOfferQueueBoundUid ?? 'none'} '
+        'market=$driverCity error=$error',
+      );
+      return;
+    }
+    print('[TRACE] RTDB ERROR = $error');
+    final streamUid = FirebaseAuth.instance.currentUser?.uid ?? 'none';
+    final denied = isRealtimeDatabasePermissionDenied(error);
+    final code = _firebaseErrorCode(error);
+    final message = _firebaseErrorMessage(error);
+    _rideDiscoveryListenerHealthy = false;
+    _socketStatus = 'stream_error';
+    _setApiStatus('idle', errorMessage: message);
+    debugPrint(
+      '[DRIVER_BACKEND] op=ride_discovery_stream_error authUid=$streamUid '
+      'driverProfilePath=${streamUid == 'none' ? 'drivers/(none)' : driverProfilePath(streamUid)} '
+      'path=driver_offer_queue/$discoveryUid '
+      'permissionDenied=$denied code=$code message=$message',
+    );
+    debugPrint(
+      '[RTDB_DISCOVERY] STREAM_ERROR path=driver_offer_queue/$discoveryUid '
+      'market=$driverCity authUid=$streamUid permissionDenied=$denied code=$code error=$message',
+    );
+    rtdbFlowLog(
+      '[DRIVER_LISTENER_FAIL]',
+      'uid=$streamUid market=$driverCity op=onChildEvent_stream denied=$denied error=$error',
+    );
+    _log('ride listener error code=$code message=$message');
+    _logRideReq(
+      'request listener stream ERROR market=$driverCity code=$code message=$message',
+    );
+    if (isRealtimeDatabasePermissionDenied(error)) {
+      print('RIDE_DISCOVERY_PERMISSION_DENIED');
+      debugPrint(
+        'DRIVER_OFFER_LISTENER_PERMISSION_DENIED path=driver_offer_queue/$discoveryUid uid=$discoveryUid',
+      );
+      debugPrint(
+        'DRIVER_OFFER_LISTENER_PERMISSION_DENIED_DETAIL authUid=$streamUid '
+        'code=$code message=$message',
+      );
+      debugPrint(
+        'RTDB_PERMISSION_ERROR_FULL '
+        'error=$error code=$code message=$message '
+        'path=driver_offer_queue/$discoveryUid',
+      );
+      _logDriverReq('skippedReason=rtdb_permission_denied_stream error=$error');
+      unawaited(
+        _cancelRideRequestListener(
+          reason: 'permission_denied_stream_market_$driverCity',
+        ),
+      );
+      _logRtdb(
+        'driver_offer_queue discovery stream permission denied (logged for engineering; '
+        'snackbar shows user-safe copy)',
+      );
+      try {
+        final debugUid = FirebaseAuth.instance.currentUser?.uid ?? 'none';
+        final debugPath = debugUid == 'none'
+            ? 'drivers/(none)'
+            : driverProfilePath(debugUid);
+        final debugDriver = debugUid == 'none'
+            ? null
+            : await _driversRef.child(debugUid).get();
+        final debugMap = _asStringDynamicMap(debugDriver?.value);
+        _logRideReq(
+          '[DRIVER_DISCOVERY_TRACE] permission_denied_snapshot uid=$debugUid '
+          'driverProfilePath=$debugPath driverExists=${debugDriver?.exists ?? false} '
+          'driverData=${debugMap ?? {}} queryPath=driver_offer_queue/$discoveryUid',
+        );
+      } catch (snapshotError) {
+        _logRideReq(
+          '[DRIVER_DISCOVERY_TRACE] permission_denied_snapshot_failed error=$snapshotError',
+        );
+      }
+      _clearDiscoveryPermissionDeniedNotice(
+        source: 'listener_permission_denied_no_blocking_notice',
+      );
+      return;
+    } else {
+      debugPrint(
+        'DRIVER_OFFER_LISTENER_ERROR path=driver_offer_queue/$discoveryUid '
+        'uid=$discoveryUid authUid=$streamUid phase=onChildEvent_stream '
+        'code=$code message=$message',
+      );
+      _showSnackBarSafely(
+        SnackBar(
+          content: Text(_discoveryListenerFailureMessage(error)),
+          action: SnackBarAction(
+            label: 'Retry now',
+            onPressed: () {
+              unawaited(
+                _listenForRideRequests(
+                  reason: 'snackbar_retry_after_stream_error',
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      _logRideReq(
+        '[DRIVER_DISCOVERY_TRACE] snackbar_state=set_stream_error source=listener_non_permission',
+      );
+    }
+  }
+
+  /// Backend fanout keys off RTDB `drivers/{uid}` (isOnline / dispatch_market).
+  /// When the map thinks we are in an online session but RTDB is stale, republish
+  /// so `createRideRequest` can write [driver_offer_queue]. Honors explicit offline intent.
+  Future<bool> _ensureDiscoveryPresenceMatchesServer({
+    required rtdb.DatabaseReference driverRef,
+    required String driverCity,
+    required Map<String, dynamic>? snapMap,
+  }) async {
+    if (!_isOnline || _onlineSessionStartedAt <= 0 || snapMap == null) {
+      return true;
+    }
+    final intent =
+        _valueAsText(snapMap['last_availability_intent']).toLowerCase();
+    final remoteOn = _asBool(snapMap['isOnline']) ||
+        _asBool(snapMap['online']) ||
+        _asBool(snapMap['is_online']);
+    if (intent == 'offline' && !remoteOn) {
+      _logRideReq(
+        '[DISCOVERY] RTDB offline intent with no presence — clearing stale local online',
+      );
+      _isOnline = false;
+      _onlineSessionStartedAt = 0;
+      _lastAvailabilityIntentOnline = false;
+      if (mounted) {
+        _setStateSafely(() {});
+      }
+      return false;
+    }
+    if (!remoteOn && intent != 'offline') {
+      _logRideReq(
+        '[DISCOVERY_PRESENCE_RESYNC] local online session but RTDB shows offline '
+        '— publishing presence market=$driverCity',
+      );
+      try {
+        await driverRef.update(<String, Object?>{
+          'online_session_started_at': _onlineSessionStartedAt,
+          'isOnline': true,
+          'is_online': true,
+          'online': true,
+          'isAvailable': true,
+          'available': true,
+          'status': 'available',
+          'dispatch_state': 'available',
+          'dispatch_market': driverCity,
+          'market': driverCity,
+          'market_pool': driverCity,
+          'city': driverCity,
+          'last_availability_intent': 'online',
+          'last_availability_intent_at': rtdb.ServerValue.timestamp,
+          'last_active_at': rtdb.ServerValue.timestamp,
+          'updated_at': rtdb.ServerValue.timestamp,
+        });
+        _lastAvailabilityIntentOnline = true;
+      } catch (error) {
+        _logRideReq('[DISCOVERY_PRESENCE_RESYNC] update failed error=$error');
+      }
+    }
+    return true;
   }
 
   Future<bool> _listenForRideRequests({required String reason}) async {
@@ -9499,6 +9804,45 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     });
     await _rideDiscoveryAttachChain;
     return captured[0];
+  }
+
+  /// Single debug read of the driver's offer queue after GO ONLINE (rules / path sanity).
+  Future<void> _runDriverOfferQueueOnlineProbeOnce() async {
+    if (_driverOfferQueuePostOnlineProbeDone || !_isOnline || _isDisposing) {
+      return;
+    }
+    _driverOfferQueuePostOnlineProbeDone = true;
+    final authUid = FirebaseAuth.instance.currentUser?.uid.trim();
+    if (authUid == null || authUid.isEmpty) {
+      debugPrint(
+        'DRIVER_OFFER_QUEUE_ONLINE_PROBE_SKIP reason=no_auth_uid',
+      );
+      return;
+    }
+    final path = 'driver_offer_queue/$authUid';
+    try {
+      final snap = await rtdb.FirebaseDatabase.instance.ref(path).get();
+      final map = _asStringDynamicMap(snap.value);
+      debugPrint(
+        'DRIVER_OFFER_QUEUE_DEBUG_READ uid=$authUid '
+        'exists=${snap.exists} children=${map?.length ?? 0}',
+      );
+    } catch (e, st) {
+      final denied = isRealtimeDatabasePermissionDenied(e);
+      debugPrint(
+        'DRIVER_OFFER_QUEUE_DEBUG_READ_FAIL uid=$authUid '
+        'permissionDenied=$denied error=$e',
+      );
+      debugPrintStack(
+        label: 'DRIVER_OFFER_QUEUE_DEBUG_READ_FAIL',
+        stackTrace: st,
+      );
+      if (denied) {
+        debugPrint(
+          'DRIVER_OFFER_LISTENER_PERMISSION_DENIED path=driver_offer_queue/$authUid uid=$authUid',
+        );
+      }
+    }
   }
 
   Future<String?> _ensureDriverProfileForDiscovery({
@@ -9672,6 +10016,20 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     driverCity = DriverServiceAreaConfig.marketForCity(driverCity).city;
+    final presenceOk = await _ensureDiscoveryPresenceMatchesServer(
+      driverRef: driverRef,
+      driverCity: driverCity,
+      snapMap: snapMap,
+    );
+    if (!presenceOk) {
+      _logRideReq(
+        'request listener SKIPPED reason=rtdb_offline_intent driverCity=$driverCity',
+      );
+      _showAvailabilityFailureNotice(
+        'You are offline on the server. Tap GO ONLINE to receive ride requests.',
+      );
+      return false;
+    }
     _logReqDebug('listener attach START market=$driverCity');
     _logRideReq(
       'driver online state for discovery online=$_isOnline session=$_onlineSessionStartedAt market=$driverCity',
@@ -9687,24 +10045,16 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     _logRideReq(
-      'driver market resolved=$driverCity query=ride_requests orderByChild=market_pool equalTo=$driverCity',
+      'driver market resolved=$driverCity offer_listener=driver_offer_queue/$uid (per-uid child_added)',
     );
     _logRideReq(
-      '[DRIVER_DISCOVERY_QUERY] path=ride_requests '
-      'orderByChild=market_pool equalTo=$driverCity',
+      '[DRIVER_DISCOVERY_QUERY] path=driver_offer_queue/$uid (onChildAdded)',
     );
     _logRideReq('[DRIVER_DISCOVERY_TRACE] uid=$uid');
     _logRideReq('[DRIVER_DISCOVERY_TRACE] driverProfilePath=$profilePath');
     _logRideReq('[DRIVER_DISCOVERY_TRACE] driverMarket=$driverCity');
-    _logRideReq('[DRIVER_DISCOVERY_TRACE] queryMarket=$driverCity');
-    _logRideReq(
-      '[DRIVER_DISCOVERY_TRACE] query path=ride_requests orderByChild=market_pool equalTo=$driverCity',
-    );
-    debugPrint('RTDB_QUERY_PATH path=ride_requests');
     debugPrint(
-      'RTDB_QUERY_PARAMS orderByChild=market_pool equalTo=$driverCity '
-      'driver_market=$runtimeDriverMarketRaw driver_market_pool=$runtimeDriverMarketPoolRaw '
-      'driver_city=$runtimeDriverCityRaw',
+      '[DRIVER_BACKEND] op=offer_queue_attach uid=$uid driverMarket=$driverCity',
     );
     final compareMarket = runtimeDriverMarketRaw == driverCity;
     final compareMarketPool = runtimeDriverMarketPoolRaw == driverCity;
@@ -9715,21 +10065,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       'driverMarketPoolExactMatch=$compareMarketPool '
       'driverCityExactMatch=$compareCity',
     );
-    final discoveryUid = FirebaseAuth.instance.currentUser?.uid ?? 'none';
     debugPrint(
-      '[DRIVER_BACKEND] op=ride_discovery_attach authUid=$discoveryUid '
-      'driverProfilePath=${discoveryUid == 'none' ? 'drivers/(none)' : driverProfilePath(discoveryUid)} '
-      'query=ride_requests.orderByChild(market_pool).equalTo($driverCity)',
+      '[DRIVER_BACKEND] op=offer_queue_discovery authUid=$uid '
+      'path=driver_offer_queue/$uid '
+      'driverProfilePath=$profilePath',
     );
     _log(
-      'listener attached path=ride_requests[orderByChild=market_pool,equalTo=$driverCity] online_session_started_at=$_onlineSessionStartedAt reason=$reason',
+      'listener target path=driver_offer_queue/$uid market=$driverCity '
+      'online_session_started_at=$_onlineSessionStartedAt reason=$reason',
     );
-    _logRtdb(
-      'listener attached path=ride_requests[orderByChild=market_pool,equalTo=$driverCity]',
-    );
+    _logRtdb('listener attach target path=driver_offer_queue/$uid market=$driverCity');
 
     debugPrint(
-      '[DISCOVERY_QUERY] queryField=market_pool queryEqualTo=$driverCity '
+      '[DISCOVERY_QUERY] offer_queue uid=$uid market=$driverCity '
       'effectiveDriverMarket=${_effectiveDriverMarket ?? 'null'} '
       'effectiveDriverCity=${_driverCity ?? 'null'} selectedLaunchCity=$_selectedLaunchCity',
     );
@@ -9748,13 +10096,13 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _logDriverReq('databaseURL=$driverReqDbUrl');
     _logDriverReq('effectiveMarket=$driverCity');
     _logDriverReq(
-      'queryPath=ride_requests orderByChild=market_pool equalTo=$driverCity',
+      'queryPath=driver_offer_queue/$uid (child listeners)',
     );
 
-    Future<void> snapshotProcessingChain = Future<void>.value();
+    Future<void> rideMapProcessingChain = Future<void>.value();
 
-    Future<void> processSnapshot(
-      rtdb.DataSnapshot snapshot, {
+    Future<void> processRideMap(
+      Map<String, dynamic> rideMap, {
       required String source,
       required int listenerToken,
     }) async {
@@ -9763,16 +10111,6 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           'snapshot skipped reason=stale_listener source=$source token=$listenerToken activeToken=$_rideRequestListenerToken',
         );
         return;
-      }
-      final raw = snapshot.value;
-      final rideMap = <String, dynamic>{};
-
-      if (raw is Map) {
-        raw.forEach((key, value) {
-          if (key != null) {
-            rideMap[key.toString()] = value;
-          }
-        });
       }
 
       final activeOpenRideMap = <String, Map<String, dynamic>>{};
@@ -9875,9 +10213,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           'ride eval rideId=$rideId status=$status qualifies=$qualifies reason=${skipReason.isEmpty ? 'qualified' : skipReason}',
         );
         if (qualifies) {
-          if (_loggedDriverOfferReceivedRideIds.add(rideId)) {
-            debugPrint('DRIVER_OFFER_RECEIVED rideId=$rideId');
-          }
+          _loggedDriverOfferReceivedRideIds.add(rideId);
           activeOpenRideMap[rideId] = rideData;
         }
       }
@@ -10225,6 +10561,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       } else {
         _ridePopupOpenPipelineLocked = true;
         try {
+          debugPrint('DRIVER_OFFER_POPUP_SHOW rideId=${recheckedRide.rideId}');
           await showRideRequestPopup(recheckedRide);
         } finally {
           _ridePopupOpenPipelineLocked = false;
@@ -10232,23 +10569,27 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       }
     }
 
-    Future<void> queueSnapshotProcessing(
-      rtdb.DataSnapshot snapshot, {
+    Future<void> queueRideMapProcessing(
+      Map<String, dynamic> rideMap, {
       required String source,
       required int listenerToken,
     }) async {
-      snapshotProcessingChain =
-          snapshotProcessingChain.catchError((Object _) {}).then(
-                (_) => processSnapshot(
-                  snapshot,
+      rideMapProcessingChain =
+          rideMapProcessingChain.catchError((Object _) {}).then(
+                (_) => processRideMap(
+                  rideMap,
                   source: source,
                   listenerToken: listenerToken,
                 ),
               );
-      await snapshotProcessingChain;
+      await rideMapProcessingChain;
     }
 
-    if (_rideRequestSubscription != null &&
+    final forceRebindOfferListener =
+        reason == 'goOnline' || reason == 'goOnline_retry';
+      if (!forceRebindOfferListener &&
+        (_rideRequestSubscription != null ||
+            _driverOfferQueueChildRemovedSubscription != null) &&
         _driverOfferQueueBoundUid != null &&
         _driverOfferQueueBoundUid == uid) {
       _logRideReq(
@@ -10266,7 +10607,34 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _logRtdb(
         'ride request listener refresh city=$driverCity reason=$reason',
       );
+      if (_rideRequestSubscription != null) {
+        _rideDiscoveryListenerHealthy = true;
+        _socketStatus = 'offer_queue_connected';
+        _setApiStatus('listening');
+      }
+      debugPrint(
+        'DRIVER_OFFER_LISTENER_ATTACHED path=driver_offer_queue/$uid '
+        'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
+        'reason=noop_refresh',
+      );
       return true;
+    }
+
+    final attachUid =
+        (FirebaseAuth.instance.currentUser?.uid ?? _effectiveDriverId).trim();
+    debugPrint(
+      'DRIVER_OFFER_LISTENER_ATTACH_START path=driver_offer_queue/$attachUid uid=$attachUid',
+    );
+    final attachAuth = FirebaseAuth.instance.currentUser?.uid.trim();
+    final attachEffective = _effectiveDriverId.trim();
+    if (attachAuth != null &&
+        attachAuth.isNotEmpty &&
+        attachEffective.isNotEmpty &&
+        attachAuth != attachEffective) {
+      debugPrint(
+        'DRIVER_OFFER_LISTENER_UID_MISMATCH authUid=$attachAuth '
+        'effectiveDriverId=$attachEffective',
+      );
     }
 
     await _cancelRideRequestListener(
@@ -10291,6 +10659,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         return false;
       }
       _driverOfferQueueBoundUid = discoveryUid;
+      final authForQueue = FirebaseAuth.instance.currentUser?.uid.trim();
+      debugPrint(
+        'DRIVER_OFFER_QUEUE_BIND discoveryUid=$discoveryUid '
+        'authUid=${authForQueue ?? 'none'} '
+        'match=${authForQueue != null && authForQueue == discoveryUid}',
+      );
       final driverOfferQueueRef =
           rtdb.FirebaseDatabase.instance.ref('driver_offer_queue/$discoveryUid');
       rtdbFlowLog(
@@ -10346,152 +10720,113 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         _logRideReq(
           '[DRIVER_DISCOVERY_TRACE] driver_offer_queue probe_fail permissionDenied=$denied error=$probeError',
         );
+        if (denied) {
+          debugPrint(
+            'DRIVER_OFFER_LISTENER_PERMISSION_DENIED path=driver_offer_queue/$discoveryUid uid=$discoveryUid',
+          );
+        } else {
+          debugPrint(
+            'DRIVER_OFFER_LISTENER_ERROR '
+            'path=driver_offer_queue/$discoveryUid uid=$discoveryUid '
+            'phase=pre_listen_probe error=$probeError',
+          );
+        }
+      }
+
+      _driverOfferQueueReplica.clear();
+      void offerQueueStreamNoteEvent() {
+        _clearDiscoveryPermissionDeniedNotice(source: 'listener_event');
+        _rideDiscoveryListenerHealthy = true;
+        _socketStatus = 'offer_queue_connected';
+        _setApiStatus('listening');
+        _lastRideStreamEventAt = DateTime.now();
+      }
+
+      void onOfferQueueChildError(Object error) {
+        unawaited(
+          _handleOfferQueueChildStreamError(
+            error: error,
+            discoveryUid: discoveryUid,
+            driverCity: driverCity,
+            listenerToken: listenerToken,
+          ),
+        );
       }
 
       _logRideReq(
-        'request listener STREAM subscribed path=driver_offer_queue/$discoveryUid market=$driverCity reason=$reason token=$listenerToken',
+        'request listener SUBSCRIBE onChildAdded/onChildRemoved path=driver_offer_queue/$discoveryUid '
+        'market=$driverCity reason=$reason token=$listenerToken',
       );
-      _socketStatus = 'stream_connected';
       debugPrint(
-        '[RTDB_DISCOVERY] STREAM_SUBSCRIBE path=driver_offer_queue/$discoveryUid '
+        '[RTDB_DISCOVERY] OFFER_QUEUE_SUBSCRIBE path=driver_offer_queue/$discoveryUid '
         'market=$driverCity authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'}',
       );
       _logRideReq(
         '[MATCH_DEBUG][QUERY_ATTACH:driver_offer_queue/$discoveryUid] '
-        'discovery onValue',
+        'discovery onChildAdded+onChildRemoved',
       );
-      _rideRequestSubscription = driverOfferQueueRef.onValue.listen(
+      _rideRequestSubscription = driverOfferQueueRef.onChildAdded.listen(
         (event) async {
-          _clearDiscoveryPermissionDeniedNotice(source: 'listener_event');
-          _rideDiscoveryListenerHealthy = true;
-          _socketStatus = 'stream_connected';
-          _lastRideStreamEventAt = DateTime.now();
+          offerQueueStreamNoteEvent();
+          final key = event.snapshot.key?.trim();
+          if (key == null || key.isEmpty) {
+            return;
+          }
+          debugPrint('DRIVER_OFFER_RECEIVED_FROM_QUEUE rideId=$key');
+          _driverOfferQueueReplica[key] = event.snapshot.value;
           try {
-            await queueSnapshotProcessing(
-              event.snapshot,
-              source: 'stream',
+            await queueRideMapProcessing(
+              Map<String, dynamic>.from(_driverOfferQueueReplica),
+              source: 'child_added',
               listenerToken: listenerToken,
             );
           } catch (error) {
-            _log('ride listener snapshot handling failed error=$error');
-            _logRideReq('snapshot handler ERROR source=stream error=$error');
+            _log('offer queue child_added handler failed error=$error');
+            _logRideReq('rideMap handler ERROR source=child_added error=$error');
           }
         },
-        onError: (Object error) async {
-          final staleCallback = listenerToken != _rideRequestListenerToken ||
-              _driverOfferQueueBoundUid != discoveryUid;
-          if (staleCallback) {
-            _logRideReq(
-              '[DRIVER_DISCOVERY_TRACE] stale_listener_error_ignored token=$listenerToken '
-              'activeToken=$_rideRequestListenerToken boundUid=${_driverOfferQueueBoundUid ?? 'none'} '
-              'market=$driverCity error=$error',
-            );
-            return;
+        onError: onOfferQueueChildError,
+      );
+      _driverOfferQueueChildRemovedSubscription =
+          driverOfferQueueRef.onChildRemoved.listen(
+        (event) async {
+          offerQueueStreamNoteEvent();
+          final key = event.snapshot.key?.trim();
+          if (key != null && key.isNotEmpty) {
+            _driverOfferQueueReplica.remove(key);
+            _driverOfferRideCache.remove(key);
           }
-          print('[TRACE] RTDB ERROR = $error');
-          final streamUid = FirebaseAuth.instance.currentUser?.uid ?? 'none';
-          final denied = isRealtimeDatabasePermissionDenied(error);
-          final code = _firebaseErrorCode(error);
-          final message = _firebaseErrorMessage(error);
-          _rideDiscoveryListenerHealthy = false;
-          _socketStatus = 'stream_error';
-          debugPrint(
-            '[DRIVER_BACKEND] op=ride_discovery_stream_error authUid=$streamUid '
-            'driverProfilePath=${streamUid == 'none' ? 'drivers/(none)' : driverProfilePath(streamUid)} '
-            'path=driver_offer_queue/$discoveryUid '
-            'permissionDenied=$denied code=$code message=$message',
-          );
-          debugPrint(
-            '[RTDB_DISCOVERY] STREAM_ERROR path=driver_offer_queue/$discoveryUid '
-            'market=$driverCity authUid=$streamUid permissionDenied=$denied code=$code error=$message',
-          );
-          rtdbFlowLog(
-            '[DRIVER_LISTENER_FAIL]',
-            'uid=$streamUid market=$driverCity op=onValue_stream denied=$denied error=$error',
-          );
-          _log('ride listener error code=$code message=$message');
-          _logRideReq(
-            'request listener stream ERROR market=$driverCity code=$code message=$message',
-          );
-          if (isRealtimeDatabasePermissionDenied(error)) {
-            print('RIDE_DISCOVERY_PERMISSION_DENIED');
-            debugPrint(
-              'RTDB_PERMISSION_ERROR_FULL '
-              'error=$error code=$code message=$message '
-              'path=driver_offer_queue/$discoveryUid',
+          try {
+            await queueRideMapProcessing(
+              Map<String, dynamic>.from(_driverOfferQueueReplica),
+              source: 'child_removed',
+              listenerToken: listenerToken,
             );
-            _logDriverReq(
-                'skippedReason=rtdb_permission_denied_stream error=$error');
-            unawaited(
-              _cancelRideRequestListener(
-                reason: 'permission_denied_stream_market_$driverCity',
-              ),
-            );
-            _logRtdb(
-              'driver_offer_queue discovery stream permission denied (logged for engineering; '
-              'snackbar shows user-safe copy)',
-            );
-            try {
-              final debugUid = FirebaseAuth.instance.currentUser?.uid ?? 'none';
-              final debugPath = debugUid == 'none'
-                  ? 'drivers/(none)'
-                  : driverProfilePath(debugUid);
-              final debugDriver = debugUid == 'none'
-                  ? null
-                  : await _driversRef.child(debugUid).get();
-              final debugMap = _asStringDynamicMap(debugDriver?.value);
-              _logRideReq(
-                '[DRIVER_DISCOVERY_TRACE] permission_denied_snapshot uid=$debugUid '
-                'driverProfilePath=$debugPath driverExists=${debugDriver?.exists ?? false} '
-                'driverData=${debugMap ?? {}} queryPath=driver_offer_queue/$discoveryUid',
-              );
-            } catch (snapshotError) {
-              _logRideReq(
-                '[DRIVER_DISCOVERY_TRACE] permission_denied_snapshot_failed error=$snapshotError',
-              );
-            }
-            _clearDiscoveryPermissionDeniedNotice(
-              source: 'listener_permission_denied_no_blocking_notice',
-            );
-            return;
-          } else {
-            _showSnackBarSafely(
-              SnackBar(
-                content: Text(_discoveryListenerFailureMessage(error)),
-                action: SnackBarAction(
-                  label: 'Retry now',
-                  onPressed: () {
-                    unawaited(
-                      _listenForRideRequests(
-                        reason: 'snackbar_retry_after_stream_error',
-                      ),
-                    );
-                  },
-                ),
-              ),
-            );
+          } catch (error) {
+            _log('offer queue child_removed handler failed error=$error');
             _logRideReq(
-              '[DRIVER_DISCOVERY_TRACE] snackbar_state=set_stream_error source=listener_non_permission',
+              'rideMap handler ERROR source=child_removed error=$error',
             );
           }
-          return;
         },
+        onError: onOfferQueueChildError,
       );
       _logRideReq(
         '[MATCH_DEBUG][DRIVER_ATTACH] market=$driverCity token=$listenerToken '
         'reason=$reason prime_get=skipped_ios_safe',
       );
       _rideDiscoveryListenerHealthy = true;
-      _socketStatus = 'stream_connected';
+      _socketStatus = 'offer_queue_connected';
+      _setApiStatus('listening');
       _logRideReq(
         '[MATCH_DEBUG][DRIVER_LISTENER_ATTACH_OK] market=$driverCity token=$listenerToken',
       );
       _logRtdb(
-        'listener prime skipped (onValue initial snapshot only) city=$driverCity',
+        'offer_queue onChildAdded+onChildRemoved active city=$driverCity',
       );
       _logRideReq(
-        'request listener PRIME skipped market=$driverCity '
-        '(rely on onValue only; no query.get while listener active)',
+        'request listener CHILD_EVENTS market=$driverCity '
+        '(onChildAdded relays initial children + deltas)',
       );
       _logReqDebug('listener attach OK market=$driverCity');
       _logRideReq('[DRIVER_DISCOVERY_TRACE] listener attach OK');
@@ -10500,6 +10835,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _logDiscoveryChain(
           'online attach success market=$driverCity reason=$reason');
       print('RIDE_DISCOVERY_ATTACH_SUCCESS');
+      debugPrint(
+        'DRIVER_OFFER_LISTENER_ATTACHED path=driver_offer_queue/$discoveryUid '
+        'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
+        'reason=$reason',
+      );
       return true;
     } catch (error) {
       if (isRealtimeDatabasePermissionDenied(error)) {
@@ -10513,6 +10853,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       final message = _firebaseErrorMessage(error);
       _rideRequestsListenerBoundCity = null;
       _rideDiscoveryListenerHealthy = false;
+      _socketStatus = 'disconnected';
       _logReqDebug('listener attach FAIL error=$error');
       _logDriverReq(
         'skippedReason=listener_attach_failed market=$driverCity reason=$reason code=$code message=$message',
@@ -10533,12 +10874,31 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       }
       if (isRealtimeDatabasePermissionDenied(error)) {
         final uid = FirebaseAuth.instance.currentUser?.uid ?? 'none';
+        final bound =
+            (_driverOfferQueueBoundUid ?? _effectiveDriverId.trim()).trim();
+        final denyUid = bound.isEmpty ? uid : bound;
+        final denyPath =
+            denyUid.isEmpty || denyUid == 'none'
+                ? 'driver_offer_queue/(none)'
+                : 'driver_offer_queue/$denyUid';
+        debugPrint(
+          'DRIVER_OFFER_LISTENER_PERMISSION_DENIED path=$denyPath uid=$denyUid',
+        );
+        debugPrint(
+          'DRIVER_OFFER_LISTENER_PERMISSION_DENIED_DETAIL authUid=$uid '
+          'code=$code message=$message phase=attach_try',
+        );
         _logRideReq(
           '[DRIVER_DISCOVERY_TRACE] attach_permission_denied uid=$uid '
           'queryPath=driver_offer_queue/${_driverOfferQueueBoundUid ?? 'none'} code=$code message=$message',
         );
         return false;
       }
+      debugPrint(
+        'DRIVER_OFFER_LISTENER_ERROR path=driver_offer_queue/${_effectiveDriverId.trim()} '
+        'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
+        'phase=attach_try code=$code message=$message error=$error',
+      );
       return false;
     }
   }
@@ -10654,6 +11014,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _MatchedRideRequest ride, {
     bool rideAlreadyReserved = false,
   }) async {
+    final Map<String, dynamic>? offerQueueFallback =
+        ride.rideData['__nexride_from_offer_queue'] == true
+            ? ride.rideData
+            : null;
     _logRideReq(
       'showRideRequestPopup enter rideId=${ride.rideId} reserved=$rideAlreadyReserved '
       'online=$_isOnline popupOpen=$_popupOpen hasActive=$_hasActivePopup',
@@ -10736,8 +11100,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     StateSetter? dialogSetState;
 
     try {
-      var popupRide =
-          rideAlreadyReserved ? ride : await _loadLivePopupRide(ride.rideId);
+      var popupRide = rideAlreadyReserved
+          ? ride
+          : await _loadLivePopupRide(
+              ride.rideId,
+              offerQueueFallbackData: offerQueueFallback,
+            );
       if (popupRide == null) {
         _logRidePopup('skip rideId=${ride.rideId} reason=live_load_null');
         _logRideReq(
@@ -10891,6 +11259,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       final refreshedPopupRide = await _loadLivePopupRide(
         popupRide.rideId,
         logSkips: false,
+        offerQueueFallbackData: offerQueueFallback,
       );
       if (refreshedPopupRide == null) {
         _logRideReq(

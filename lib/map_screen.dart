@@ -164,6 +164,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool _safetyMonitoringActive = false;
   bool _safetyPopupVisible = false;
 
+  /// Backend-owned pointer `rider_active_ride/{uid}` → `{ ride_id, phase }`.
+  StreamSubscription<rtdb.DatabaseEvent>? _riderActiveRidePointerSubscription;
+
   int _countdown = 300;
   int _extraStopFieldCount = 0;
   int _riderUnreadChatCount = 0;
@@ -345,66 +348,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (normalizedRideId.isEmpty) {
       return;
     }
-    final riderId = _valueAsText(rideData['rider_id']);
-    final driverId = _valueAsText(rideData['driver_id']);
-    final fallbackStatus = TripStateMachine.uiStatusFromSnapshot(rideData);
-    final fallbackTripState = TripStateMachine.canonicalStateFromSnapshot(rideData);
-    final updates = <String, dynamic>{
-      'admin_rides/$normalizedRideId/summary/ride_id': normalizedRideId,
-      'admin_rides/$normalizedRideId/summary/rider_id': riderId,
-      'admin_rides/$normalizedRideId/summary/driver_id': driverId,
-      'admin_rides/$normalizedRideId/summary/market': _valueAsText(rideData['market']),
-      'admin_rides/$normalizedRideId/summary/status': _valueAsText(rideData['status']).isEmpty
-          ? fallbackStatus
-          : _valueAsText(rideData['status']),
-      'admin_rides/$normalizedRideId/summary/trip_state': _valueAsText(rideData['trip_state']).isEmpty
-          ? fallbackTripState
-          : _valueAsText(rideData['trip_state']),
-      'admin_rides/$normalizedRideId/summary/payment_method': _valueAsText(rideData['payment_method']),
-      'admin_rides/$normalizedRideId/summary/payment_status': _valueAsText(rideData['payment_status']),
-      'admin_rides/$normalizedRideId/summary/settlement_status': _valueAsText(rideData['settlement_status']).isEmpty
-          ? 'pending'
-          : _valueAsText(rideData['settlement_status']),
-      'admin_rides/$normalizedRideId/summary/support_status': _valueAsText(rideData['support_status']).isEmpty
-          ? 'normal'
-          : _valueAsText(rideData['support_status']),
-      'admin_rides/$normalizedRideId/summary/created_at': rideData['created_at'],
-      'admin_rides/$normalizedRideId/summary/accepted_at': rideData['accepted_at'],
-      'admin_rides/$normalizedRideId/summary/cancelled_at': rideData['cancelled_at'],
-      'admin_rides/$normalizedRideId/summary/completed_at': rideData['completed_at'],
-      'admin_rides/$normalizedRideId/summary/cancel_reason': _valueAsText(rideData['cancel_reason']),
-      'admin_rides/$normalizedRideId/summary/updated_at': rtdb.ServerValue.timestamp,
-      'support_queue/$normalizedRideId/ride_id': normalizedRideId,
-      'support_queue/$normalizedRideId/rider_id': riderId,
-      'support_queue/$normalizedRideId/driver_id': driverId,
-      'support_queue/$normalizedRideId/status': _valueAsText(rideData['status']).isEmpty
-          ? fallbackStatus
-          : _valueAsText(rideData['status']),
-      'support_queue/$normalizedRideId/trip_state': _valueAsText(rideData['trip_state']).isEmpty
-          ? fallbackTripState
-          : _valueAsText(rideData['trip_state']),
-      'support_queue/$normalizedRideId/payment_status': _valueAsText(rideData['payment_status']),
-      'support_queue/$normalizedRideId/settlement_status': _valueAsText(rideData['settlement_status']).isEmpty
-          ? 'pending'
-          : _valueAsText(rideData['settlement_status']),
-      'support_queue/$normalizedRideId/support_status': _valueAsText(rideData['support_status']).isEmpty
-          ? 'normal'
-          : _valueAsText(rideData['support_status']),
-      'support_queue/$normalizedRideId/created_at': rideData['created_at'],
-      'support_queue/$normalizedRideId/accepted_at': rideData['accepted_at'],
-      'support_queue/$normalizedRideId/cancelled_at': rideData['cancelled_at'],
-      'support_queue/$normalizedRideId/completed_at': rideData['completed_at'],
-      'support_queue/$normalizedRideId/cancel_reason': _valueAsText(rideData['cancel_reason']),
-      'support_queue/$normalizedRideId/last_event': lastEvent,
-      'support_queue/$normalizedRideId/updated_at': rtdb.ServerValue.timestamp,
-    };
-    try {
-      await _rideRequestsRef.root.update(updates);
-    } catch (error) {
-      _logRideFlow(
-        '[OPS_MIRROR] sync_failed rideId=$normalizedRideId last_event=$lastEvent error=$error',
-      );
-    }
+    // admin_rides / support_queue mirrors are server-owned; rider client must not
+    // multi-path update the RTDB root (denied under production rules).
+    _logRideFlow(
+      '[OPS_MIRROR] skipped rideId=$normalizedRideId last_event=$lastEvent '
+      '(rider client)',
+    );
   }
 
   void _showSnackBar(String message) {
@@ -671,35 +620,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (driverId.isEmpty || driverId == 'waiting') {
       return;
     }
-
-    final snapshots = await Future.wait(<Future<rtdb.DataSnapshot>>[
-      _driversRef.child(driverId).get(),
-      _driverActiveRideRef.child(driverId).get(),
-    ]);
-    final driverRecord = _asStringDynamicMap(snapshots[0].value);
-    final activeRideRecord = _asStringDynamicMap(snapshots[1].value);
-    final activeRideId = _firstNonEmptyText(<dynamic>[
-      activeRideRecord?['ride_id'],
-      driverRecord?['activeRideId'],
-      driverRecord?['currentRideId'],
-    ]);
-    if (activeRideId != rideId) {
-      return;
-    }
-
-    final isOnline =
-        _asBool(driverRecord?['isOnline']) || _asBool(driverRecord?['online']);
-    await _rideRequestsRef.root.update(<String, dynamic>{
-      'drivers/$driverId/isAvailable': isOnline,
-      'drivers/$driverId/available': isOnline,
-      'drivers/$driverId/status': isOnline ? 'idle' : 'offline',
-      'drivers/$driverId/activeRideId': null,
-      'drivers/$driverId/currentRideId': null,
-      'drivers/$driverId/updated_at': rtdb.ServerValue.timestamp,
-      'driver_active_rides/$driverId': null,
-    });
+    // Driver availability is server-owned; rider must not write drivers/* or
+    // driver_active_rides/*.
     _logRideFlow(
-      'driver availability restored rideId=$rideId driverId=$driverId reason=$reason',
+      '[RIDER] skip restore_driver_availability rideId=$rideId '
+      'driverId=$driverId reason=$reason',
     );
   }
 
@@ -1790,19 +1715,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _discardInFlightRideRequestSubmission({
-    required String rideId,
+    String? rideId,
   }) async {
     _clearRideSearchTimeout(reason: 'user_abort_before_write');
-    if (rideId.isNotEmpty) {
+    final id = rideId?.trim() ?? '';
+    if (id.isNotEmpty) {
       try {
+        debugPrint('RIDER_CANCEL_START rideId=$id reason=rider_abort_before_submit');
         await _rideCloud.cancelRideRequest(
-          rideId: rideId,
+          rideId: id,
           cancelReason: 'rider_abort_before_submit',
         );
+        debugPrint('RIDER_CANCEL_SUCCESS rideId=$id');
       } catch (error) {
         _logRideFlow(
-          'discard submission cancel failed rideId=$rideId error=$error',
+          'discard submission cancel failed rideId=$id error=$error',
         );
+        debugPrint('RIDER_CANCEL_FAIL rideId=$id error=$error');
       }
     }
     _pendingRideRequestSubmissionId = null;
@@ -1833,7 +1762,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required String cancelMetadataSource,
     required String cancellationReasonDisplay,
   }) async {
-    final driverId = currentRide['driver_id']?.toString();
+    debugPrint(
+      'RIDER_CANCEL_START rideId=$rideId reason=$cancellationReasonDisplay',
+    );
     final cancelRes = await _rideCloud
         .cancelRideRequest(
           rideId: rideId,
@@ -1841,8 +1772,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         )
         .timeout(const Duration(seconds: 22));
     if (!riderRideCallableSucceeded(cancelRes)) {
-      throw StateError(riderRideCallableReason(cancelRes));
+      final reason = riderRideCallableReason(cancelRes);
+      debugPrint('RIDER_CANCEL_FAIL rideId=$rideId reason=$reason');
+      if (reason == 'ride_missing' && transitionSource == 'rider_cancel') {
+        await _resetRideState(clearDestination: true);
+        return;
+      }
+      throw StateError(reason);
     }
+    debugPrint('RIDER_CANCEL_SUCCESS rideId=$rideId');
     Map<String, dynamic> merged = Map<String, dynamic>.from(currentRide);
     try {
       final snap = await _rideRequestsRef.child(rideId).get();
@@ -1865,19 +1803,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       '[MATCH_DEBUG][RIDER_CANCEL_WRITE] rideId=$rideId '
       'next_status=cancelled next_trip_state=${TripLifecycleState.tripCancelled}',
     );
-    if (driverId != null && driverId.isNotEmpty && driverId != 'waiting') {
-      try {
-        await _restoreDriverAvailabilityIfRideMatches(
-          rideId: rideId,
-          driverId: driverId,
-          reason: transitionSource,
-        ).timeout(const Duration(seconds: 14));
-      } catch (error) {
-        _logRideFlow(
-          '[CANCEL] actor=rider rideId=$rideId restore_driver_availability warn error=$error',
-        );
-      }
-    }
   }
 
   void _setSubmittingRideRequest(bool value) {
@@ -2042,6 +1967,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         source: 'map_screen.init',
       ),
     );
+    _ensureRiderActiveRidePointerListener();
   }
 
   int _rideActivityTimestamp(Map<String, dynamic> rideData) {
@@ -2094,6 +2020,47 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _isStartingVoiceCall = value;
   }
 
+  void _ensureRiderActiveRidePointerListener() {
+    _riderActiveRidePointerSubscription?.cancel();
+    _riderActiveRidePointerSubscription = null;
+    final uid = _currentRiderUid?.trim() ?? '';
+    if (uid.isEmpty) {
+      return;
+    }
+    final ref = rtdb.FirebaseDatabase.instance.ref('rider_active_ride/$uid');
+    _riderActiveRidePointerSubscription = ref.onValue.listen((event) {
+      unawaited(_handleRiderActiveRidePointerEvent(event));
+    });
+  }
+
+  Future<void> _handleRiderActiveRidePointerEvent(rtdb.DatabaseEvent event) async {
+    final uid = _currentRiderUid?.trim() ?? '';
+    if (uid.isEmpty) {
+      return;
+    }
+    final raw = event.snapshot.value;
+    if (raw is! Map) {
+      debugPrint('RIDER_ACTIVE_POINTER_UPDATE uid=$uid rideId=(cleared)');
+      return;
+    }
+    final m = Map<String, dynamic>.from(raw);
+    final ptrRideId = _firstNonEmptyText(<dynamic>[
+      m['ride_id'],
+      m['rideId'],
+    ]);
+    final phase = _valueAsText(m['phase']);
+    debugPrint(
+      'RIDER_ACTIVE_POINTER_UPDATE uid=$uid rideId=$ptrRideId phase=$phase',
+    );
+    if (ptrRideId.isEmpty) {
+      return;
+    }
+    if (ptrRideId == _activeRideListenerRideId && _rideListener != null) {
+      return;
+    }
+    listenToRide(ptrRideId);
+  }
+
   Future<void> _restoreActiveRideIfAny() async {
     final riderUid = _currentRiderUid;
     if (riderUid == null || riderUid.isEmpty || _currentRideId != null) {
@@ -2114,7 +2081,30 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         return;
       }
 
-      final rides = _asStringDynamicMap(snapshot?.value);
+      Map<String, dynamic>? rides = _asStringDynamicMap(snapshot?.value);
+      final ptrSnap = await runOptionalStartupRead<rtdb.DataSnapshot>(
+        source: 'map_screen.rider_active_ride_pointer',
+        path: 'rider_active_ride/$riderUid',
+        action: () => rtdb.FirebaseDatabase.instance
+            .ref('rider_active_ride/$riderUid')
+            .get(),
+      );
+      final ptrMap = _asStringDynamicMap(ptrSnap?.value);
+      final pointerRideId = _firstNonEmptyText(<dynamic>[
+        ptrMap?['ride_id'],
+        ptrMap?['rideId'],
+      ]);
+      if (pointerRideId.isNotEmpty) {
+        final directSnap = await _rideRequestsRef.child(pointerRideId).get();
+        final directData = _asStringDynamicMap(directSnap.value);
+        if (directData != null) {
+          rides ??= <String, dynamic>{};
+          rides[pointerRideId] = directData;
+          _logRideFlow(
+            'active ride restore merged rider_active_ride pointer rideId=$pointerRideId',
+          );
+        }
+      }
       if (rides == null) {
         _logRideFlow('active ride restore found no rides riderId=$riderUid');
         if (_rideStatus != 'idle' ||
@@ -2265,6 +2255,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _callDurationTimer?.cancel();
     _callRingTimeoutTimer?.cancel();
     _rideListener?.cancel();
+    _riderActiveRidePointerSubscription?.cancel();
     _driversSubscription?.cancel();
     _stopRiderChatListener();
     _callSubscription?.cancel();
@@ -2488,6 +2479,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return '';
   }
 
+  // Retained for future callable-only metadata enrichment; previously used by
+  // removed client-side ride_requests patch path.
+  // ignore: unused_element
   Future<String> _resolveServiceAreaFromPoint(
     LatLng point, {
     required String city,
@@ -4898,135 +4892,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return fallback;
   }
 
-  Future<void> _enrichRideRequestMetadata({
-    required String rideId,
-    required String city,
-    required Map<String, dynamic> pickupPayloadBase,
-    required Map<String, dynamic> destinationPayloadBase,
-    required List<Map<String, dynamic>> orderedStops,
-    required List<Map<String, dynamic>> stops,
-    required List<LatLng> expectedRoutePoints,
-    required RiderFareBreakdown fareBreakdown,
-  }) async {
-    final pickupLocation = _pickupLocation;
-    if (pickupLocation == null || orderedStops.isEmpty) {
-      return;
-    }
-
-    final finalStop = orderedStops.last;
-    final destinationPoint = LatLng(
-      _asDouble(finalStop['lat']) ?? pickupLocation.latitude,
-      _asDouble(finalStop['lng']) ?? pickupLocation.longitude,
-    );
-
-    try {
-      final dispatchMarket = RiderServiceAreaConfig.marketForCity(city).city;
-      final dispatchSlug =
-          normalizeRideMarketSlug(dispatchMarket) ?? dispatchMarket.trim().toLowerCase();
-      final pickupArea = await _resolveServiceAreaFromPoint(
-        pickupLocation,
-        city: dispatchMarket,
-        addressHint: pickupPayloadBase['address']?.toString(),
-      );
-      final destinationArea = await _resolveServiceAreaFromPoint(
-        destinationPoint,
-        city: dispatchMarket,
-        addressHint: destinationPayloadBase['address']?.toString(),
-      );
-      final pickupScope =
-          _buildServiceAreaFields(city: dispatchSlug, area: pickupArea);
-      final destinationScope = _buildServiceAreaFields(
-        city: dispatchSlug,
-        area: destinationArea,
-      );
-      final rideScope =
-          _buildServiceAreaFields(city: dispatchSlug, area: pickupArea);
-      final expectedRoutePayload = expectedRoutePoints
-          .map(
-            (LatLng point) => <String, double>{
-              'lat': point.latitude,
-              'lng': point.longitude,
-            },
-          )
-          .toList();
-      final updates = <String, dynamic>{
-        'market': dispatchSlug,
-        'city': dispatchSlug,
-        RtdbRideRequestFields.marketPool: dispatchSlug,
-        'country': rideScope['country'],
-        'country_code': rideScope['country_code'],
-        'area': rideScope['area'],
-        'zone': rideScope['zone'],
-        'community': rideScope['community'],
-        'pickup_area': pickupScope['area'],
-        'pickup_zone': pickupScope['zone'],
-        'pickup_community': pickupScope['community'],
-        'destination_area': destinationScope['area'],
-        'destination_zone': destinationScope['zone'],
-        'destination_community': destinationScope['community'],
-        'service_area': rideScope,
-        'pickup_scope': pickupScope,
-        'destination_scope': destinationScope,
-        'pickup': <String, dynamic>{...pickupPayloadBase, ...pickupScope},
-        'destination': <String, dynamic>{
-          ...destinationPayloadBase,
-          ...destinationScope,
-        },
-        'distance_km': fareBreakdown.distanceKm,
-        'duration_min': fareBreakdown.durationMin,
-        'fare': fareBreakdown.totalFare,
-        'fare_breakdown': fareBreakdown.toMap(),
-        'route_basis': <String, dynamic>{
-          'country': rideScope['country'],
-          'country_code': rideScope['country_code'],
-          'market': dispatchSlug,
-          'area': rideScope['area'],
-          'zone': rideScope['zone'],
-          'community': rideScope['community'],
-          'pickup_scope': pickupScope,
-          'destination_scope': destinationScope,
-          'pickup_address': pickupPayloadBase['address'],
-          'destination_address': destinationPayloadBase['address'],
-          'stops': stops,
-          'stop_count': orderedStops.length,
-          'distance_km': fareBreakdown.distanceKm,
-          'duration_min': fareBreakdown.durationMin,
-          'fare_estimate': fareBreakdown.totalFare,
-          'fare_breakdown': fareBreakdown.toMap(),
-          'expected_route_points': expectedRoutePayload,
-        },
-        'updated_at': rtdb.ServerValue.timestamp,
-      };
-
-      final snapshot = await _rideRequestsRef.child(rideId).get();
-      final rideData = _asStringDynamicMap(snapshot.value);
-      if (rideData == null ||
-          TripStateMachine.isTerminal(
-            TripStateMachine.canonicalStateFromSnapshot(rideData),
-          )) {
-        return;
-      }
-
-      await _rideRequestsRef.child(rideId).update(updates);
-      if (_currentRideId == rideId && _currentRideSnapshot != null) {
-        _currentRideSnapshot = <String, dynamic>{
-          ..._currentRideSnapshot!,
-          ...updates,
-        };
-      }
-      _logRideFlow(
-        '[RIDER_REQ] metadata_enrich_ok rideId=$rideId city=$city '
-        'market=$dispatchSlug market_pool=$dispatchSlug '
-        '(discovery fields status/trip_state/driver_id untouched by design)',
-      );
-      _logRideFlow('ride request metadata enriched rideId=$rideId city=$city');
-    } catch (error) {
-      _logRideFlow(
-        'ride request metadata enrich failed rideId=$rideId error=$error',
-      );
-    }
-  }
-
   Future<void> _prepareBrowseLocationContext() async {
     try {
       final configuredTestCity = _configuredTestRiderCity;
@@ -5813,27 +5678,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       await _rideListener?.cancel();
       _rideListener = null;
       _activeRideListenerRideId = null;
-
-      rtdb.DatabaseReference? rideRef;
-      for (var attempt = 0; attempt < 3; attempt++) {
-        final nextRef = _rideRequestsRef.push();
-        final nextId = nextRef.key?.trim() ?? '';
-        final isReusableId =
-            nextId.isEmpty ||
-            nextId == _currentRideId?.trim() ||
-            nextId == _pendingRideRequestSubmissionId?.trim();
-        if (!isReusableId) {
-          rideRef = nextRef;
-          rideId = nextId;
-          break;
-        }
-      }
-      if (rideRef == null || rideId == null || rideId.isEmpty) {
-        print('BLOCKED_REASON: ride_id_generation_failed');
-        throw StateError('Unable to create ride id');
-      }
-      _pendingRideRequestSubmissionId = rideId;
-      _logRideFlow('REQUEST RIDE request id created rideId=$rideId');
+      _pendingRideRequestSubmissionId = null;
 
       final stops = _buildIntermediateStopsPayload(orderedStops);
       final stopCount = orderedStops.length;
@@ -5886,7 +5731,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
       final canonicalSeed = <String, dynamic>{
         'service_type': RiderServiceType.ride.key,
-        RtdbRideRequestFields.rideId: rideId,
         'rider_id': user.uid,
         'driver_id': 'waiting',
         // Keep rider discovery seed aligned with driver query and post-filter expectations.
@@ -6022,40 +5866,40 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       searchingPayload['market_pool'] = dispatchMarket;
       rtdbFlowLog(
         '[NEXRIDE_RIDER_RTDB][CREATE_START]',
-        'rideId=$rideId uid=${user.uid} market=$dispatchMarket market_pool=$dispatchMarket',
+        'rideId=pending_callable uid=${user.uid} market=$dispatchMarket market_pool=$dispatchMarket',
       );
       _logRideFlow(
-        '[RIDER_CREATE_START] rideId=$rideId rider_id=${user.uid} '
+        '[RIDER_CREATE_START] rideId=pending_callable rider_id=${user.uid} '
         'market=$dispatchMarket status=${searchingPayload[RtdbRideRequestFields.status]} '
         'trip_state=${searchingPayload[RtdbRideRequestFields.tripState]}',
       );
-      _logRideFlow('createRideRequest before callable rideId=$rideId');
-      _logRideFlow('request payload prepared rideId=$rideId');
+      _logRideFlow('createRideRequest before callable (server assigns ride_id)');
+      _logRideFlow('request payload prepared for callable');
       _logRideFlow('createRideRequest local preview payload=$searchingPayload');
       _logRideFlow(
-        'REQUEST RIDE callable payload rideId=$rideId preview=$searchingPayload',
+        'REQUEST RIDE callable payload preview=$searchingPayload',
       );
       _logRideFlow(
         '[RIDER_CREATE] preview=$searchingPayload',
       );
       _logRideFlow(
-        'REQUEST RIDE createRideRequest started rideId=$rideId',
+        'REQUEST RIDE createRideRequest started (callable)',
       );
       _logRideFlow(
-        '[MATCH_DEBUG][RIDER_CALLABLE_CREATE] rideId=$rideId '
+        '[MATCH_DEBUG][RIDER_CALLABLE_CREATE] '
         'status=${searchingPayload['status']} trip_state=${searchingPayload['trip_state']} '
         'market=${searchingPayload['market']} market_pool=${searchingPayload['market_pool']}',
       );
       if (_rideRequestUserAborted) {
         _logRideFlow(
-          'createRideRequest user aborted before callable rideId=$rideId',
+          'createRideRequest user aborted before callable',
         );
-        await _discardInFlightRideRequestSubmission(rideId: rideId);
+        await _discardInFlightRideRequestSubmission();
         return;
       }
       _showSnackBar(RiderTripStatusMessages.creatingRide);
       _logRideFlow(
-        '[RIDER_REQ] create_pre_callable rideId=$rideId '
+        '[RIDER_REQ] create_pre_callable '
         'market=${searchingPayload['market']} '
         'market_pool=${searchingPayload[RtdbRideRequestFields.marketPool]} '
         'status=${searchingPayload['status']} trip_state=${searchingPayload['trip_state']} '
@@ -6066,12 +5910,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       _logDiscoveryRideRequestPayload(
         'before_callable',
-        rideId,
+        'pending_callable',
         Map<String, dynamic>.from(searchingPayload),
+      );
+      debugPrint(
+        'RIDER_CREATE_CALLABLE_START uid=${user.uid} market=$dispatchMarket '
+        'fare=${fareBreakdown.totalFare} payment=${searchingPayload['payment_method']}',
       );
       final createRes = await _rideCloud
           .createRideRequest(<String, dynamic>{
-            'ride_id': rideId,
             'market': dispatchMarket,
             'pickup': pickupPayload,
             'dropoff': destinationPayload,
@@ -6079,17 +5926,28 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             'currency': 'NGN',
             'distance_km': fareBreakdown.distanceKm,
             'eta_min': fareBreakdown.durationMin,
+            'eta_minutes': fareBreakdown.durationMin,
             'payment_method': searchingPayload['payment_method'],
-            'payment_status':
-                searchingPayload[RtdbRideRequestFields.paymentStatus],
             'expires_at': searchTimeoutAt,
             'service_type': RiderServiceType.ride.key,
             'ride_metadata': rideMetadataSubset(searchingPayload),
           })
           .timeout(const Duration(seconds: 45));
       if (!riderRideCallableSucceeded(createRes)) {
+        debugPrint(
+          'RIDER_CREATE_CALLABLE_FAIL reason=${riderRideCallableReason(createRes)}',
+        );
         throw StateError(riderRideCallableReason(createRes));
       }
+      debugPrint('RIDER_CREATE_CALLABLE_SUCCESS response=$createRes');
+      rideId = _firstNonEmptyText(<dynamic>[
+        createRes['rideId'],
+        createRes['ride_id'],
+      ]);
+      if (rideId.isEmpty) {
+        throw StateError('missing_ride_id_in_create_response');
+      }
+      _pendingRideRequestSubmissionId = rideId;
       final verifySnapshot = await _rideRequestsRef.child(rideId).get().timeout(
             const Duration(seconds: 18),
           );
@@ -6171,9 +6029,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               expectedRoutePoints: expectedRoutePoints,
             )
             .catchError((Object error) {
-              _logRideFlow(
-                'ride request telemetry registration failed rideId=$rideId error=$error',
-              );
+              if (isPermissionDeniedError(error)) {
+                debugPrint(
+                  'RIDER_TELEMETRY_SKIPPED_PERMISSION_DENIED rideId=$rideId',
+                );
+              } else {
+                _logRideFlow(
+                  'ride request telemetry registration failed rideId=$rideId error=$error',
+                );
+              }
             }),
       );
 
@@ -6252,6 +6116,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         }
         return;
       }
+      debugPrint('RIDER_CREATE_CALLABLE_FAIL error=$error');
       _logRideFlow(
         'createRideRequest failed error=$error rideId=${rideId ?? 'unknown'}',
       );
@@ -6451,6 +6316,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         );
         _startCallListener(rideId);
         _applyRideStatus(status);
+        if (previousStatus != status) {
+          debugPrint(
+            'RIDER_RIDE_STATE_UPDATE rideId=$rideId '
+            'from=$previousStatus to=$status '
+            'trip_state=${data['trip_state']} raw_status=${data['status']}',
+          );
+        }
+        if ((previousStatus == 'searching' || previousStatus == 'requested') &&
+            (status == 'assigned' ||
+                status == 'accepted' ||
+                status == 'pending_driver_action' ||
+                status == 'arriving' ||
+                status == 'arrived' ||
+                status == 'on_trip')) {
+          debugPrint(
+            'RIDER_MATCHED_NAVIGATE rideId=$rideId from=$previousStatus to=$status',
+          );
+        }
 
         if (status == 'searching') {
           _scheduleRideSearchTimeout(rideId: rideId, rideData: data);
