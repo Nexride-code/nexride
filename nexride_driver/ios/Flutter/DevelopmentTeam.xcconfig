@@ -1,0 +1,8 @@
+// Signing: Xcode must have a working Apple ID (Xcode > Settings > Accounts). If you see
+// "Unable to log in" or "login details were rejected", remove that account, sign in again,
+// or use an app-specific password when two-factor authentication is enabled.
+//
+// Default = Nexride org team. If your Apple ID is not on that team, create
+// DevelopmentTeam.local.xcconfig (see DevelopmentTeam.local.xcconfig.example) with your
+// Personal Team ID (Xcode > Signing & Capabilities > Team — Option-click to copy Team ID).
+DEVELOPMENT_TEAM = 87DV47FS7T

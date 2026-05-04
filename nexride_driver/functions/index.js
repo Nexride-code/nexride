@@ -144,11 +144,12 @@ exports.createRideRequest = onCall(rideCallOpts, async (request) =>
   ride.createRideRequest(request.data, callableContext(request), db),
 );
 
+// acceptRide and acceptRideRequest both invoke ride.acceptRideRequest (single implementation).
 exports.acceptRide = onCall(rideCallOpts, async (request) =>
   ride.acceptRideRequest(request.data, callableContext(request), db),
 );
 
-/** @deprecated Prefer acceptRide — kept for older client builds */
+/** @deprecated Prefer acceptRide — same handler as exports.acceptRide */
 exports.acceptRideRequest = exports.acceptRide;
 
 exports.driverEnroute = onCall(rideCallOpts, async (request) =>

@@ -295,7 +295,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     'arrived',
     'on_trip',
   };
-  static const Duration _rideChatSendTimeout = Duration(seconds: 8);
+  static const Duration _rideChatSendTimeout = Duration(seconds: 22);
 
   void _logRideFlow(String message) {
     debugPrint('[RiderRTDB] $message');
@@ -1014,9 +1014,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return false;
     }
     final canonical = TripStateMachine.canonicalStateFromSnapshot(snap);
-    return canonical == TripLifecycleState.requested ||
-        canonical == TripLifecycleState.searchingDriver ||
-        canonical == TripLifecycleState.pendingDriverAction;
+    // Only true "pool search" — not driver_assigned (aliases like [pendingDriverAction]
+    // point at the same string as [driverAssigned]).
+    return canonical == TripLifecycleState.searching;
   }
 
   /// Hide the primary ride control during matching so only **Cancel request** shows.
@@ -1060,6 +1060,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   String get _currentDriverIdForRide => _firstNonEmptyText(<dynamic>[
     _driverData?['id'],
     _currentRideSnapshot?['driver_id'],
+    _currentRideSnapshot?['matched_driver_id'],
   ]);
 
   String get _currentDriverNameForRide => _firstNonEmptyText(<dynamic>[
@@ -5934,16 +5935,29 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           })
           .timeout(const Duration(seconds: 45));
       if (!riderRideCallableSucceeded(createRes)) {
-        debugPrint(
-          'RIDER_CREATE_CALLABLE_FAIL reason=${riderRideCallableReason(createRes)}',
-        );
-        throw StateError(riderRideCallableReason(createRes));
+        final reason = riderRideCallableReason(createRes);
+        final recoveredRideId = _firstNonEmptyText(<dynamic>[
+          createRes['rideId'],
+          createRes['ride_id'],
+        ]);
+        debugPrint('RIDER_CREATE_CALLABLE_FAIL reason=$reason');
+        if (reason == 'rider_active_trip' && recoveredRideId.isNotEmpty) {
+          _logRideFlow(
+            '[RIDER_REQ] create_recover_existing_ride '
+            'reason=$reason rideId=$recoveredRideId',
+          );
+          rideId = recoveredRideId;
+          _showSnackBar('You already have an active ride. Resuming it now.');
+        } else {
+          throw StateError(reason);
+        }
+      } else {
+        debugPrint('RIDER_CREATE_CALLABLE_SUCCESS response=$createRes');
+        rideId = _firstNonEmptyText(<dynamic>[
+          createRes['rideId'],
+          createRes['ride_id'],
+        ]);
       }
-      debugPrint('RIDER_CREATE_CALLABLE_SUCCESS response=$createRes');
-      rideId = _firstNonEmptyText(<dynamic>[
-        createRes['rideId'],
-        createRes['ride_id'],
-      ]);
       if (rideId.isEmpty) {
         throw StateError('missing_ride_id_in_create_response');
       }

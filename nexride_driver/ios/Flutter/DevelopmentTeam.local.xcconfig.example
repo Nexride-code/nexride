@@ -1,0 +1,4 @@
+// Copy this file to DevelopmentTeam.local.xcconfig (same folder). That file is gitignored.
+// Set your Apple Developer Team ID so it overrides DevelopmentTeam.xcconfig.
+//
+// DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE

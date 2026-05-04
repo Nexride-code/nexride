@@ -67,6 +67,9 @@
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B091ADEF7B5BE33863C52E8B /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
+		C82D4E5F1A2B3C4D5E6F7080 /* RunnerTests-debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "RunnerTests-debug.xcconfig"; path = "Flutter/RunnerTests-debug.xcconfig"; sourceTree = "<group>"; };
+		C82D4E5F1A2B3C4D5E6F7081 /* RunnerTests-release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "RunnerTests-release.xcconfig"; path = "Flutter/RunnerTests-release.xcconfig"; sourceTree = "<group>"; };
+		C82D4E5F1A2B3C4D5E6F7082 /* RunnerTests-profile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "RunnerTests-profile.xcconfig"; path = "Flutter/RunnerTests-profile.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -113,6 +116,9 @@
 				9740EEB21CF90195004384FC /* Debug.xcconfig */,
 				7AFA3C8E1D35360C0083082E /* Release.xcconfig */,
 				9740EEB31CF90195004384FC /* Generated.xcconfig */,
+				C82D4E5F1A2B3C4D5E6F7080 /* RunnerTests-debug.xcconfig */,
+				C82D4E5F1A2B3C4D5E6F7081 /* RunnerTests-release.xcconfig */,
+				C82D4E5F1A2B3C4D5E6F7082 /* RunnerTests-profile.xcconfig */,
 			);
 			name = Flutter;
 			sourceTree = "<group>";
@@ -164,7 +170,6 @@
 				413FA8494774DD1CCBFB458C /* Pods-RunnerTests.release.xcconfig */,
 				B091ADEF7B5BE33863C52E8B /* Pods-RunnerTests.profile.xcconfig */,
 			);
-			name = Pods;
 			path = Pods;
 			sourceTree = "<group>";
 		};
@@ -492,6 +497,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = 87DV47FS7T;
 				ENABLE_BITCODE = NO;
@@ -500,8 +507,9 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.nexride.driver;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lexemm.nexride.driver;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -510,7 +518,7 @@
 		};
 		331C8088294A63A400263BE5 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 15BEF51668CA8BFDB836C9B8 /* Pods-RunnerTests.debug.xcconfig */;
+			baseConfigurationReference = C82D4E5F1A2B3C4D5E6F7080 /* RunnerTests-debug.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
@@ -528,7 +536,7 @@
 		};
 		331C8089294A63A400263BE5 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 413FA8494774DD1CCBFB458C /* Pods-RunnerTests.release.xcconfig */;
+			baseConfigurationReference = C82D4E5F1A2B3C4D5E6F7081 /* RunnerTests-release.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
@@ -544,7 +552,7 @@
 		};
 		331C808A294A63A400263BE5 /* Profile */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = B091ADEF7B5BE33863C52E8B /* Pods-RunnerTests.profile.xcconfig */;
+			baseConfigurationReference = C82D4E5F1A2B3C4D5E6F7082 /* RunnerTests-profile.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
@@ -675,6 +683,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = 87DV47FS7T;
 				ENABLE_BITCODE = NO;
@@ -683,8 +693,9 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.nexride.driver;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lexemm.nexride.driver;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -698,6 +709,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = 87DV47FS7T;
 				ENABLE_BITCODE = NO;
@@ -706,8 +719,9 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.nexride.driver;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lexemm.nexride.driver;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";

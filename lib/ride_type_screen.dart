@@ -14,6 +14,7 @@ import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_active_trip_session_service.dart';
 import 'support/rider_trust_support.dart';
 import 'support/startup_rtdb_support.dart';
+import 'widgets/rider_highlights_carousel.dart';
 
 class RideTypeScreen extends StatefulWidget {
   const RideTypeScreen({super.key});
@@ -526,7 +527,9 @@ class _RideTypeScreenState extends State<RideTypeScreen>
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 14),
+                RiderHighlightsCarousel(accentColor: _gold),
+                const SizedBox(height: 16),
                 LayoutBuilder(
                   builder: (context, constraints) {
                     final useGrid = constraints.maxWidth >= 380;

@@ -96,7 +96,7 @@ const double _kSuddenStopDropKmh = 22;
 const double _kSuddenStopMinDtSec = 0.35;
 const double _kSuddenStopMaxDtSec = 8;
 const Duration _kDriverMapInitializationTimeout = Duration(seconds: 12);
-const Duration _kRideChatSendTimeout = Duration(seconds: 8);
+const Duration _kRideChatSendTimeout = Duration(seconds: 22);
 const Set<String> _kRenderableRideStatuses = <String>{
   // Reserved-offer popup (driver matched — waiting for ACCEPT tap).
   'pending_driver_action',
@@ -562,21 +562,27 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   }
 
   bool _hasRenderableActiveRideData(Map<String, dynamic>? ride) {
+    // Trip panel is keyed off [_currentRideId]. When the driver is idle this is
+    // null — do not run the render guard (it treats null rideId as corrupt and
+    // schedules [_scheduleStaleRidePurge], which nukes [_currentCandidateRideId]
+    // during an in-flight offer popup).
+    final currentRideId = _currentRideId?.trim();
+    if (currentRideId == null || currentRideId.isEmpty) {
+      return false;
+    }
+
     final canonicalState = TripStateMachine.canonicalStateFromSnapshot(ride);
     if (TripStateMachine.isPendingDriverAssignmentState(canonicalState) &&
         _valueAsText(ride?['driver_id']) == _effectiveDriverId) {
       return false;
     }
 
-    final currentRideId = _currentRideId;
     final hiddenReason = _activeRideRenderGuardReason(
       ride,
       rideId: currentRideId,
     );
     if (hiddenReason != null) {
-      if (currentRideId != null && currentRideId.isNotEmpty) {
-        _logRenderBlocked(rideId: currentRideId, reason: hiddenReason);
-      }
+      _logRenderBlocked(rideId: currentRideId, reason: hiddenReason);
       _logTripPanelHidden('no_valid_active_ride');
       _scheduleStaleRidePurge(
         rideId: currentRideId,
@@ -2180,6 +2186,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     required String? rideId,
     required String reason,
   }) {
+    if (_ridePopupOpenPipelineLocked || _popupOpen || _hasActivePopup) {
+      return;
+    }
+
     if (!_hasLocalRideStateToPurge()) {
       return;
     }
@@ -2196,6 +2206,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _pendingStaleRidePurgeKey = null;
       if (!mounted || !_hasLocalRideStateToPurge()) {
+        return;
+      }
+      if (_ridePopupOpenPipelineLocked || _popupOpen || _hasActivePopup) {
         return;
       }
 
@@ -6894,8 +6907,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     return switch (blockedReason) {
-      'driver_already_set' => 'Ride already taken',
-      'already_taken' => 'Ride already taken',
+      'driver_already_set' => 'Another driver already accepted this request.',
+      'already_taken' => 'Another driver already accepted this request.',
       'assignment_expired' ||
       'expired' ||
       'driver_response_timeout' =>
@@ -6906,7 +6919,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       'driver_session_lost' ||
       'driver_not_ready' =>
         'Your driver session needs to reconnect before you can accept rides.',
-      'ride_missing' => 'Ride already taken',
+      'ride_missing' =>
+        'The server could not lock this trip yet. Please tap Accept again.',
+      'invalid_ride_payload' =>
+        'This ride request is missing required data. Please try again or contact support.',
       'unauthorized' => 'Driver not eligible',
       'invalid_input' => 'Invalid state',
       _ => 'This request is no longer available.',
@@ -6927,6 +6943,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       'status_not_open',
       'payment_not_verified',
       'ride_missing',
+      'invalid_ride_payload',
       'driver_not_eligible',
       'driver_profile_missing',
       'not_available',
@@ -9789,7 +9806,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       try {
         captured[0] = await _listenForRideRequestsImpl(
           reason: reason,
-        ).timeout(const Duration(seconds: 12));
+        ).timeout(const Duration(seconds: 35));
       } catch (error, stackTrace) {
         if (isRealtimeDatabasePermissionDenied(error)) {
           print('RIDE_DISCOVERY_PERMISSION_DENIED');
@@ -9950,9 +9967,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     final repairedMarket = await _ensureDriverProfileForDiscovery(
       preferredMarket: _effectiveDriverMarket ?? _driverCity ?? 'lagos',
       source: 'ride_discovery_listener',
-    ).timeout(const Duration(seconds: 8));
+    ).timeout(const Duration(seconds: 22));
     final driverRef = rtdb.FirebaseDatabase.instance.ref('drivers/$uid');
-    final snap = await driverRef.get().timeout(const Duration(seconds: 8));
+    final snap = await driverRef.get().timeout(const Duration(seconds: 22));
     final snapMap = _asStringDynamicMap(snap.value);
     final runtimeDriverMarketRaw = _valueAsText(snapMap?['market']);
     final runtimeDriverMarketPoolRaw = _valueAsText(snapMap?['market_pool']);
@@ -11945,6 +11962,33 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
   }
 
+  /// Aligns RTDB `drivers/{uid}` presence with the in-session online flag before accept,
+  /// so a read immediately afterward is less likely to show stale `isOnline: false`.
+  Future<void> _syncDriverPresenceForAcceptIfOnline(String driverId) async {
+    if (driverId.isEmpty || !_isOnline) {
+      return;
+    }
+    try {
+      await _driversRef.child(driverId).update(<String, Object?>{
+        'isOnline': true,
+        'is_online': true,
+        'online': true,
+        'isAvailable': true,
+        'available': true,
+        'status': 'available',
+        'dispatch_state': 'available',
+        'last_active_at': rtdb.ServerValue.timestamp,
+        'updated_at': rtdb.ServerValue.timestamp,
+      });
+      _logRideReq(
+        '[ACCEPT_PRESENCE_REFRESH] driverId=$driverId '
+        'keys=isOnline,is_online,online,isAvailable,available,status,dispatch_state,last_active_at',
+      );
+    } catch (error) {
+      _logRideReq('ACCEPT_PRESENCE_REFRESH_FAIL driverId=$driverId error=$error');
+    }
+  }
+
   Future<bool> _acceptRide(
     String rideId, {
     String? driverName,
@@ -12032,6 +12076,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       // is populated with current session credentials.
       await authUser.getIdToken(true);
       final driverId = authUser.uid.trim();
+      await _syncDriverPresenceForAcceptIfOnline(driverId);
       final driverSnapshot = await _driversRef.child(driverId).get();
       final driverRecord = _asStringDynamicMap(driverSnapshot.value);
       final storedUid = _valueAsText(driverRecord?['uid']);
@@ -12039,10 +12084,6 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       final driverProfileMatchesUid =
           (storedUid.isEmpty || storedUid == driverId) &&
               (storedId.isEmpty || storedId == driverId);
-      final callablePayload = <String, dynamic>{
-        'rideId': rideId,
-        'driverId': driverId,
-      };
       _logRideReq(
         '[ACCEPT_PRECHECK] authUid=${authUser.uid} effectiveDriverIdSent=$driverId '
         'driverNodeExists=${driverSnapshot.exists} driverIdField=$storedId '
@@ -12078,12 +12119,26 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         );
         return false;
       }
+      final serviceTypeForAccept = _valueAsText(
+        preflightRideData['service_type'] ?? preflightRideData['serviceType'],
+      ).trim();
+      final callablePayload = <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'requestId': rideId,
+        'tripId': rideId,
+        'driverId': driverId,
+        'driver_id': driverId,
+        'service_type':
+            serviceTypeForAccept.isEmpty ? 'ride' : serviceTypeForAccept,
+      };
       _logRideReq(
         '[ACCEPT_DEBUG_PRE] rideId=$rideId path=ride_requests/$rideId '
         'snapshotExists=${preflightSnapshot?.exists ?? true} '
         'status=${_valueAsText(preflightRideData['status'])} '
         'driver_id=${_valueAsText(preflightRideData['driver_id'])} '
-        'trip_state=${_valueAsText(preflightRideData['trip_state'])}',
+        'trip_state=${_valueAsText(preflightRideData['trip_state'])} '
+        'callable_keys=${callablePayload.keys.join(',')}',
       );
       final simulatedAccept = await _backendSimulation.acceptTrip(
         BackendAcceptRequest(

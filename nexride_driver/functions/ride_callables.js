@@ -63,6 +63,153 @@ function normUid(uid) {
   return String(uid ?? "").trim();
 }
 
+/** Normalize Firebase push-id style keys (trim, unicode dash → ASCII "-"). */
+function normalizeFirebasePushIdKey(raw) {
+  let s = String(raw ?? "").trim();
+  if (!s) return "";
+  s = s.replace(/[\u2013\u2014\u2212]/g, "-");
+  return s.trim();
+}
+
+/**
+ * Resolve ride id from callable payloads (camelCase, snake_case, legacy keys).
+ * @param {Record<string, unknown>|null|undefined} data
+ */
+function normRideIdFromCallableData(data) {
+  const v =
+    data?.rideId ??
+    data?.ride_id ??
+    data?.rideID ??
+    data?.RIDE_ID ??
+    data?.requestId ??
+    data?.request_id ??
+    data?.tripId ??
+    data?.trip_id ??
+    data?.tripID ??
+    data?.rid;
+  return normalizeFirebasePushIdKey(normUid(v));
+}
+
+/**
+ * @param {Record<string, unknown>|null|undefined} data
+ * @param {string} authUid
+ */
+function normDriverIdFromCallableData(data, authUid) {
+  const v = data?.driverId ?? data?.driver_id ?? data?.uid;
+  const fromBody = normUid(v);
+  return fromBody || normUid(authUid);
+}
+
+function acceptPayloadLogString(data) {
+  try {
+    const s = JSON.stringify(data ?? {});
+    return s.length > 6000 ? `${s.slice(0, 6000)}...(truncated)` : s;
+  } catch {
+    return String(data);
+  }
+}
+
+/** @param {{ exists?: unknown }} snap */
+function snapExists(snap) {
+  if (snap == null) return false;
+  if (typeof snap.exists === "function") {
+    return snap.exists();
+  }
+  return Boolean(snap.exists);
+}
+
+/**
+ * Canonical "ride document present" check: val() is a non-null object.
+ * Prefer this over snap.exists alone so we never treat a malformed leaf as missing.
+ * @param {import("firebase-admin/database").DataSnapshot|null|undefined} snap
+ * @returns {object|null}
+ */
+function rideDocFromSnapshot(snap) {
+  if (snap == null) return null;
+  const v = snap.val();
+  if (v == null || typeof v !== "object") return null;
+  return v;
+}
+
+/**
+ * Map internal accept failures to API reasons. Never surface ride_missing when
+ * we already proved ride_requests/{id} holds a ride object (avoids false "missing").
+ * @param {string} internal
+ * @param {boolean} preflightDocPresent
+ */
+function surfaceAcceptFailureReason(internal, preflightDocPresent) {
+  if (
+    preflightDocPresent &&
+    (internal === "ride_missing" || internal === "tx_empty_current")
+  ) {
+    return "not_available";
+  }
+  return internal;
+}
+
+/**
+ * When the RTDB transaction returns empty `current` intermittently, apply the same
+ * accept fields via Admin `update` after a fresh read shows the ride still exists and is open.
+ * @returns {Promise<{ ok: boolean, reason?: string, finalRide?: object|null, idempotent?: boolean }>}
+ */
+async function applyDriverAcceptAdminMerge(rideRef, rideId, driverId, now) {
+  const snap = await rideRef.get();
+  const cur = rideDocFromSnapshot(snap);
+  const exists = cur != null;
+  console.log(
+    "DRIVER_ACCEPT_MERGE_PREFLIGHT",
+    rideId,
+    "exists=",
+    exists,
+    "trip_state=",
+    cur ? String(cur.trip_state ?? "").trim().toLowerCase() : "n/a",
+    "status=",
+    cur ? String(cur.status ?? "").trim().toLowerCase() : "n/a",
+  );
+  if (!exists) {
+    return { ok: false, reason: "ride_missing" };
+  }
+  if (!paymentAllowsDispatch(cur)) {
+    return { ok: false, reason: "payment_not_verified" };
+  }
+  const tripState = String(cur.trip_state ?? "").trim().toLowerCase();
+  const status = String(cur.status ?? "").trim().toLowerCase();
+  const assignedCanon = canonicalAssignedDriverId(cur);
+  const already =
+    assignedCanon === driverId &&
+    (tripState === TRIP_STATE.accepted ||
+      tripState === TRIP_STATE.driver_assigned ||
+      tripState === "driver_accepted" ||
+      status === "accepted");
+  if (already) {
+    return { ok: true, finalRide: cur, idempotent: true };
+  }
+  if (assignedCanon && assignedCanon !== driverId) {
+    return { ok: false, reason: "driver_already_set" };
+  }
+  const openByTrip = isOpenPoolRide(cur);
+  const openByStatus = ACCEPTABLE_OPEN_STATUS.has(status);
+  if (!openByTrip && !openByStatus) {
+    return { ok: false, reason: "status_not_open" };
+  }
+  const expiresAt = Number(cur.expires_at ?? cur.request_expires_at ?? 0) || 0;
+  if (expiresAt > 0 && now >= expiresAt) {
+    return { ok: false, reason: "expired" };
+  }
+  await rideRef.update({
+    driver_id: driverId,
+    matched_driver_id: driverId,
+    accepted_driver_id: driverId,
+    status: "accepted",
+    trip_state: TRIP_STATE.accepted,
+    accepted_at: ServerValue.TIMESTAMP,
+    updated_at: now,
+  });
+  const postSnap = await rideRef.get();
+  const post = rideDocFromSnapshot(postSnap) ?? cur;
+  return { ok: true, finalRide: post, idempotent: false };
+}
+
 /** Single canonical dispatch key shared by ride_requests.market_pool and drivers.dispatch_market. */
 function canonicalDispatchMarket(raw) {
   return String(raw ?? "")
@@ -74,6 +221,12 @@ function canonicalDispatchMarket(raw) {
 
 function nowMs() {
   return Date.now();
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function auditRef(db) {
@@ -95,8 +248,35 @@ function isPlaceholderDriverId(v) {
     s.length === 0 ||
     s === "waiting" ||
     s === "pending" ||
-    s === "null"
+    s === "null" ||
+    s === "none" ||
+    s === "unassigned" ||
+    s === "n/a" ||
+    s === "tbd"
   );
+}
+
+/**
+ * Canonical assigned driver on `ride_requests` for accept / conflict checks.
+ * Ignores placeholders, camelCase alias, and corrupt values where driver_id === rider_id.
+ */
+function canonicalAssignedDriverId(ride) {
+  if (!ride || typeof ride !== "object") {
+    return "";
+  }
+  const rider = normUid(ride.rider_id ?? ride.riderId);
+  const raw = ride.driver_id ?? ride.driverId;
+  if (isPlaceholderDriverId(raw)) {
+    return "";
+  }
+  const d = normUid(raw);
+  if (!d) {
+    return "";
+  }
+  if (rider && d === rider) {
+    return "";
+  }
+  return d;
 }
 
 function isOpenPoolRide(ride) {
@@ -136,6 +316,8 @@ function needsFlutterwavePaymentProof(ride) {
 const ACCEPTABLE_OPEN_STATUS = new Set([
   "searching",
   "requesting",
+  "matching",
+  "awaiting_match",
   "pending_driver_acceptance",
 ]);
 
@@ -220,21 +402,25 @@ async function riderProfileRequirementOk(db, riderId, gates, authLike) {
   }
 }
 
-async function clearFanoutAndOffers(db, rideId) {
+async function clearFanoutAndOffers(db, rideId, alsoDriverId = "") {
   const rid = normUid(rideId);
   if (!rid) return;
+  const updates = {};
+  const d0 = normUid(alsoDriverId);
+  if (d0) {
+    updates[`driver_offer_queue/${d0}/${rid}`] = null;
+    updates[`driver_offer_queue_debug/${d0}/${rid}`] = null;
+  }
   const snap = await db.ref(`ride_offer_fanout/${rid}`).get();
   const val = snap.val();
-  if (!val || typeof val !== "object") {
-    return;
-  }
-  const updates = {};
-  for (const driverId of Object.keys(val)) {
-    const d = normUid(driverId);
-    if (!d) continue;
-    updates[`driver_offer_queue/${d}/${rid}`] = null;
-    updates[`driver_offer_queue_debug/${d}/${rid}`] = null;
-    updates[`ride_offer_fanout/${rid}/${d}`] = null;
+  if (val && typeof val === "object") {
+    for (const driverId of Object.keys(val)) {
+      const d = normUid(driverId);
+      if (!d) continue;
+      updates[`driver_offer_queue/${d}/${rid}`] = null;
+      updates[`driver_offer_queue_debug/${d}/${rid}`] = null;
+      updates[`ride_offer_fanout/${rid}/${d}`] = null;
+    }
   }
   if (Object.keys(updates).length) {
     await db.ref().update(updates);
@@ -671,6 +857,9 @@ async function setActiveTripPointers(db, rideId, riderId, driverId, rideSummary)
     },
     [`driver_active_ride/${d}`]: { ride_id: rid, updated_at: now },
   });
+  console.log("ACTIVE_TRIP_CREATED", rid, "rider=", r, "driver=", d);
+  console.log("RIDER_ACTIVE_RIDE_UPDATED", r, "ride_id=", rid);
+  console.log("DRIVER_ACTIVE_RIDE_UPDATED", d, "ride_id=", rid);
 }
 
 async function clearActiveTripPointers(db, rideId, riderId, driverId) {
@@ -946,29 +1135,104 @@ async function createRideRequest(data, context, db) {
 }
 
 async function acceptRideRequest(data, context, db) {
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  console.log("DRIVER_ACCEPT_CALL_RECEIVED");
+  console.log("DRIVER_ACCEPT_PAYLOAD", acceptPayloadLogString(data));
+
+  const rideId = normRideIdFromCallableData(data);
   const authUid = normUid(context.auth?.uid);
-  const driverId = normUid(data?.driverId ?? data?.driver_id) || authUid;
+  const driverId = normDriverIdFromCallableData(data, authUid);
+
+  let dbUrl = "";
+  try {
+    dbUrl = String(db.app?.options?.databaseURL ?? "");
+  } catch (_) {
+    dbUrl = "";
+  }
+  console.log("DRIVER_ACCEPT_DB_URL", dbUrl || "(default)");
 
   console.log("DRIVER_ACCEPT_START", rideId, driverId);
 
   if (!rideId || !driverId) {
+    console.log("DRIVER_ACCEPT_FAIL_REASON", rideId || "(empty)", "invalid_input");
     return { success: false, reason: "invalid_input" };
   }
   if (!context.auth || authUid !== driverId) {
-    console.log("DRIVER_ACCEPT_FAIL", rideId, "unauthorized");
+    console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "unauthorized");
     return { success: false, reason: "unauthorized" };
   }
 
-  const rideRef = db.ref(`ride_requests/${rideId}`);
-  const preSnap = await rideRef.get();
-  const pre = preSnap.val();
+  const rawKeys =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? Object.keys(data).join(",")
+      : "";
+  console.log(
+    "DRIVER_ACCEPT_INPUT",
+    `rideId=${rideId}`,
+    `driverId=${driverId}`,
+    `rawKeys=${rawKeys}`,
+  );
+
+  const ridePath = `ride_requests/${rideId}`;
+  const rideRef = db.ref(ridePath);
+  console.log("DRIVER_ACCEPT_RIDE_LOOKUP_PATH", ridePath);
+
+  let preflightDocPresent = false;
+  let preSnap = await rideRef.get();
+  let pre = rideDocFromSnapshot(preSnap);
+  if (!pre) {
+    preSnap = await rideRef.get();
+    pre = rideDocFromSnapshot(preSnap);
+  }
+  preflightDocPresent = Boolean(pre);
+  const preTrip0 = pre ? String(pre.trip_state ?? "").trim().toLowerCase() : "";
+  const preStatus0 = pre ? String(pre.status ?? "").trim().toLowerCase() : "";
+  console.log(
+    "DRIVER_ACCEPT_READ",
+    `path=${ridePath}`,
+    `doc_present=${preflightDocPresent}`,
+    `trip_state=${preTrip0}`,
+    `status=${preStatus0}`,
+  );
+  if (!pre) {
+    console.log(
+      "DRIVER_ACCEPT_FAIL_REASON",
+      rideId,
+      "ride_missing",
+      "ride_read_missing_after_retry",
+    );
+    return { success: false, reason: "ride_missing" };
+  }
+
+  const riderPrecheck = normUid(pre.rider_id ?? pre.riderId);
+  if (!riderPrecheck) {
+    console.log(
+      "DRIVER_ACCEPT_INVALID_RIDE",
+      rideId,
+      "reason=invalid_ride_payload",
+      "missing_field=rider_id",
+    );
+    return { success: false, reason: "invalid_ride_payload" };
+  }
+
   const preTrip = String(pre?.trip_state ?? "").trim().toLowerCase();
   const preStatus = String(pre?.status ?? "").trim().toLowerCase();
+  console.log(
+    "DRIVER_ACCEPT_PRE",
+    rideId,
+    "raw_driver_id=",
+    pre?.driver_id,
+    "canonical_assigned=",
+    canonicalAssignedDriverId(pre || {}),
+    "trip_state=",
+    preTrip,
+    "status=",
+    preStatus,
+  );
+  const preAssigned = canonicalAssignedDriverId(pre || {});
   const alreadyMine =
     pre &&
     typeof pre === "object" &&
-    normUid(pre.driver_id) === driverId &&
+    preAssigned === driverId &&
     (preTrip === TRIP_STATE.accepted ||
       preTrip === TRIP_STATE.driver_assigned ||
       preTrip === "driver_accepted" ||
@@ -983,14 +1247,15 @@ async function acceptRideRequest(data, context, db) {
   const drvSnap = await db.ref(`drivers/${driverId}`).get();
   const drvProf = drvSnap.val();
   if (!drvProf || typeof drvProf !== "object") {
-    console.log("DRIVER_ACCEPT_FAIL", rideId, "driver_profile_missing");
+    console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "driver_profile_missing");
     return { success: false, reason: "driver_profile_missing" };
   }
   const el = evaluateDriverForOffer(drvProf, gates, pre || {});
   if (!el.ok) {
     console.log(
-      "DRIVER_ACCEPT_FAIL",
+      "DRIVER_ACCEPT_FAIL_REASON",
       rideId,
+      "driver_not_eligible",
       el.log || "verification_gate",
       el.detail,
     );
@@ -998,115 +1263,260 @@ async function acceptRideRequest(data, context, db) {
   }
 
   const offerSnap = await db.ref(`driver_offer_queue/${driverId}/${rideId}`).get();
-  if (!offerSnap.exists()) {
-    return { success: false, reason: "no_offer" };
-  }
-  const offer = offerSnap.val();
-  if (offer && String(offer.status ?? "").trim().toLowerCase() === "withdrawn") {
-    return { success: false, reason: "offer_withdrawn" };
-  }
+  const offerPresent = snapExists(offerSnap);
+  if (!offerPresent) {
+    const st0 = String(pre?.status ?? "").trim().toLowerCase();
+    const openForAccept =
+      isOpenPoolRide(pre || {}) || ACCEPTABLE_OPEN_STATUS.has(st0);
+    const driverSlotFree = !canonicalAssignedDriverId(pre || {});
+    if (
+      !(
+        openForAccept &&
+        driverSlotFree &&
+        paymentAllowsDispatch(pre || {})
+      )
+    ) {
+      console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "no_offer");
+      return { success: false, reason: "no_offer" };
+    }
+    console.log(
+      "DRIVER_ACCEPT_OFFER_SKIPPED",
+      rideId,
+      driverId,
+      "reason=no_queue_row_open_ride",
+    );
+  } else {
+    const offer = offerSnap.val();
+    if (offer && String(offer.status ?? "").trim().toLowerCase() === "withdrawn") {
+      console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "offer_withdrawn");
+      return { success: false, reason: "offer_withdrawn" };
+    }
 
-  const offerRid = normUid(offer?.ride_id);
-  if (offerRid && offerRid !== rideId) {
-    return { success: false, reason: "offer_ride_mismatch" };
-  }
-  const offerMarket = canonicalDispatchMarket(offer?.market ?? "");
-  const rideMarket = canonicalDispatchMarket(
-    pre?.market_pool ?? pre?.market ?? "",
-  );
-  if (!offerMarket || !rideMarket || offerMarket !== rideMarket) {
-    return { success: false, reason: "offer_market_mismatch" };
+    const offerRid = normUid(offer?.ride_id);
+    if (offerRid && offerRid !== rideId) {
+      console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "offer_ride_mismatch");
+      return { success: false, reason: "offer_ride_mismatch" };
+    }
+    const offerMarket = canonicalDispatchMarket(offer?.market ?? "");
+    const rideMarket = canonicalDispatchMarket(
+      pre?.market_pool ?? pre?.market ?? "",
+    );
+    if (!offerMarket || !rideMarket || offerMarket !== rideMarket) {
+      console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "offer_market_mismatch");
+      return { success: false, reason: "offer_market_mismatch" };
+    }
   }
 
   if (!paymentAllowsDispatch(pre || {})) {
+    console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "payment_not_verified");
     return { success: false, reason: "payment_not_verified" };
   }
 
   const now = nowMs();
-  let failureReason = "unknown";
+  const lastFailure = { reason: "unknown" };
+  const maxTxAttempts = 8;
+  let tx = null;
+  let committed = false;
 
-  const tx = await rideRef.transaction((current) => {
-    if (!current || typeof current !== "object") {
-      failureReason = "ride_missing";
-      return;
+  console.log("DRIVER_ACCEPT_TX_BEGIN", rideId, driverId);
+
+  for (let attempt = 1; attempt <= maxTxAttempts; attempt++) {
+    const warmSnap = await rideRef.get();
+    const warmVal = rideDocFromSnapshot(warmSnap);
+    if (!warmVal) {
+      lastFailure.reason = "ride_missing";
+      console.log(
+        "DRIVER_ACCEPT_WARM_MISSING",
+        rideId,
+        "attempt=",
+        attempt,
+        "doc_present=false",
+        "snap_exists_fn=",
+        typeof warmSnap?.exists === "function" ? warmSnap.exists() : warmSnap?.exists,
+      );
+      break;
     }
 
-    if (!paymentAllowsDispatch(current)) {
-      failureReason = "payment_not_verified";
-      return;
+    const attemptResult = await rideRef.transaction((current) => {
+      lastFailure.reason = "unknown";
+      if (!current || typeof current !== "object") {
+        lastFailure.reason = "tx_empty_current";
+        return;
+      }
+
+      if (!paymentAllowsDispatch(current)) {
+        lastFailure.reason = "payment_not_verified";
+        return;
+      }
+
+      const tripState = String(current.trip_state ?? "").trim().toLowerCase();
+      const status = String(current.status ?? "").trim().toLowerCase();
+      const assignedCanon = canonicalAssignedDriverId(current);
+
+      const already =
+        assignedCanon === driverId &&
+        (tripState === TRIP_STATE.accepted ||
+          tripState === TRIP_STATE.driver_assigned ||
+          tripState === "driver_accepted" ||
+          status === "accepted");
+      if (already) {
+        return current;
+      }
+
+      if (assignedCanon && assignedCanon !== driverId) {
+        lastFailure.reason = "driver_already_set";
+        return;
+      }
+
+      const openByTrip = isOpenPoolRide(current);
+      const openByStatus = ACCEPTABLE_OPEN_STATUS.has(status);
+      if (!openByTrip && !openByStatus) {
+        lastFailure.reason = "status_not_open";
+        return;
+      }
+
+      const expiresAt = Number(current.expires_at ?? current.request_expires_at ?? 0) || 0;
+      if (expiresAt > 0 && now >= expiresAt) {
+        lastFailure.reason = "expired";
+        return;
+      }
+
+      return {
+        ...current,
+        driver_id: driverId,
+        matched_driver_id: driverId,
+        accepted_driver_id: driverId,
+        status: "accepted",
+        trip_state: TRIP_STATE.accepted,
+        accepted_at: ServerValue.TIMESTAMP,
+        updated_at: now,
+      };
+    });
+
+    tx = attemptResult.snapshot;
+    committed = Boolean(attemptResult.committed);
+    if (committed) {
+      console.log("DRIVER_ACCEPT_TX_SUCCESS", rideId, driverId, "path=transaction");
+      break;
     }
 
-    const tripState = String(current.trip_state ?? "").trim().toLowerCase();
-    const status = String(current.status ?? "").trim().toLowerCase();
-    const rawDriverId = current.driver_id;
-    const assigned = normUid(rawDriverId);
-
-    const already =
-      assigned === driverId &&
-      (tripState === TRIP_STATE.accepted ||
-        tripState === TRIP_STATE.driver_assigned ||
-        tripState === "driver_accepted" ||
-        status === "accepted");
-    if (already) {
-      return current;
+    if (lastFailure.reason !== "ride_missing" && lastFailure.reason !== "tx_empty_current") {
+      break;
     }
 
-    if (!isPlaceholderDriverId(rawDriverId) && assigned !== driverId) {
-      failureReason = "driver_already_set";
-      return;
-    }
-
-    const openByTrip = isOpenPoolRide(current);
-    const openByStatus = ACCEPTABLE_OPEN_STATUS.has(status);
-    if (!openByTrip && !openByStatus) {
-      failureReason = "status_not_open";
-      return;
-    }
-
-    const expiresAt = Number(current.expires_at ?? current.request_expires_at ?? 0) || 0;
-    if (expiresAt > 0 && now >= expiresAt) {
-      failureReason = "expired";
-      return;
-    }
-
-    return {
-      ...current,
-      driver_id: driverId,
-      matched_driver_id: driverId,
-      accepted_driver_id: driverId,
-      status: "accepted",
-      trip_state: TRIP_STATE.accepted,
-      accepted_at: now,
-      updated_at: now,
-    };
-  });
-
-  if (!tx.committed) {
-    if (failureReason === "driver_already_set") {
-      console.log("DRIVER_ACCEPT_ALREADY_TAKEN", rideId);
-    }
-    const apiReason =
-      failureReason === "driver_already_set" ? "already_taken" : failureReason === "unknown" ? "not_available" : failureReason;
     console.log(
-      "DRIVER_ACCEPT_FAIL",
+      "DRIVER_ACCEPT_TX_RETRY",
       rideId,
-      apiReason,
+      "attempt=",
+      attempt,
+      "max=",
+      maxTxAttempts,
+      "reason=transaction_saw_empty_while_warm_had_data",
     );
+    await sleepMs(Math.min(150, 35 * attempt));
+  }
+
+  let failureReason = lastFailure.reason;
+  let finalRideVal = null;
+
+  if (committed && tx && typeof tx.val === "function") {
+    finalRideVal = rideDocFromSnapshot(tx);
+  }
+
+  if (
+    !committed &&
+    (failureReason === "ride_missing" ||
+      failureReason === "tx_empty_current" ||
+      failureReason === "unknown")
+  ) {
+    console.log("DRIVER_ACCEPT_MERGE_FALLBACK", rideId, "tx_reason=", failureReason);
+    const merge = await applyDriverAcceptAdminMerge(rideRef, rideId, driverId, now);
+    if (merge.ok && merge.idempotent) {
+      console.log("DRIVER_ACCEPT_TX_SUCCESS", rideId, driverId, "path=admin_merge_idempotent");
+      await syncRideTrackPublic(db, rideId);
+      return { success: true, idempotent: true, reason: "already_accepted" };
+    }
+    if (merge.ok) {
+      committed = true;
+      finalRideVal = merge.finalRide ?? null;
+      failureReason = "unknown";
+      console.log("DRIVER_ACCEPT_TX_SUCCESS", rideId, driverId, "path=admin_merge");
+    } else {
+      failureReason = merge.reason || failureReason;
+      console.log("DRIVER_ACCEPT_MERGE_FAIL", rideId, failureReason);
+    }
+  }
+
+  if (!committed) {
+    console.log("DRIVER_ACCEPT_TX_ABORT", rideId, "reason=", failureReason);
+    if (failureReason === "driver_already_set") {
+      const postSnap = await rideRef.get();
+      const post = rideDocFromSnapshot(postSnap);
+      console.log(
+        "DRIVER_ACCEPT_ALREADY_TAKEN",
+        rideId,
+        "driver=",
+        driverId,
+        "winner_canonical=",
+        canonicalAssignedDriverId(post || {}),
+        "raw_driver_id=",
+        post?.driver_id,
+        "trip_state=",
+        post ? String(post.trip_state ?? "").trim().toLowerCase() : "",
+      );
+    }
+    const rawReason =
+      failureReason === "driver_already_set"
+        ? "already_taken"
+        : failureReason === "unknown"
+          ? "not_available"
+          : failureReason;
+    const apiReason = surfaceAcceptFailureReason(rawReason, preflightDocPresent);
+    if (rawReason !== apiReason) {
+      console.log(
+        "DRIVER_ACCEPT_SURFACE_NOT_MISSING",
+        rideId,
+        "inner=",
+        rawReason,
+        "surface=",
+        apiReason,
+      );
+    }
+    console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, apiReason);
+    console.log("DRIVER_ACCEPT_FAIL", rideId, apiReason);
     return {
       success: false,
       reason: apiReason,
     };
   }
 
-  console.log("DRIVER_ACCEPT_TX_SUCCESS", rideId, driverId);
+  if (!finalRideVal || typeof finalRideVal !== "object") {
+    const postSnap = await rideRef.get();
+    finalRideVal = rideDocFromSnapshot(postSnap);
+    console.log(
+      "DRIVER_ACCEPT_FINAL_RIDE_FALLBACK_GET",
+      rideId,
+      "ok=",
+      Boolean(finalRideVal && typeof finalRideVal === "object"),
+    );
+  }
 
-  const finalRide = tx.snapshot.val();
-  const riderId = normUid(finalRide?.rider_id);
-  await clearFanoutAndOffers(db, rideId);
-  await setActiveTripPointers(db, rideId, riderId, driverId, finalRide);
+  const riderId = normUid(finalRideVal?.rider_id ?? finalRideVal?.riderId);
+  if (!riderId) {
+    console.log(
+      "DRIVER_ACCEPT_INVALID_RIDE",
+      rideId,
+      "reason=invalid_ride_payload",
+      "missing_field=rider_id",
+      "phase=post_commit",
+    );
+    return { success: false, reason: "invalid_ride_payload" };
+  }
+
+  await clearFanoutAndOffers(db, rideId, driverId);
+  await setActiveTripPointers(db, rideId, riderId, driverId, finalRideVal);
 
   await ensureRideChatThread(db, rideId, riderId, driverId);
-  console.log("ACTIVE_TRIP_CREATED", rideId);
 
   await writeAudit(db, {
     type: "ride_accept",
@@ -1125,7 +1535,7 @@ async function acceptRideRequest(data, context, db) {
 }
 
 async function driverEnroute(data, context, db) {
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const rideId = normRideIdFromCallableData(data);
   const driverId = normUid(context.auth?.uid);
   if (!rideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
@@ -1171,7 +1581,7 @@ async function driverEnroute(data, context, db) {
 }
 
 async function driverArrived(data, context, db) {
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const rideId = normRideIdFromCallableData(data);
   const driverId = normUid(context.auth?.uid);
   if (!rideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
@@ -1213,7 +1623,7 @@ async function driverArrived(data, context, db) {
 }
 
 async function startTrip(data, context, db) {
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const rideId = normRideIdFromCallableData(data);
   const driverId = normUid(context.auth?.uid);
   if (!rideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
@@ -1260,7 +1670,7 @@ async function startTrip(data, context, db) {
 }
 
 async function completeTrip(data, context, db) {
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const rideId = normRideIdFromCallableData(data);
   const driverId = normUid(context.auth?.uid);
   if (!rideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
@@ -1395,7 +1805,7 @@ async function completeTrip(data, context, db) {
 }
 
 async function cancelRideRequest(data, context, db) {
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const rideId = normRideIdFromCallableData(data);
   const cancelReason = String(data?.cancel_reason ?? data?.cancelReason ?? "").trim();
   if (!rideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
@@ -1470,7 +1880,7 @@ async function cancelRideRequest(data, context, db) {
 }
 
 async function expireRideRequest(data, context, db) {
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const rideId = normRideIdFromCallableData(data);
   if (!rideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
   }
@@ -1559,7 +1969,7 @@ async function patchRideRequestMetadata(data, context, db) {
   if (!context.auth) {
     return { success: false, reason: "unauthorized" };
   }
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const rideId = normRideIdFromCallableData(data);
   const patch = data?.patch && typeof data.patch === "object" ? data.patch : {};
   if (!rideId || Object.keys(patch).length === 0) {
     return { success: false, reason: "invalid_input" };

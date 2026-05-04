@@ -49,7 +49,7 @@
     },
     "active_trips": {
       "$rideId": {
-        ".read": "auth != null && (data.child('rider_id').val() === auth.uid || data.child('driver_id').val() === auth.uid)",
+        ".read": "auth != null && (data.child('rider_id').val() === auth.uid || data.child('driver_id').val() === auth.uid || data.child('matched_driver_id').val() === auth.uid)",
         ".write": false
       }
     },
@@ -96,8 +96,8 @@
     },
     "ride_chats": {
       "$rideId": {
-        ".read": "auth != null && (root.child('ride_requests').child($rideId).child('rider_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('driver_id').val() === auth.uid)",
-        ".write": "auth != null && (root.child('ride_requests').child($rideId).child('rider_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('driver_id').val() === auth.uid)"
+        ".read": "auth != null && (root.child('ride_requests').child($rideId).child('rider_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('driver_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('matched_driver_id').val() === auth.uid)",
+        ".write": "auth != null && (root.child('ride_requests').child($rideId).child('rider_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('driver_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('matched_driver_id').val() === auth.uid)"
       }
     },
     "calls": {
@@ -165,8 +165,8 @@
     },
     "trip_route_logs": {
       "$rideId": {
-        ".read": "auth != null && (root.child('ride_requests').child($rideId).child('rider_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('driver_id').val() === auth.uid || root.child('admins').child(auth.uid).val() === true)",
-        ".write": "auth != null && root.child('ride_requests').child($rideId).child('driver_id').val() === auth.uid"
+        ".read": "auth != null && (root.child('ride_requests').child($rideId).child('rider_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('driver_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('matched_driver_id').val() === auth.uid || root.child('admins').child(auth.uid).val() === true)",
+        ".write": "auth != null && (root.child('ride_requests').child($rideId).child('rider_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('driver_id').val() === auth.uid || root.child('ride_requests').child($rideId).child('matched_driver_id').val() === auth.uid || root.child('admins').child(auth.uid).val() === true)"
       }
     },
     "admin_rides": {

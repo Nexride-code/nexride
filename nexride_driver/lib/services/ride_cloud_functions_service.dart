@@ -30,6 +30,9 @@ class RideCloudFunctionsService {
   Future<Map<String, dynamic>> acceptRide({required String rideId}) =>
       _call('acceptRide', <String, dynamic>{
         'rideId': rideId,
+        'ride_id': rideId,
+        'requestId': rideId,
+        'tripId': rideId,
       });
 
   /// @deprecated Prefer [acceptRide] — [driverId] is ignored; auth uid is used.
@@ -100,6 +103,14 @@ class RideCloudFunctionsService {
       _call('verifyFlutterwavePayment', <String, dynamic>{
         'rideId': rideId,
         'reference': reference,
+      });
+
+  Future<Map<String, dynamic>> getRideCallRtcToken({required String rideId}) =>
+      _call('getRideCallRtcToken', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'requestId': rideId,
+        'tripId': rideId,
       });
 }
 

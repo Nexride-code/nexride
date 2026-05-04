@@ -63,6 +63,15 @@ class RiderRideCloudFunctionsService {
         'rideId': rideId,
         'patch': patch,
       });
+
+  /// Agora RTC token (same backend as driver app).
+  Future<Map<String, dynamic>> getRideCallRtcToken({required String rideId}) =>
+      _call('getRideCallRtcToken', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'requestId': rideId,
+        'tripId': rideId,
+      });
 }
 
 bool riderRideCallableSucceeded(Map<String, dynamic>? response) =>

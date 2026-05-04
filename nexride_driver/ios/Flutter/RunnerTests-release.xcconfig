@@ -1,0 +1,3 @@
+#include? "../Pods/Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"
+#include "DevelopmentTeam.xcconfig"
+#include? "DevelopmentTeam.local.xcconfig"

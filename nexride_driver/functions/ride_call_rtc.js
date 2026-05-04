@@ -6,6 +6,28 @@ function normUid(uid) {
   return String(uid ?? "").trim();
 }
 
+function normalizeFirebasePushIdKey(raw) {
+  let s = String(raw ?? "").trim();
+  if (!s) return "";
+  s = s.replace(/[\u2013\u2014\u2212]/g, "-");
+  return s.trim();
+}
+
+function normRideIdFromCallableData(data) {
+  const v =
+    data?.rideId ??
+    data?.ride_id ??
+    data?.rideID ??
+    data?.RIDE_ID ??
+    data?.rid ??
+    data?.requestId ??
+    data?.request_id ??
+    data?.tripId ??
+    data?.trip_id ??
+    data?.tripID;
+  return normalizeFirebasePushIdKey(normUid(v));
+}
+
 function deterministicRtcUid(uid) {
   const s = String(uid || "");
   let h = 1;
@@ -23,7 +45,7 @@ async function getRideCallRtcToken(data, context, db) {
     return { success: false, reason: "unauthorized" };
   }
 
-  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const rideId = normRideIdFromCallableData(data);
   if (!rideId) {
     console.log("CALL_TOKEN_DENIED", "invalid_ride_id");
     return { success: false, reason: "invalid_ride_id" };
@@ -37,10 +59,14 @@ async function getRideCallRtcToken(data, context, db) {
   }
 
   const rider = normUid(ride.rider_id);
-  const driver = normUid(ride.driver_id);
+  const rawDriverId = String(ride.driver_id ?? "").trim();
+  let driver = normUid(ride.driver_id);
   const waiting = ["waiting", "pending", "", "null"];
-  const dLower = String(ride.driver_id ?? "").trim().toLowerCase();
+  const dLower = rawDriverId.toLowerCase();
   if (!driver || waiting.includes(dLower)) {
+    driver = normUid(ride.matched_driver_id);
+  }
+  if (!driver || waiting.includes(driver.toLowerCase())) {
     console.log("CALL_TOKEN_DENIED", rideId, "no_driver_assigned");
     return { success: false, reason: "no_driver_assigned" };
   }
