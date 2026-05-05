@@ -54,6 +54,13 @@ dependency_overrides:
   agora_rtc_engine:
     path: third_party/agora_rtc_engine
 
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/branding/nexride_app_icon.png
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: assets/branding/nexride_app_icon.png
+
 flutter:
 
   uses-material-design: true
@@ -61,11 +68,4 @@ flutter:
   assets:
   - assets/car.png
   - assets/animations/
-  - assets/branding/nexride_launcher.png
-
-flutter_launcher_icons:
-  android: true
-  ios: true
-  image_path: assets/branding/nexride_launcher.png
-  adaptive_icon_background: "#0D0D0D"
-  adaptive_icon_foreground: assets/branding/nexride_launcher.png
+  - assets/branding/nexride_app_icon.png

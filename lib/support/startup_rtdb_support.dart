@@ -123,6 +123,71 @@ Future<Map<String, dynamic>> readUserProfileWithFallback({
   return legacyMap;
 }
 
+/// Ensures [users] and [riders] have a minimal record so login can proceed even
+/// when full trust-bootstrap multi-path writes fail (e.g. strict RTDB rules).
+Future<void> persistMinimalRiderProfileBestEffort({
+  required rtdb.DatabaseReference rootRef,
+  required String riderId,
+  required String email,
+  required String displayNameFallback,
+  required String source,
+}) async {
+  final uid = riderId.trim();
+  if (uid.isEmpty) {
+    return;
+  }
+
+  final usersRef = rootRef.child('users/$uid');
+  final ridersRef = rootRef.child('riders/$uid');
+
+  try {
+    final userSnap = await runOptionalStartupRead<rtdb.DataSnapshot>(
+      source: '$source.minimal_users_check',
+      path: 'users/$uid',
+      action: () => usersRef.get(),
+    );
+    final userExists = userSnap?.exists ?? false;
+    final riderSnap = await runOptionalStartupRead<rtdb.DataSnapshot>(
+      source: '$source.minimal_riders_check',
+      path: 'riders/$uid',
+      action: () => ridersRef.get(),
+    );
+    final riderExists = riderSnap?.exists ?? false;
+
+    await usersRef.update(<String, Object?>{
+      'uid': uid,
+      'email': email,
+      'role': 'rider',
+      'status': 'active',
+      'updated_at': rtdb.ServerValue.timestamp,
+      if (!userExists) ...<String, Object?>{
+        'created_at': rtdb.ServerValue.timestamp,
+      },
+      if (displayNameFallback.trim().isNotEmpty)
+        'name': displayNameFallback.trim(),
+    });
+
+    await ridersRef.update(<String, Object?>{
+      'uid': uid,
+      'email': email,
+      'role': 'rider',
+      'status': 'active',
+      'updated_at': rtdb.ServerValue.timestamp,
+      if (!riderExists) ...<String, Object?>{
+        'created_at': rtdb.ServerValue.timestamp,
+      },
+    });
+  } catch (error, stackTrace) {
+    debugPrint(
+      '[RiderMinimalBootstrap] source=$source uid=$uid FAILED error=$error',
+    );
+    debugPrintStack(
+      label: '[RiderMinimalBootstrap] stack',
+      stackTrace: stackTrace,
+    );
+  }
+}
+
 Future<bool> hasRiderBootstrapArtifacts({
   required rtdb.DatabaseReference rootRef,
   required String riderId,
@@ -147,68 +212,6 @@ Future<bool> hasRiderBootstrapArtifacts({
   ]);
 
   return (snapshots[0]?.exists ?? false) && (snapshots[1]?.exists ?? false);
-}
-
-/// Writes a minimal rider row when full trust/bootstrap writes fail so login can proceed offline-first.
-Future<void> persistRiderMinimalPresence({
-  required rtdb.DatabaseReference rootRef,
-  required String uid,
-  required String email,
-  String? name,
-  required String source,
-}) async {
-  final normalizedUid = uid.trim();
-  if (normalizedUid.isEmpty) return;
-
-  final now = rtdb.ServerValue.timestamp;
-  final displayName =
-      name?.trim().isNotEmpty == true ? name!.trim() : email.split('@').first;
-  final userPayload = <String, Object?>{
-    'uid': normalizedUid,
-    'email': email.trim(),
-    'name': displayName,
-    'role': 'rider',
-    'status': 'active',
-    'updated_at': now,
-    'created_at': now,
-  };
-
-  final riderPointer = <String, Object?>{
-    'uid': normalizedUid,
-    'email': email.trim(),
-    'role': 'rider',
-    'status': 'active',
-    'updated_at': now,
-    'created_at': now,
-  };
-
-  try {
-    await rootRef.child('users/$normalizedUid').update(<String, dynamic>{
-      ...userPayload,
-    });
-    await rootRef.child('riders/$normalizedUid').update(<String, dynamic>{
-      ...riderPointer,
-    });
-    _logStartupRtdb(
-      source: source,
-      path: 'users/$normalizedUid + riders/$normalizedUid',
-      optional: false,
-      phase: 'minimal_write_success',
-    );
-  } catch (error, stackTrace) {
-    debugPrint('[RiderMinimal] source=$source uid=$normalizedUid error=$error');
-    if (kDebugMode) {
-      debugPrintStack(stackTrace: stackTrace);
-    }
-    _logStartupRtdb(
-      source: source,
-      path: 'users/$normalizedUid',
-      optional: false,
-      phase: 'minimal_write_error',
-      error: error,
-      stackTrace: stackTrace,
-    );
-  }
 }
 
 Future<void> persistRiderOwnedBootstrap({
@@ -300,16 +303,15 @@ Map<String, Object?> buildRiderOwnedBootstrapUpdates({
   };
 }
 
-/// User-visible copy stays friendly; logs carry technical detail.
 String startupDebugMessage(
-  String userFacingMessage, {
+  String fallback, {
   required String path,
   required Object error,
 }) {
-  debugPrint(
-    '[Startup RTDB/user] message=$userFacingMessage path=$path error=$error',
-  );
-  return userFacingMessage;
+  if (!kDebugMode) {
+    return fallback;
+  }
+  return '$fallback\n[$path] $error';
 }
 
 bool isPermissionDeniedError(Object error) {

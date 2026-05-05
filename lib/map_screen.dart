@@ -38,6 +38,7 @@ import 'support/ride_chat_support.dart';
 import 'support/rider_trust_support.dart';
 import 'support/ride_create_metadata.dart';
 import 'support/rtdb_flow_debug_log.dart';
+import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
 import 'widgets/native_places_autocomplete_field.dart';
@@ -116,6 +117,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   GoogleMapController? _mapController;
   bool _mapReady = false;
+  bool _mapPlatformSurfaceFailed = false;
   int _mapRenderRefreshGeneration = 0;
   bool _iosMapCameraIdleObserved = false;
   int _iosMapTileRecoveryCount = 0;
@@ -9226,6 +9228,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           ValueListenableBuilder<int>(
             valueListenable: _mapLayerVersion,
             builder: (context, _, child) {
+              if (_mapPlatformSurfaceFailed) {
+                return ColoredBox(
+                  color: Colors.black,
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        kMapUnavailableUserMessage,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          height: 1.45,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }
               return GoogleMap(
                 key: ValueKey<String>('rider-map-$_selectedLaunchCity'),
                 initialCameraPosition: CameraPosition(
@@ -9238,17 +9258,33 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 myLocationEnabled: _deviceLocationAvailable,
                 myLocationButtonEnabled: _deviceLocationAvailable,
                 onMapCreated: (controller) {
-                  _mapController = controller;
-                  _mapReady = true;
-                  _iosMapCameraIdleObserved = false;
-                  _logRiderMap(
-                    'map created platform=${defaultTargetPlatform.name} city=$_selectedLaunchCity markers=${_markers.length} polylines=${_polylines.length}',
-                  );
-                  _syncTripLocationMarkers();
-                  _moveCamera();
-                  if (defaultTargetPlatform == TargetPlatform.iOS) {
-                    _scheduleIosMapStabilization(controller: controller);
-                    _scheduleIosMapTileRecovery(controller: controller);
+                  try {
+                    _mapController = controller;
+                    _mapReady = true;
+                    _iosMapCameraIdleObserved = false;
+                    _logRiderMap(
+                      'map created platform=${defaultTargetPlatform.name} city=$_selectedLaunchCity markers=${_markers.length} polylines=${_polylines.length}',
+                    );
+                    _syncTripLocationMarkers();
+                    _moveCamera();
+                    if (defaultTargetPlatform == TargetPlatform.iOS) {
+                      _scheduleIosMapStabilization(controller: controller);
+                      _scheduleIosMapTileRecovery(controller: controller);
+                    }
+                  } catch (e, st) {
+                    if (kDebugMode) {
+                      debugPrint('[RiderMap] onMapCreated error: $e');
+                      debugPrintStack(
+                        label: '[RiderMap] onMapCreated stack',
+                        stackTrace: st,
+                      );
+                    }
+                    if (mounted) {
+                      setState(() => _mapPlatformSurfaceFailed = true);
+                    } else {
+                      _mapPlatformSurfaceFailed = true;
+                    }
+                    safeShowSnackBar(context, kMapUnavailableUserMessage);
                   }
                 },
                 onCameraIdle: () {

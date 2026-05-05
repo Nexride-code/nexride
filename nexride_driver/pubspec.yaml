@@ -46,6 +46,12 @@ dependencies:
   # Animations
   lottie: ^2.1.0
 
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/branding/nexride_app_icon.png
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: assets/branding/nexride_app_icon.png
 
 dev_dependencies:
   flutter_test:
@@ -60,11 +66,4 @@ flutter:
     - assets/car.png
     - assets/animations/
     - assets/sounds/ride_request.mp3
-    - assets/branding/nexride_launcher.png
-
-flutter_launcher_icons:
-  android: true
-  ios: true
-  image_path: assets/branding/nexride_launcher.png
-  adaptive_icon_background: "#0D0D0D"
-  adaptive_icon_foreground: assets/branding/nexride_launcher.png
+    - assets/branding/nexride_app_icon.png

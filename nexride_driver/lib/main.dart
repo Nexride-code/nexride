@@ -14,10 +14,10 @@ import 'firebase_options.dart';
 import 'screens/driver_login_screen.dart';
 import 'screens/driver_map_screen.dart';
 import 'support/app_role.dart';
-import 'support/production_user_messages.dart';
 import 'support/driver_profile_bootstrap_support.dart';
 import 'support/driver_profile_support.dart';
 import 'services/driver_push_notification_service.dart';
+import 'support/production_user_messages.dart';
 
 final ValueNotifier<_FatalAppError?> _fatalAppError =
     ValueNotifier<_FatalAppError?>(null);
@@ -386,13 +386,20 @@ class _AppBootstrapRoute extends StatelessWidget {
         Widget? _,
       ) {
         if (fatalError != null) {
+          debugPrint('[Startup] fatalError phase=${fatalError.phase} err=${fatalError.error}');
+          if (fatalError.stackTrace != null) {
+            debugPrintStack(
+              label: '[Startup] fatal stack',
+              stackTrace: fatalError.stackTrace,
+            );
+          }
           return _FatalErrorView(
             title: adminRoute
                 ? 'Admin screen failed to load'
-                : 'NexRide failed to start',
+                : 'NexRide',
             message: adminRoute
                 ? 'The admin route hit a startup error before the UI could finish loading.'
-                : 'The requested route hit a startup error before the app could finish loading.',
+                : kProductionNexRideSupportMessage,
             error: fatalError.error,
             stackTrace: fatalError.stackTrace,
             admin: adminRoute,
@@ -416,9 +423,8 @@ class _AppBootstrapRoute extends StatelessWidget {
                       isLoading: true,
                     )
                   : const _BootstrapStatusScreen(
-                      title: 'Move with NexRide',
-                      message:
-                          'Ride. Deliver. Earn.\nPreparing your driver session…',
+                      title: 'NexRide Driver',
+                      message: 'Starting up…',
                       loading: true,
                     );
             }
@@ -427,13 +433,22 @@ class _AppBootstrapRoute extends StatelessWidget {
               _logStartup(
                 'Bootstrap error on route=$routeName error=${snapshot.error}',
               );
+              debugPrint(
+                '[Startup] Firebase bootstrap error route=$routeName err=${snapshot.error}',
+              );
+              if (snapshot.stackTrace != null) {
+                debugPrintStack(
+                  label: '[Startup] Firebase bootstrap stack',
+                  stackTrace: snapshot.stackTrace,
+                );
+              }
               return _FatalErrorView(
                 title: adminRoute
                     ? 'Admin screen failed to load'
-                    : 'NexRide Driver',
+                    : 'NexRide',
                 message: adminRoute
                     ? 'Firebase startup failed before the admin route could render.'
-                    : kNexRideFriendlyFailureMessage,
+                    : kProductionNexRideSupportMessage,
                 error: snapshot.error ??
                     StateError('Unknown bootstrap error on $routeName'),
                 stackTrace: snapshot.stackTrace,
@@ -488,12 +503,9 @@ class _FatalErrorView extends StatelessWidget {
         icon: Icons.error_outline_rounded,
       );
     }
-    final displayTitle = kDebugMode ? title : 'NexRide Driver';
-    final displayMessage =
-        kDebugMode ? message : kNexRideFriendlyFailureMessage;
     return _BootstrapStatusScreen(
-      title: displayTitle,
-      message: displayMessage,
+      title: title,
+      message: message,
       error: error,
       stackTrace: stackTrace,
     );
@@ -517,20 +529,14 @@ class _BootstrapStatusScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool showTechnical = kDebugMode && error != null;
     return Scaffold(
-      backgroundColor: kDriverDark,
+      backgroundColor: kDriverCream,
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 640),
             child: Card(
-              color: Colors.black.withValues(alpha: 0.92),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(24),
-                side: BorderSide(color: kDriverGold.withValues(alpha: 0.35)),
-              ),
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Column(
@@ -539,16 +545,16 @@ class _BootstrapStatusScreen extends StatelessWidget {
                     if (loading)
                       const CircularProgressIndicator(color: kDriverGold)
                     else
-                      Icon(
+                      const Icon(
                         Icons.warning_amber_rounded,
-                        color: kDriverGold.withValues(alpha: 0.9),
+                        color: kDriverGold,
                         size: 36,
                       ),
                     const SizedBox(height: 18),
                     Text(
                       title,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: Colors.black,
                         fontSize: 24,
                         fontWeight: FontWeight.w800,
                       ),
@@ -556,17 +562,17 @@ class _BootstrapStatusScreen extends StatelessWidget {
                     const SizedBox(height: 12),
                     Text(
                       message,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.82),
+                      style: const TextStyle(
+                        color: Colors.black87,
                         height: 1.5,
                       ),
                     ),
-                    if (showTechnical) ...<Widget>[
+                    if (error != null && kDebugMode) ...<Widget>[
                       const SizedBox(height: 16),
                       SelectableText(
                         error.toString(),
-                        style: TextStyle(
-                          color: Colors.amberAccent.shade100,
+                        style: const TextStyle(
+                          color: Colors.black,
                           fontSize: 13,
                           height: 1.5,
                         ),
@@ -579,7 +585,7 @@ class _BootstrapStatusScreen extends StatelessWidget {
                       SelectableText(
                         stackTrace.toString(),
                         style: const TextStyle(
-                          color: Colors.white70,
+                          color: Colors.black87,
                           fontSize: 12,
                           height: 1.45,
                         ),
@@ -774,7 +780,6 @@ class _AuthGateState extends State<AuthGate> {
 
   Future<void> _bootstrapDriverSession(User user) async {
     final attempt = ++_bootstrapAttempt;
-    print('BOOTSTRAP TYPE: DRIVER');
     debugPrint(
         '[AuthGate] driver bootstrap start uid=${user.uid} attempt=$attempt');
     _setDebugStep('loading driver profile');
@@ -1009,7 +1014,7 @@ class _StartupStatusView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: kDriverDark,
+      backgroundColor: kDriverCream,
       body: SafeArea(
         child: Center(
           child: Padding(
@@ -1019,11 +1024,15 @@ class _StartupStatusView extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.all(28),
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.92),
+                  color: Colors.white,
                   borderRadius: BorderRadius.circular(28),
-                  border: Border.all(
-                    color: kDriverGold.withValues(alpha: 0.45),
-                  ),
+                  boxShadow: const <BoxShadow>[
+                    BoxShadow(
+                      color: Color(0x14000000),
+                      blurRadius: 24,
+                      offset: Offset(0, 16),
+                    ),
+                  ],
                 ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -1042,33 +1051,13 @@ class _StartupStatusView extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 18),
-                    const Text(
-                      'Move with NexRide',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white70,
-                        letterSpacing: 0.6,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Ride. Deliver. Earn.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: Color(0xAAFFFFFF),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
                     Text(
                       title,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.w900,
-                        color: Colors.white,
+                        color: Colors.black87,
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -1076,7 +1065,7 @@ class _StartupStatusView extends StatelessWidget {
                       message,
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.78),
+                        color: Colors.black.withValues(alpha: 0.64),
                         height: 1.5,
                       ),
                     ),

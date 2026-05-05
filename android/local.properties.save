@@ -1,0 +1,7 @@
+GOOGLE_MAPS_ANDROID_API_KEY=AIzaSyDPk-B9EoqGsYkvxS5aiiTWl1S-cezWsos
+
+sdk.dir=/Users/lexemm/Library/Android/sdk
+flutter.sdk=/opt/homebrew/share/flutter
+flutter.buildMode=release
+flutter.versionName=1.0.0
+flutter.versionCode=1

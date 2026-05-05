@@ -1,2 +1,0 @@
-## Copy lines into local.properties (ignored by git). Used by app/build.gradle.kts for Maps.
-GOOGLE_MAPS_API_KEY=

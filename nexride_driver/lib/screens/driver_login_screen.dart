@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../support/driver_profile_bootstrap_support.dart';
@@ -143,13 +144,6 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
 
       if (!snapshot.exists) {
         profileUpdate['created_at'] = ServerValue.timestamp;
-        profileUpdate['role'] = 'driver';
-        profileUpdate['services'] = <String>['ride'];
-        profileUpdate['market'] = 'lagos';
-        profileUpdate['market_pool'] = 'lagos';
-        profileUpdate['online'] = false;
-        profileUpdate['status'] = 'active';
-        profileUpdate['serviceTypes'] = <String>['ride'];
       }
 
       final rootUpdates = <String, Object?>{
@@ -166,15 +160,45 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
       };
       try {
         await rootRef.update(rootUpdates);
-      } catch (error) {
-        if (!isRealtimeDatabasePermissionDenied(error)) {
-          rethrow;
+      } catch (error, stackTrace) {
+        if (isRealtimeDatabasePermissionDenied(error)) {
+          debugPrint(
+            '[DriverLogin] optional bootstrap write denied uid=${user.uid} verificationPath=$verificationPath error=$error',
+          );
+          try {
+            await driverRef.update(profileUpdate);
+          } catch (narrowError, narrowStack) {
+            debugPrint(
+              '[DriverLogin] narrow driver write failed uid=${user.uid} error=$narrowError',
+            );
+            debugPrintStack(
+              label: '[DriverLogin] narrow write stack',
+              stackTrace: narrowStack,
+            );
+            await persistMinimalDriverProfileBestEffort(
+              rootRef: rootRef,
+              user: user,
+              source: 'driver_login.after_narrow_write_failed',
+            );
+          }
+        } else {
+          debugPrint(
+            '[DriverLogin] bootstrap root update failed uid=${user.uid} error=$error',
+          );
+          debugPrintStack(
+            label: '[DriverLogin] root update stack',
+            stackTrace: stackTrace,
+          );
+          try {
+            await driverRef.update(profileUpdate);
+          } catch (_) {
+            await persistMinimalDriverProfileBestEffort(
+              rootRef: rootRef,
+              user: user,
+              source: 'driver_login.after_root_update_failed',
+            );
+          }
         }
-
-        debugPrint(
-          '[DriverLogin] optional bootstrap write denied uid=${user.uid} verificationPath=$verificationPath error=$error',
-        );
-        await driverRef.update(profileUpdate);
       }
 
       debugPrint(
@@ -206,35 +230,35 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
       }
     } catch (error, stackTrace) {
       debugPrint('[DriverLogin] unexpected error $error');
-      debugPrintStack(label: '[DriverLogin]', stackTrace: stackTrace);
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        try {
-          final rootRef = FirebaseDatabase.instance.ref();
-          await rootRef.child(driverProfilePath(user.uid)).update(<String, Object?>{
-            'uid': user.uid,
-            'id': user.uid,
-            'email': emailController.text.trim(),
-            'role': 'driver',
-            'online': false,
-            'status': 'active',
-            'services': <String>['ride'],
-            'serviceTypes': <String>['ride'],
-            'market': 'lagos',
-            'market_pool': 'lagos',
-            'created_at': ServerValue.timestamp,
-            'updated_at': ServerValue.timestamp,
-          });
-          debugPrint('[DriverLogin] minimal driver seed attempted uid=${user.uid}');
-        } catch (minimalError, minimalStack) {
-          debugPrint('[DriverLogin] minimal driver seed failed: $minimalError');
-          debugPrintStack(
-            label: '[DriverLogin] minimal seed',
-            stackTrace: minimalStack,
-          );
-        }
+      debugPrintStack(
+        label: '[DriverLogin] unexpected stack',
+        stackTrace: stackTrace,
+      );
+      final loggedIn = FirebaseAuth.instance.currentUser;
+      if (loggedIn != null) {
+        await persistMinimalDriverProfileBestEffort(
+          rootRef: FirebaseDatabase.instance.ref(),
+          user: loggedIn,
+          source: 'driver_login.unexpected_failure',
+        );
       }
-      showMessage(kNexRideFriendlyFailureMessage);
+      if (!mounted) {
+        return;
+      }
+      if (loggedIn != null) {
+        showMessage('Welcome back.');
+        return;
+      }
+      final debugPath = 'auth';
+      showMessage(
+        kDebugMode
+            ? realtimeDatabaseDebugMessage(
+                kProductionNexRideSupportMessage,
+                path: debugPath,
+                error: error,
+              )
+            : kProductionNexRideSupportMessage,
+      );
     } finally {
       if (mounted) {
         setState(() => isLoading = false);

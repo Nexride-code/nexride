@@ -38,6 +38,51 @@ class DriverProfileFetchResult {
   final String? persistWarning;
 }
 
+Future<void> persistMinimalDriverProfileBestEffort({
+  required DatabaseReference rootRef,
+  required User user,
+  required String source,
+}) async {
+  final uid = user.uid.trim();
+  if (uid.isEmpty) {
+    return;
+  }
+  final path = driverProfilePath(uid);
+  final ref = rootRef.child(path);
+  try {
+    final snap = await ref.get().timeout(kDriverProfileReadTimeout);
+    final exists = snap.exists;
+    await ref.update(<String, Object?>{
+      'uid': uid,
+      'id': uid,
+      'email': user.email ?? '',
+      'role': 'driver',
+      'online': false,
+      'isOnline': false,
+      'status': 'active',
+      'serviceTypes': <String>['ride'],
+      'services': <String>['ride'],
+      'market': 'lagos',
+      'market_pool': 'lagos',
+      'updated_at': ServerValue.timestamp,
+      if (!exists) ...<String, Object?>{
+        'created_at': ServerValue.timestamp,
+      },
+    });
+    debugPrint(
+      '[DriverProfile] minimal driver record best-effort ok source=$source uid=$uid path=$path',
+    );
+  } catch (error, stackTrace) {
+    debugPrint(
+      '[DriverProfile] minimal driver record FAILED source=$source uid=$uid path=$path error=$error',
+    );
+    debugPrintStack(
+      label: '[DriverProfile] minimal driver stack',
+      stackTrace: stackTrace,
+    );
+  }
+}
+
 void _logFirebaseDatabaseError(String label, Object error) {
   if (error is FirebaseException) {
     debugPrint(
@@ -126,7 +171,6 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
   final verificationPath = driverVerificationAdminPath(uid);
   final profileRef = rootRef.child(path);
 
-  print('BOOTSTRAP TYPE: DRIVER');
   debugPrint(
     '[DriverProfile] fetch started role=${role.name} source=$source uid=$uid path=$path mode=get_timeout=${kDriverProfileReadTimeout.inSeconds}s',
   );
@@ -279,6 +323,11 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
         label: '[DriverProfile] drivers write stack',
         stackTrace: stackTrace,
       );
+      await persistMinimalDriverProfileBestEffort(
+        rootRef: rootRef,
+        user: user,
+        source: '$source.after_drivers_write_failed',
+      );
     }
 
     final verificationPayload = <String, Object?>{
@@ -324,6 +373,11 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
       debugPrintStack(
         label: '[DriverProfile] repair stack',
         stackTrace: stackTrace,
+      );
+      await persistMinimalDriverProfileBestEffort(
+        rootRef: rootRef,
+        user: user,
+        source: '$source.after_repair_failed',
       );
     }
   }

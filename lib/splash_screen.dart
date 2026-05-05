@@ -2,14 +2,15 @@ import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
 
 import 'ride_type_screen.dart';
 import 'rider_login.dart';
-import 'support/production_user_messages.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
+import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -78,7 +79,7 @@ class _SplashScreenState extends State<SplashScreen> {
     _startupInProgress = true;
     final runId = ++_startupRunId;
     _scheduleStartupFailSafe();
-    _setStartupState(message: 'Getting things ready…');
+    _setStartupState(message: 'Starting NexRide…');
 
     User? authenticatedUser;
     var nextScreen = _fallbackScreenFor(_auth.currentUser);
@@ -112,7 +113,7 @@ class _SplashScreenState extends State<SplashScreen> {
 
       final signedInUser = authenticatedUser;
 
-      _setStartupState(message: 'Preparing your NexRide rider account…');
+      _setStartupState(message: 'Signing you in…');
 
       final profileResult = await _runStartupStep<Map<String, dynamic>>(
         label: 'profile fetch',
@@ -199,18 +200,36 @@ class _SplashScreenState extends State<SplashScreen> {
       source: 'splash_screen.bootstrap_check',
     );
     if (!bootstrapReady) {
-      await persistRiderOwnedBootstrap(
-        rootRef: _rootRef,
-        riderId: user.uid,
-        userProfile: <String, dynamic>{
-          ...existingUser,
-          ...bundle.userProfile,
-          'created_at': existingUser['created_at'] ?? ServerValue.timestamp,
-        },
-        verification: bundle.verification,
-        deviceFingerprints: bundle.deviceFingerprints,
-        source: 'splash_screen.bootstrap_write',
-      ).timeout(_kStartupStepTimeout);
+      try {
+        await persistRiderOwnedBootstrap(
+          rootRef: _rootRef,
+          riderId: user.uid,
+          userProfile: <String, dynamic>{
+            ...existingUser,
+            ...bundle.userProfile,
+            'created_at': existingUser['created_at'] ?? ServerValue.timestamp,
+          },
+          verification: bundle.verification,
+          deviceFingerprints: bundle.deviceFingerprints,
+          source: 'splash_screen.bootstrap_write',
+        ).timeout(_kStartupStepTimeout);
+      } catch (e, st) {
+        debugPrint('[Splash] full rider bootstrap write failed: $e');
+        debugPrintStack(
+          label: '[Splash] bootstrap write stack',
+          stackTrace: st,
+        );
+        await persistMinimalRiderProfileBestEffort(
+          rootRef: _rootRef,
+          riderId: user.uid,
+          email: user.email ?? '',
+          displayNameFallback:
+              existingUser['name']?.toString().trim().isNotEmpty == true
+              ? existingUser['name'].toString().trim()
+              : user.email?.split('@').first ?? '',
+          source: 'splash_screen.minimal_after_bootstrap_failure',
+        );
+      }
     }
   }
 
@@ -389,25 +408,33 @@ class _SplashScreenState extends State<SplashScreen> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: <Widget>[
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(22),
+                      child: Image.asset(
+                        'assets/branding/nexride_app_icon.png',
+                        width: 120,
+                        height: 120,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
                     const Text(
                       'Move with NexRide',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontSize: 30,
-                        fontWeight: FontWeight.w800,
+                        fontSize: 26,
+                        fontWeight: FontWeight.bold,
                         color: Color(0xFFD4AF37),
-                        height: 1.15,
-                        letterSpacing: 0.8,
+                        letterSpacing: 0.5,
                       ),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 10),
                     const Text(
                       'Ride. Deliver. Earn.',
-                      textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontSize: 16,
+                        fontSize: 15,
                         color: Colors.white70,
-                        letterSpacing: 1.6,
+                        letterSpacing: 0.8,
                       ),
                     ),
                     const SizedBox(height: 28),
@@ -422,7 +449,7 @@ class _SplashScreenState extends State<SplashScreen> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        _startupMessage ?? 'Preparing your NexRide rider account…',
+                        _startupMessage ?? 'Almost ready…',
                         textAlign: TextAlign.center,
                         style: const TextStyle(
                           color: Colors.white70,
@@ -445,7 +472,10 @@ class _SplashScreenState extends State<SplashScreen> {
                             ),
                             const SizedBox(height: 12),
                             Text(
-                              kNexRideFriendlyFailureMessage,
+                              kDebugMode
+                                  ? (_startupMessage ??
+                                      'Startup needs attention.')
+                                  : kProductionNexRideSupportMessage,
                               textAlign: TextAlign.center,
                               style: const TextStyle(
                                 color: Colors.black87,

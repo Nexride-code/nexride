@@ -36,6 +36,7 @@ import '../support/driver_dispatch_support.dart';
 import '../support/driver_profile_bootstrap_support.dart';
 import '../support/driver_profile_support.dart';
 import '../support/dispatch_payment_support.dart';
+import '../support/production_user_messages.dart';
 import '../support/realtime_database_error_support.dart';
 import '../support/rtdb_flow_debug_log.dart';
 import '../support/ride_chat_support.dart';
@@ -431,6 +432,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   bool _deviceLocationOutsideLaunchArea = false;
   bool _launchCityChosenManually = false;
   bool _mapViewReady = false;
+  bool _mapPlatformSurfaceFailed = false;
   bool _mapInitializationInProgress = true;
   bool _deliveryProofUploading = false;
   bool _routeRequestInFlight = false;
@@ -16941,6 +16943,43 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     );
   }
 
+  void _onDriverMapPlatformError(Object error, StackTrace stackTrace) {
+    if (kDebugMode) {
+      debugPrint('[DriverMap] GoogleMap surface error: $error');
+      debugPrintStack(
+        label: '[DriverMap] GoogleMap surface stack',
+        stackTrace: stackTrace,
+      );
+    }
+    _setStateSafely(() {
+      _mapPlatformSurfaceFailed = true;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _showSnackBarSafely(
+        SnackBar(content: Text(kMapUnavailableUserMessage)),
+      );
+    });
+  }
+
+  Widget _driverMapUnavailablePlaceholder() {
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(
+            kMapUnavailableUserMessage,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white70, height: 1.45),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_hasAuthenticatedDriver) {
@@ -16976,6 +17015,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           ValueListenableBuilder<int>(
             valueListenable: _mapLayerVersion,
             builder: (context, _, child) {
+              if (_mapPlatformSurfaceFailed) {
+                return _driverMapUnavailablePlaceholder();
+              }
               return GoogleMap(
                 key: ValueKey<String>('driver-map-$_mapWidgetKeyVersion'),
                 initialCameraPosition: CameraPosition(
@@ -16988,6 +17030,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                 myLocationEnabled: _mapLocationReady,
                 myLocationButtonEnabled: _mapLocationReady,
                 onMapCreated: (controller) {
+                  try {
                   _mapController = controller;
                   final attempt = _mapInitializationAttempt;
                   _mapCameraIdleObserved = false;
@@ -17025,6 +17068,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                       attempt: attempt,
                     );
                     return;
+                  }
+                  } catch (e, st) {
+                    _onDriverMapPlatformError(e, st);
                   }
                 },
                 onCameraIdle: () {

@@ -35,56 +35,44 @@ class _RiderLoginState extends State<RiderLogin> {
     setState(() => isLoading = true);
 
     try {
+      // 🔐 LOGIN
       UserCredential userCredential = await auth.signInWithEmailAndPassword(
         email: emailController.text.trim(),
         password: passwordController.text.trim(),
       );
 
-      final uid = userCredential.user!.uid;
-      final email = emailController.text.trim();
+      String uid = userCredential.user!.uid;
 
       final existingUser = await readUserProfileWithFallback(
         rootRef: dbRef,
         uid: uid,
         source: 'rider_login.user_profile',
       );
-
       final userData = <String, dynamic>{
         ...existingUser,
         if (existingUser.isEmpty) ...<String, dynamic>{
           "uid": uid,
-          "name": email.split("@")[0],
-          "email": email,
+          "name": emailController.text.split("@")[0],
+          "email": emailController.text.trim(),
           "phone": "",
           "role": "rider",
           "created_at": ServerValue.timestamp,
         },
       };
 
-      if (userData["role"]?.toString() != "rider") {
-        await auth.signOut();
-        if (!mounted) {
-          return;
-        }
-        showMessage("Access denied ❌");
-        setState(() => isLoading = false);
-        return;
-      }
+      final bundle = await _trustBootstrapService.ensureRiderTrustState(
+        riderId: uid,
+        existingUser: userData,
+        fallbackName: emailController.text.split("@")[0],
+        fallbackEmail: emailController.text.trim(),
+      );
 
-      RiderTrustBootstrapBundle bundle;
+      final bootstrapReady = await hasRiderBootstrapArtifacts(
+        rootRef: dbRef,
+        riderId: uid,
+        source: 'rider_login.bootstrap_check',
+      );
       try {
-        bundle = await _trustBootstrapService.ensureRiderTrustState(
-          riderId: uid,
-          existingUser: userData,
-          fallbackName: email.split("@")[0],
-          fallbackEmail: email,
-        );
-
-        final bootstrapReady = await hasRiderBootstrapArtifacts(
-          rootRef: dbRef,
-          riderId: uid,
-          source: 'rider_login.bootstrap_check',
-        );
         if (!bootstrapReady) {
           await persistRiderOwnedBootstrap(
             rootRef: dbRef,
@@ -103,31 +91,54 @@ class _RiderLoginState extends State<RiderLogin> {
             'updated_at': ServerValue.timestamp,
           });
         }
-
-        debugPrint(
-          existingUser.isNotEmpty
-              ? '✅ Rider profile synced'
-              : '✅ Rider profile initialized',
-        );
-      } catch (error, stackTrace) {
-        debugPrint('[RiderLogin] RTDB bootstrap failed after auth: $error');
-        debugPrintStack(
-          label: '[RiderLogin] RTDB bootstrap',
-          stackTrace: stackTrace,
-        );
-        await persistRiderMinimalPresence(
+      } on StartupRtdbException catch (e, st) {
+        debugPrint('[RiderLogin] full bootstrap blocked: $e');
+        debugPrintStack(label: '[RiderLogin] bootstrap stack', stackTrace: st);
+        await persistMinimalRiderProfileBestEffort(
           rootRef: dbRef,
-          uid: uid,
-          email: email,
-          name: userData['name']?.toString(),
-          source: 'rider_login.minimal_presence',
+          riderId: uid,
+          email: emailController.text.trim(),
+          displayNameFallback: emailController.text.split('@').first,
+          source: 'rider_login.minimal_after_bootstrap_failure',
         );
+      } catch (e, st) {
+        debugPrint('[RiderLogin] bootstrap unexpected: $e');
+        debugPrintStack(
+          label: '[RiderLogin] bootstrap unexpected stack',
+          stackTrace: st,
+        );
+        await persistMinimalRiderProfileBestEffort(
+          rootRef: dbRef,
+          riderId: uid,
+          email: emailController.text.trim(),
+          displayNameFallback: emailController.text.split('@').first,
+          source: 'rider_login.minimal_after_unexpected_failure',
+        );
+      }
+
+      debugPrint(
+        existingUser.isNotEmpty
+            ? '[RiderLogin] rider profile found'
+            : '[RiderLogin] rider profile ensured',
+      );
+
+      final effectiveRole =
+          (userData['role'] ?? 'rider').toString().trim().toLowerCase();
+      // ✅ ROLE CHECK (default to rider when absent)
+      if (effectiveRole != 'rider') {
+        await auth.signOut();
+        if (!mounted) {
+          return;
+        }
+        showMessage('This account is not a rider account.');
+        setState(() => isLoading = false);
+        return;
       }
 
       if (!mounted) {
         return;
       }
-      showMessage("Login successful ✅");
+      showMessage('Welcome back.');
 
       Navigator.pushReplacement(
         context,
@@ -137,16 +148,21 @@ class _RiderLoginState extends State<RiderLogin> {
       debugPrint("AUTH ERROR: ${e.code}");
 
       if (e.code == 'user-not-found') {
-        showMessage("No user found ❌");
+        showMessage('No account found for that email.');
       } else if (e.code == 'wrong-password') {
-        showMessage("Wrong password ❌");
+        showMessage('Incorrect password.');
       } else {
-        showMessage(e.message ?? "Login failed");
+        showMessage(e.message ?? 'Sign-in failed. Try again.');
       }
     } catch (e, stackTrace) {
-      debugPrint('[RiderLogin] unexpected: $e');
-      debugPrintStack(label: '[RiderLogin]', stackTrace: stackTrace);
-      showMessage(kNexRideFriendlyFailureMessage);
+      debugPrint('[RiderLogin] GENERAL ERROR: $e');
+      debugPrintStack(label: '[RiderLogin] error stack', stackTrace: stackTrace);
+      if (e is StartupRtdbException) {
+        debugPrint(
+          '[RiderLogin] StartupRtdbException path=${e.path} cause=${e.cause}',
+        );
+      }
+      showMessage(kProductionRiderLoginSupportMessage);
     }
 
     if (mounted) {

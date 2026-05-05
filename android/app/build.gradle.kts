@@ -1,22 +1,8 @@
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
-}
-
-val localProperties = Properties()
-val localPropertiesFile = rootProject.file("local.properties")
-if (localPropertiesFile.exists()) {
-    localProperties.load(localPropertiesFile.reader())
-}
-
-fun resolveGoogleMapsApiKey(): String {
-    val fromFile = localProperties.getProperty("GOOGLE_MAPS_API_KEY")?.trim().orEmpty()
-    if (fromFile.isNotEmpty()) return fromFile
-    return System.getenv("GOOGLE_MAPS_API_KEY")?.trim().orEmpty()
 }
 
 android {
@@ -41,8 +27,6 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        resValue("string", "app_name", "NexRide")
-        resValue("string", "google_maps_key", resolveGoogleMapsApiKey())
     }
 
     buildTypes {
