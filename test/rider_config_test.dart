@@ -5,13 +5,13 @@ import 'package:nexride/service_type.dart';
 import 'package:nexride/support/rider_fare_support.dart';
 
 void main() {
-  test('only ride and dispatch services are enabled in rider app', () {
+  test('phase 1 rider app enables car rides only', () {
     final enabledServices = RiderServiceType.values
         .where((RiderServiceType service) => service.isEnabled)
         .map((RiderServiceType service) => service.key)
         .toList();
 
-    expect(enabledServices, <String>['ride', 'dispatch_delivery']);
+    expect(enabledServices, <String>['ride']);
   });
 
   test('user verification entry hides once approval is complete', () {
@@ -55,12 +55,9 @@ void main() {
       );
 
       expect(decision.canRequestTrips, isTrue);
-      if (RiderFeatureFlags.disableCashTripPayments) {
-        expect(decision.canUseCash, isFalse);
-        expect(decision.restrictionCode, 'cash_restricted');
-      } else {
-        expect(decision.restrictionCode, isEmpty);
-      }
+      expect(RiderFeatureFlags.disableCashTripPayments, isTrue);
+      expect(decision.canUseCash, isFalse);
+      expect(decision.restrictionCode, 'cash_restricted');
     },
   );
 
@@ -82,12 +79,8 @@ void main() {
       );
 
       expect(decision.canRequestTrips, isTrue);
-      if (RiderFeatureFlags.disableCashTripPayments) {
-        expect(decision.canUseCash, isFalse);
-        expect(decision.restrictionCode, 'cash_restricted');
-      } else {
-        expect(decision.restrictionCode, isEmpty);
-      }
+      expect(decision.canUseCash, isFalse);
+      expect(decision.restrictionCode, 'cash_restricted');
     },
   );
 

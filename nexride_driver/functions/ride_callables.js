@@ -154,20 +154,22 @@ function surfaceAcceptFailureReason(internal, preflightDocPresent) {
  */
 async function applyDriverAcceptAdminMerge(rideRef, rideId, driverId, now) {
   const snap = await rideRef.get();
+  const pathExists = snapExists(snap);
   const cur = rideDocFromSnapshot(snap);
-  const exists = cur != null;
   console.log(
     "DRIVER_ACCEPT_MERGE_PREFLIGHT",
-    rideId,
-    "exists=",
-    exists,
+    `rideId=${rideId}`,
+    `exists=${pathExists}`,
     "trip_state=",
     cur ? String(cur.trip_state ?? "").trim().toLowerCase() : "n/a",
     "status=",
     cur ? String(cur.status ?? "").trim().toLowerCase() : "n/a",
   );
-  if (!exists) {
+  if (!pathExists) {
     return { ok: false, reason: "ride_missing" };
+  }
+  if (!cur) {
+    return { ok: false, reason: "not_available" };
   }
   if (!paymentAllowsDispatch(cur)) {
     return { ok: false, reason: "payment_not_verified" };
@@ -288,29 +290,32 @@ function isOpenPoolRide(ride) {
   return false;
 }
 
+/**
+ * Driver matching / fanout / accept only after Flutterwave (or equivalent) charge is verified server-side.
+ * Cash and unverified card are not permitted for dispatch.
+ */
 function paymentAllowsDispatch(ride) {
   if (!ride || typeof ride !== "object") {
     return false;
   }
-  const pm = String(ride.payment_method ?? ride.paymentMethod ?? "cash")
-    .trim()
-    .toLowerCase();
   const ps = String(ride.payment_status ?? ride.paymentStatus ?? "")
     .trim()
     .toLowerCase();
-  if (pm === "cash" || pm === "bank_transfer") {
-    return true;
+  if (ps !== "verified") {
+    return false;
   }
-  return ps === "verified";
+  const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
+  return Boolean(ptid);
 }
 
-/** Card / Flutterwave flows require a verified charge id on the ride before completion. */
-function needsFlutterwavePaymentProof(ride) {
+/** True when ride has a recorded verified online payment (required before trip completion). */
+function rideHasVerifiedOnlinePayment(ride) {
   if (!ride || typeof ride !== "object") return false;
-  const pm = String(ride.payment_method ?? ride.paymentMethod ?? "cash")
+  const ps = String(ride.payment_status ?? ride.paymentStatus ?? "")
     .trim()
     .toLowerCase();
-  return pm && pm !== "cash" && pm !== "bank_transfer";
+  const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
+  return ps === "verified" && Boolean(ptid);
 }
 
 const ACCEPTABLE_OPEN_STATUS = new Set([
@@ -322,17 +327,11 @@ const ACCEPTABLE_OPEN_STATUS = new Set([
 ]);
 
 const PAYMENT_METHODS_ALLOWED = new Set([
-  "cash",
   "card",
-  "bank_transfer",
-  "ussd",
-  "mobile_money",
-  "mobilemoney",
-  "digital_wallet",
-  "digitalwallet",
   "credit_card",
   "creditcard",
   "debit_card",
+  "flutterwave",
 ]);
 
 const MAX_FARE_NGN_DEFAULT = 25_000_000;
@@ -389,7 +388,7 @@ async function riderProfileRequirementOk(db, riderId, gates, authLike) {
       ...(email ? { email } : {}),
       displayName,
       created_at: Date.now(),
-      provisioned_via: "createRideRequest",
+      provisioned_via: "nexride_rider_callable",
     });
     return true;
   } catch (e) {
@@ -582,6 +581,16 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload) {
       `rideId=${rid}`,
       `market=${market}`,
       "reason=payment_not_allowed_for_dispatch",
+    );
+    return;
+  }
+  const svc = String(ridePayload.service_type ?? "ride").trim().toLowerCase();
+  if (svc !== "ride") {
+    console.log(
+      "MATCH_FANOUT_ABORT",
+      `rideId=${rid}`,
+      `service_type=${svc}`,
+      "reason=phase1_ride_only",
     );
     return;
   }
@@ -995,7 +1004,7 @@ async function createRideRequest(data, context, db) {
   }
 
   const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
-  const paymentMethod = String(data?.payment_method ?? data?.paymentMethod ?? "cash")
+  const paymentMethod = String(data?.payment_method ?? data?.paymentMethod ?? "flutterwave")
     .trim()
     .toLowerCase();
   const paymentNormalized = paymentMethod.replace(/[\s-]+/g, "_");
@@ -1176,29 +1185,40 @@ async function acceptRideRequest(data, context, db) {
   const rideRef = db.ref(ridePath);
   console.log("DRIVER_ACCEPT_RIDE_LOOKUP_PATH", ridePath);
 
-  let preflightDocPresent = false;
   let preSnap = await rideRef.get();
   let pre = rideDocFromSnapshot(preSnap);
-  if (!pre) {
+  if (!pre && snapExists(preSnap)) {
     preSnap = await rideRef.get();
     pre = rideDocFromSnapshot(preSnap);
   }
-  preflightDocPresent = Boolean(pre);
-  const preTrip0 = pre ? String(pre.trip_state ?? "").trim().toLowerCase() : "";
-  const preStatus0 = pre ? String(pre.status ?? "").trim().toLowerCase() : "";
+  const readExists = snapExists(preSnap);
+  /** Path exists at ride_requests/{id} — never surface ride_missing when this is true. */
+  const preflightDocPresent = readExists;
+  if (!pre && readExists) {
+    console.log(
+      "DRIVER_ACCEPT_READ_VAL_ANOMALY",
+      `rideId=${rideId}`,
+      "exists=true",
+      "val_not_non_null_object",
+    );
+    pre = {};
+  }
+  const preTrip0 = pre && Object.keys(pre).length ? String(pre.trip_state ?? "").trim().toLowerCase() : "";
+  const preStatus0 = pre && Object.keys(pre).length ? String(pre.status ?? "").trim().toLowerCase() : "";
   console.log(
     "DRIVER_ACCEPT_READ",
+    `rideId=${rideId}`,
     `path=${ridePath}`,
-    `doc_present=${preflightDocPresent}`,
+    `exists=${readExists}`,
     `trip_state=${preTrip0}`,
     `status=${preStatus0}`,
   );
-  if (!pre) {
+  if (!readExists) {
     console.log(
       "DRIVER_ACCEPT_FAIL_REASON",
       rideId,
       "ride_missing",
-      "ride_read_missing_after_retry",
+      "ride_path_missing",
     );
     return { success: false, reason: "ride_missing" };
   }
@@ -1206,12 +1226,11 @@ async function acceptRideRequest(data, context, db) {
   const riderPrecheck = normUid(pre.rider_id ?? pre.riderId);
   if (!riderPrecheck) {
     console.log(
-      "DRIVER_ACCEPT_INVALID_RIDE",
-      rideId,
-      "reason=invalid_ride_payload",
-      "missing_field=rider_id",
+      "DRIVER_ACCEPT_RIDER_DEFER",
+      `rideId=${rideId}`,
+      "exists=true",
+      "reason=rider_id_missing_preflight_tx_will_authorize",
     );
-    return { success: false, reason: "invalid_ride_payload" };
   }
 
   const preTrip = String(pre?.trip_state ?? "").trim().toLowerCase();
@@ -1322,19 +1341,28 @@ async function acceptRideRequest(data, context, db) {
 
   for (let attempt = 1; attempt <= maxTxAttempts; attempt++) {
     const warmSnap = await rideRef.get();
+    const warmExists = snapExists(warmSnap);
     const warmVal = rideDocFromSnapshot(warmSnap);
-    if (!warmVal) {
+    if (!warmExists) {
       lastFailure.reason = "ride_missing";
       console.log(
         "DRIVER_ACCEPT_WARM_MISSING",
-        rideId,
+        `rideId=${rideId}`,
         "attempt=",
         attempt,
-        "doc_present=false",
-        "snap_exists_fn=",
-        typeof warmSnap?.exists === "function" ? warmSnap.exists() : warmSnap?.exists,
+        "exists=false",
       );
       break;
+    }
+    if (!warmVal) {
+      console.log(
+        "DRIVER_ACCEPT_WARM_VAL_EMPTY",
+        `rideId=${rideId}`,
+        "attempt=",
+        attempt,
+        "exists=true",
+        "proceed_tx",
+      );
     }
 
     const attemptResult = await rideRef.transaction((current) => {
@@ -1694,14 +1722,7 @@ async function completeTrip(data, context, db) {
       reason = "invalid_state";
       return;
     }
-    if (needsFlutterwavePaymentProof(cur)) {
-      const ps = String(cur.payment_status ?? cur.paymentStatus ?? "").trim().toLowerCase();
-      const ptid = String(cur.payment_transaction_id ?? "").trim();
-      if (ps !== "verified" || !ptid) {
-        reason = "payment_not_verified";
-        return;
-      }
-    } else if (!paymentAllowsDispatch(cur)) {
+    if (!rideHasVerifiedOnlinePayment(cur)) {
       reason = "payment_not_verified";
       return;
     }
@@ -1755,7 +1776,7 @@ async function completeTrip(data, context, db) {
   await writeAudit(db, { type: "ride_complete", ride_id: rideId, actor_uid: driverId });
   await syncRideTrackPublic(db, rideId);
 
-  if (needsFlutterwavePaymentProof(ride)) {
+  if (rideHasVerifiedOnlinePayment(ride)) {
     const gross = grossFareFromRide(ride);
     const fee = platformFeeNgn();
     const driverPayout = Math.max(0, gross - fee);
@@ -1766,7 +1787,7 @@ async function completeTrip(data, context, db) {
           return undefined;
         }
         if (cur && typeof cur === "object" && cur.pending) {
-          return cur;
+          return undefined;
         }
         if (cur != null && cur !== undefined) {
           return undefined;
@@ -1774,7 +1795,7 @@ async function completeTrip(data, context, db) {
         return { pending: true, at: nowMs() };
       });
       if (!ltxn.committed) {
-        console.log("WALLET_CREDIT_DUPLICATE_IGNORED", rideId);
+        console.log("WALLET_CREDIT_LOCK_SKIP", rideId);
       } else {
         const wt = await createWalletTransactionInternal(db, {
           userId: driverId,
@@ -2020,4 +2041,5 @@ module.exports = {
   loadRiderCreateGates,
   loadDispatchGates,
   evaluateDriverForOffer,
+  riderProfileRequirementOk,
 };

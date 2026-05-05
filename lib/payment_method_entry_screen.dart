@@ -36,9 +36,7 @@ class _PaymentMethodEntryScreenState extends State<PaymentMethodEntryScreen> {
   @override
   void initState() {
     super.initState();
-    _provider = widget.type == PaymentMethodType.card
-        ? RiderFeatureFlags.paymentProviderCardDefault
-        : RiderFeatureFlags.paymentProviderBankDefault;
+    _provider = RiderFeatureFlags.paymentProviderCardDefault;
     if (widget.type == PaymentMethodType.card) {
       _labelController.text = 'Visa';
     } else {

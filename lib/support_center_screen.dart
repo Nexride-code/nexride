@@ -518,7 +518,7 @@ class _CreateSupportTicketScreenState
                     textInputAction: TextInputAction.next,
                     decoration: const InputDecoration(
                       labelText: 'Subject',
-                      hintText: 'Example: Driver charged extra cash',
+                      hintText: 'Example: Fare mismatch after Flutterwave payment',
                     ),
                   ),
                   const SizedBox(height: 14),

@@ -246,7 +246,55 @@ async function getRideTrackSummary(data, db) {
   };
 }
 
+/**
+ * Authenticated rider or assigned driver obtains the public tracking token for a ride.
+ * Writes `ride_track_public/{token}` via syncRideTrackPublic.
+ *
+ * @param {Record<string, unknown>} data
+ * @param {{ auth?: { uid?: string } }|null|undefined} context
+ * @param {import("firebase-admin").database.Database} db
+ */
+async function createTripShareToken(data, context, db) {
+  const uid = normUid(context?.auth?.uid);
+  if (!uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const rideId = normUid(data?.rideId ?? data?.ride_id ?? "");
+  if (!rideId) {
+    return { success: false, reason: "invalid_ride_id" };
+  }
+  const rideSnap = await db.ref(`ride_requests/${rideId}`).get();
+  const ride = rideSnap.val();
+  if (!ride || typeof ride !== "object") {
+    return { success: false, reason: "ride_missing" };
+  }
+  const rider = normUid(ride.rider_id ?? ride.riderId);
+  const driver = normUid(ride.driver_id ?? ride.driverId ?? ride.matched_driver_id);
+  if (uid !== rider && uid !== driver) {
+    return { success: false, reason: "forbidden" };
+  }
+  let token = String(ride.track_token ?? "").trim();
+  if (!token) {
+    token = normUid(db.ref().push().key);
+    if (!token) {
+      return { success: false, reason: "token_alloc_failed" };
+    }
+    await db.ref(`ride_requests/${rideId}`).update({
+      track_token: token,
+      updated_at: nowMs(),
+    });
+  }
+  await syncRideTrackPublic(db, rideId);
+  return {
+    success: true,
+    ride_id: rideId,
+    track_token: token,
+    track_path: `/track/${token}`,
+  };
+}
+
 module.exports = {
   syncRideTrackPublic,
   getRideTrackSummary,
+  createTripShareToken,
 };

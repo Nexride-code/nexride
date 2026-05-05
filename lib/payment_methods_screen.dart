@@ -234,42 +234,22 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
                 ),
               ),
               const SizedBox(height: 18),
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.black87,
-                        side: BorderSide(color: _gold),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                      ),
-                      onPressed: () =>
-                          unawaited(_openLinkFlow(PaymentMethodType.card)),
-                      icon: const Icon(Icons.credit_card_rounded),
-                      label: const Text('Link Card'),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.black87,
+                    side: BorderSide(color: _gold),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(18),
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _gold,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(18),
-                        ),
-                      ),
-                      onPressed: () =>
-                          unawaited(_openLinkFlow(PaymentMethodType.bank)),
-                      icon: const Icon(Icons.account_balance_outlined),
-                      label: const Text('Link Bank'),
-                    ),
-                  ),
-                ],
+                  onPressed: () =>
+                      unawaited(_openLinkFlow(PaymentMethodType.card)),
+                  icon: const Icon(Icons.credit_card_rounded),
+                  label: const Text('Link Card'),
+                ),
               ),
               const SizedBox(height: 18),
               const Text(
@@ -307,7 +287,7 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Link a card or bank account to prepare online payment checkout later.',
+                        'Link a card to prepare Flutterwave checkout for trips.',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Colors.black.withValues(alpha: 0.66),

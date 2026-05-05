@@ -2327,8 +2327,9 @@ class AdminDataService {
   String _paymentMethodLabel(String value) {
     final normalized = value.trim().toLowerCase();
     return switch (normalized) {
-      'cash' => 'Cash',
+      'cash' => 'In-app',
       'card' => 'Card',
+      'flutterwave' => 'Flutterwave',
       'bank_transfer' => 'Bank transfer',
       '' => 'Unspecified',
       _ => _titleCase(normalized.replaceAll('_', ' ')),

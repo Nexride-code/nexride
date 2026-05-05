@@ -72,6 +72,34 @@ class RiderRideCloudFunctionsService {
         'requestId': rideId,
         'tripId': rideId,
       });
+
+  Future<Map<String, dynamic>> initiateFlutterwavePayment({
+    required String rideId,
+    required double amount,
+    String currency = 'NGN',
+    String? redirectUrl,
+    String? customerName,
+    String? email,
+  }) =>
+      _call('initiateFlutterwavePayment', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'amount': amount,
+        'currency': currency,
+        if (redirectUrl != null) 'redirect_url': redirectUrl,
+        if (customerName != null) 'customer_name': customerName,
+        if (email != null) 'email': email,
+      });
+
+  Future<Map<String, dynamic>> verifyFlutterwavePayment({
+    required String rideId,
+    required String reference,
+  }) =>
+      _call('verifyFlutterwavePayment', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'reference': reference,
+      });
 }
 
 bool riderRideCallableSucceeded(Map<String, dynamic>? response) =>

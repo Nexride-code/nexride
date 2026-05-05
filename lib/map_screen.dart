@@ -14,6 +14,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'config/rider_app_config.dart';
 import 'config/rider_trip_status_messages.dart';
@@ -227,8 +228,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Map<String, dynamic> _trustSummary = <String, dynamic>{};
   Map<String, dynamic> _trustRulesConfig = const <String, dynamic>{};
   String _selectedLaunchCity = RiderLaunchScope.defaultBrowseCity;
-  /// Next ride request: `card` or `bank_transfer` (cash disabled via [RiderFeatureFlags.disableCashTripPayments]).
-  String _riderTripPaymentMethod = 'card';
+  /// Online only (Flutterwave); must match Cloud Function allow-list.
+  String _riderTripPaymentMethod = 'flutterwave';
 
   static const Color _gold = Color(0xFFD4AF37);
   static const Color _routeGold = Color(0xFFB8892D);
@@ -1070,25 +1071,90 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return TripStateMachine.isChatEligibleRideSnapshot(snapshot);
   }
 
-  /// After a ride request exists, payment method is fixed for that ride.
-  bool get _isRidePaymentMethodLocked {
-    final id = _currentRideId?.trim();
-    if (id == null || id.isEmpty) {
-      return false;
-    }
-    if (_searchingDriver || _driverFound || _tripStarted) {
-      return true;
-    }
-    return _valueAsText(_currentRideSnapshot?['payment_method']).isNotEmpty;
-  }
-
   void _syncRiderPaymentMethodFromRide(Map<String, dynamic> rideData) {
     final pm = _valueAsText(rideData['payment_method']).toLowerCase();
-    if (pm == 'card') {
-      _riderTripPaymentMethod = 'card';
-    } else if (pm == 'bank_transfer' || pm == 'online') {
-      _riderTripPaymentMethod = 'bank_transfer';
+    if (pm == 'card' ||
+        pm == 'credit_card' ||
+        pm == 'debit_card' ||
+        pm == 'flutterwave') {
+      _riderTripPaymentMethod = pm == 'flutterwave' ? 'flutterwave' : 'card';
     }
+  }
+
+  bool _ridePaymentVerified(Map<String, dynamic> ride) {
+    final ps = _valueAsText(
+      ride[RtdbRideRequestFields.paymentStatus] ?? ride['payment_status'],
+    ).toLowerCase();
+    final ptid = _valueAsText(ride['payment_transaction_id']);
+    return ps == 'verified' && ptid.isNotEmpty;
+  }
+
+  /// Opens Flutterwave hosted checkout; polls RTDB and calls verify until paid or timeout.
+  Future<bool> _runFlutterwaveHostedCheckoutFlow({
+    required String rideId,
+    required Map<String, dynamic> rideSnapshot,
+  }) async {
+    final fare = _asDouble(rideSnapshot['fare']) ?? 0;
+    if (!fare.isFinite || fare <= 0) {
+      _showSnackBar('Invalid fare for payment.');
+      return false;
+    }
+    final user = FirebaseAuth.instance.currentUser;
+    final init = await _rideCloud.initiateFlutterwavePayment(
+      rideId: rideId,
+      amount: fare,
+      currency: 'NGN',
+      customerName: user?.displayName,
+      email: user?.email,
+    );
+    if (init['success'] != true) {
+      _showSnackBar('Could not start payment: ${riderRideCallableReason(init)}');
+      return false;
+    }
+    final url = _firstNonEmptyText(<dynamic>[
+      init['authorization_url'],
+      init['authorizationUrl'],
+    ]);
+    final txRef = _firstNonEmptyText(<dynamic>[init['tx_ref'], init['txRef']]);
+    if (url.isEmpty || txRef.isEmpty) {
+      _showSnackBar('Payment link missing. Try again.');
+      return false;
+    }
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme) {
+      _showSnackBar('Invalid payment link.');
+      return false;
+    }
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched) {
+      _showSnackBar('Could not open payment page.');
+      return false;
+    }
+    _showSnackBar(
+      'Complete payment in your browser, then return here. We will match a driver once payment is verified.',
+    );
+    for (var i = 0; i < 90; i++) {
+      if (_rideRequestUserAborted) {
+        return false;
+      }
+      await Future<void>.delayed(const Duration(seconds: 2));
+      final snap = await _rideRequestsRef.child(rideId).get();
+      final row = _asStringDynamicMap(snap.value);
+      if (row != null && _ridePaymentVerified(row)) {
+        return true;
+      }
+      if (i % 3 == 2) {
+        try {
+          await _rideCloud.verifyFlutterwavePayment(
+            rideId: rideId,
+            reference: txRef,
+          );
+        } catch (_) {
+          /* network — keep polling */
+        }
+      }
+    }
+    return false;
   }
 
   String? get _currentRiderUid => FirebaseAuth.instance.currentUser?.uid.trim();
@@ -4001,9 +4067,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildTripPaymentMethodSelectorCard() {
-    if (!RiderFeatureFlags.disableCashTripPayments) {
-      return const SizedBox.shrink();
-    }
     return _buildPanelCard(
       backgroundColor: Colors.white,
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -4028,66 +4091,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 6),
           Text(
-            RiderFeatureFlags.disableCashTripPayments
-                ? 'Cash is unavailable for now. Choose card or bank transfer.'
-                : 'Choose how you will pay.',
+            'Trips are paid in-app with card (Flutterwave). Payment is verified on our servers before drivers are matched.',
             style: const TextStyle(
               color: _panelMutedInk,
               fontSize: 12,
               fontWeight: FontWeight.w600,
               height: 1.35,
             ),
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              ChoiceChip(
-                label: const Text('Card'),
-                selected: _riderTripPaymentMethod == 'card',
-                onSelected: (selected) {
-                  if (!selected || _isRidePaymentMethodLocked) {
-                    return;
-                  }
-                  setState(() => _riderTripPaymentMethod = 'card');
-                },
-                selectedColor: _gold.withValues(alpha: 0.22),
-                labelStyle: TextStyle(
-                  color: _riderTripPaymentMethod == 'card'
-                      ? _panelInk
-                      : _panelMutedInk,
-                  fontWeight: FontWeight.w700,
-                ),
-                side: BorderSide(
-                  color: _riderTripPaymentMethod == 'card'
-                      ? _gold
-                      : _panelBorder,
-                ),
-              ),
-              ChoiceChip(
-                label: const Text('Bank transfer'),
-                selected: _riderTripPaymentMethod == 'bank_transfer',
-                onSelected: (selected) {
-                  if (!selected || _isRidePaymentMethodLocked) {
-                    return;
-                  }
-                  setState(() => _riderTripPaymentMethod = 'bank_transfer');
-                },
-                selectedColor: _gold.withValues(alpha: 0.22),
-                labelStyle: TextStyle(
-                  color: _riderTripPaymentMethod == 'bank_transfer'
-                      ? _panelInk
-                      : _panelMutedInk,
-                  fontWeight: FontWeight.w700,
-                ),
-                side: BorderSide(
-                  color: _riderTripPaymentMethod == 'bank_transfer'
-                      ? _gold
-                      : _panelBorder,
-                ),
-              ),
-            ],
           ),
         ],
       ),
@@ -5810,12 +5820,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'duration_min': fareBreakdown.durationMin,
         RtdbRideRequestFields.etaMin: fareBreakdown.durationMin,
         'dropoff': destinationPayload,
-        'payment_method': RiderFeatureFlags.disableCashTripPayments
-            ? _riderTripPaymentMethod
-            : 'cash',
-        RtdbRideRequestFields.paymentStatus: RiderFeatureFlags.disableCashTripPayments
-            ? 'pending'
-            : 'not_required',
+        'payment_method': _riderTripPaymentMethod,
+        RtdbRideRequestFields.paymentStatus: 'pending',
         'settlement_status': 'pending',
         'support_status': 'normal',
         'accepted_at': null,
@@ -5833,11 +5839,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'verifiedBadge': _trustSummary['verifiedBadge'] == true,
           'rating': _reputation['averageRating'] ?? 5.0,
           'ratingCount': _reputation['ratingCount'] ?? 0,
-          'cashAccessStatus': RiderFeatureFlags.disableCashTripPayments
-              ? 'restricted'
-              : (_trustSummary['cashAccessStatus'] ??
-                  _paymentFlags['cashAccessStatus'] ??
-                  'enabled'),
+          'cashAccessStatus': 'restricted',
           'riskStatus':
               _trustSummary['riskStatus'] ?? _riskFlags['status'] ?? 'clear',
         },
@@ -5863,13 +5865,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'created_at': rtdb.ServerValue.timestamp,
         'requested_at': rtdb.ServerValue.timestamp,
         'updated_at': rtdb.ServerValue.timestamp,
-        if (RiderFeatureFlags.disableCashTripPayments) ...<String, dynamic>{
-          'payment_method': _riderTripPaymentMethod,
-          'payment_context': <String, dynamic>{
-            'method': _riderTripPaymentMethod,
-            'channel':
-                _riderTripPaymentMethod == 'card' ? 'card' : 'bank_transfer',
-          },
+        'payment_context': <String, dynamic>{
+          'method': _riderTripPaymentMethod,
+          'channel': 'card',
         },
       };
 
@@ -6004,7 +6002,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         throw StateError('missing_ride_id_in_create_response');
       }
       _pendingRideRequestSubmissionId = rideId;
-      final Map<String, dynamic> committedRideData;
+      Map<String, dynamic> committedRideData;
       if (resumedExistingActiveTrip) {
         committedRideData = await _awaitRideSnapshotForActiveTripResume(rideId);
       } else {
@@ -6041,6 +6039,40 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'status=${eff['status']} trip_state=${eff['trip_state']} '
           'driver_id=${eff['driver_id']} market=${eff['market']} '
           'market_pool=${eff[RtdbRideRequestFields.marketPool]}',
+        );
+      }
+      if (!_ridePaymentVerified(committedRideData)) {
+        final paidOk = await _runFlutterwaveHostedCheckoutFlow(
+          rideId: rideId,
+          rideSnapshot: committedRideData,
+        );
+        if (!paidOk) {
+          _logRideFlow('RIDER_PAYMENT_ABORT rideId=$rideId');
+          try {
+            await _rideCloud.cancelRideRequest(
+              rideId: rideId,
+              cancelReason: 'payment_failed',
+            );
+          } catch (e) {
+            _logRideFlow('cancel after payment fail error=$e');
+          }
+          _clearRideSearchTimeout(reason: 'payment_failed');
+          _pendingRideRequestSubmissionId = null;
+          _showSnackBar('Payment was not completed. Trip request cancelled.');
+          await _resetRideState(clearDestination: true);
+          return;
+        }
+        final postPaySnap = await _rideRequestsRef.child(rideId).get().timeout(
+              const Duration(seconds: 18),
+            );
+        final postParsed = _asStringDynamicMap(postPaySnap.value);
+        if (postParsed != null) {
+          committedRideData = postParsed;
+        }
+        await _syncRideOperationalViews(
+          rideId: rideId,
+          rideData: Map<String, dynamic>.from(committedRideData),
+          lastEvent: 'rider_payment_verified',
         );
       }
       if (_rideRequestUserAborted) {
@@ -6460,10 +6492,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
         if (status == 'completed') {
           _logRideFlow('ride completed rideId=$rideId');
-          final proofRideId = rideId;
-          final proofSnapshot = Map<String, dynamic>.from(data);
-          final proofPaymentMethod =
-              _valueAsText(proofSnapshot['payment_method']).toLowerCase();
           await _endCallForRideLifecycle(rideId: rideId);
           await _saveRiderTrip(rideId, data);
           if (_currentRiderUid?.isNotEmpty ?? false) {
@@ -6484,20 +6512,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               completedDriverId != 'waiting' &&
               mounted) {
             Future<void>.microtask(() => _showRatingDialog(completedDriverId));
-          }
-          if (proofPaymentMethod == 'bank_transfer' ||
-              proofPaymentMethod == 'online') {
-            unawaited(
-              Future<void>.delayed(const Duration(seconds: 2)).then((_) async {
-                if (!mounted) {
-                  return;
-                }
-                await _promptBankTransferProofUpload(
-                  rideId: proofRideId,
-                  rideSnapshot: proofSnapshot,
-                );
-              }),
-            );
           }
         } else if (status == 'cancelled' ||
             status == 'driver_cancelled' ||

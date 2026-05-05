@@ -7,13 +7,22 @@ class RiderFeatureFlags {
   static bool get showTrustWarnings => false;
   static bool get enableOnlinePaymentMethods => true;
 
-  /// When true, riders cannot pay with cash for trips; card / in-app online only.
+  /// Phase 1 production: car rides only (no dispatch / mart / food entry).
+  static const bool phase1CarRidesOnly = true;
+
+  /// Cash is not supported; trips use Flutterwave (card/online) only.
   static const bool disableCashTripPayments = true;
   static const String paymentProviderCardDefault = 'flutterwave_ready';
-  static const String paymentProviderBankDefault = 'bank_transfer_ready';
+
+  /// Cash payment picker removed — server validates [payment_method] against allow-list.
+  static bool get showRidePaymentMethodPicker => false;
 
   static bool isServiceEnabled(String serviceKey) {
-    switch (serviceKey.trim().toLowerCase()) {
+    final k = serviceKey.trim().toLowerCase();
+    if (phase1CarRidesOnly) {
+      return k == 'ride';
+    }
+    switch (k) {
       case 'ride':
       case 'dispatch':
       case 'dispatch_delivery':

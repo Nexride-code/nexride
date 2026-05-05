@@ -131,6 +131,60 @@
         ".write": false
       }
     },
+    "user_active_delivery": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "driver_active_delivery": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "delivery_offer_queue": {
+      "$driverId": {
+        ".read": "auth != null && auth.uid === $driverId",
+        ".write": false,
+        "$deliveryId": {
+          ".read": "auth != null && auth.uid === $driverId",
+          ".write": false
+        }
+      }
+    },
+    "delivery_offer_fanout": {
+      "$deliveryId": {
+        ".read": false,
+        ".write": false,
+        "$driverId": {
+          ".read": false,
+          ".write": false
+        }
+      }
+    },
+    "active_deliveries": {
+      "$deliveryId": {
+        ".read": "auth != null && ((data.child('customer_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid) || (root.child('delivery_requests/' + $deliveryId + '/customer_id').val() === auth.uid) || (root.child('delivery_requests/' + $deliveryId + '/driver_id').val() === auth.uid))",
+        ".write": false
+      }
+    },
+    "delivery_requests": {
+      ".read": "auth != null && ((query.orderByChild == 'customer_id' && query.equalTo == auth.uid) || (root.child('drivers/' + auth.uid).exists() && query.orderByChild == 'market_pool' && ((query.equalTo != null && (query.equalTo == root.child('drivers/' + auth.uid + '/market').val() || query.equalTo == root.child('drivers/' + auth.uid + '/market_pool').val() || query.equalTo == root.child('drivers/' + auth.uid + '/city').val())) || (query.equalTo == null && query.startAt != null && query.endAt != null && query.startAt == query.endAt && (query.startAt == root.child('drivers/' + auth.uid + '/market').val() || query.startAt == root.child('drivers/' + auth.uid + '/market_pool').val() || query.startAt == root.child('drivers/' + auth.uid + '/city').val())))))",
+      ".indexOn": [
+        "customer_id",
+        "driver_id",
+        "matched_driver_id",
+        "market_pool",
+        "status",
+        "trip_state",
+        "updated_at"
+      ],
+      "$deliveryId": {
+        ".read": "auth != null && (((data.child('customer_id').val() === auth.uid) || (data.child('rider_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid) || (data.child('matched_driver_id').val() === auth.uid)) || (query.orderByChild == 'market_pool' && ((query.equalTo != null && query.equalTo == root.child('drivers/' + auth.uid + '/market').val()) || (query.equalTo == null && query.startAt != null && query.endAt != null && query.startAt == query.endAt && query.startAt == root.child('drivers/' + auth.uid + '/market').val())) && root.child('drivers/' + auth.uid).exists() && root.child('drivers/' + auth.uid + '/market').val() == data.child('market_pool').val() && (data.child('driver_id').val() == null || data.child('driver_id').val() === '' || data.child('driver_id').val() === 'waiting') && (!data.hasChild('driverId') || data.child('driverId').val() == null || data.child('driverId').val() === '' || data.child('driverId').val() === 'waiting')) || (root.child('drivers/' + auth.uid).exists() && (data.child('market_pool').val() === root.child('drivers/' + auth.uid + '/dispatch_market').val() || data.child('market_pool').val() === root.child('drivers/' + auth.uid + '/market_pool').val() || data.child('market_pool').val() === root.child('drivers/' + auth.uid + '/market').val() || data.child('market_pool').val() === root.child('drivers/' + auth.uid + '/city').val() || data.child('market').val() === root.child('drivers/' + auth.uid + '/dispatch_market').val() || data.child('market').val() === root.child('drivers/' + auth.uid + '/market_pool').val() || data.child('market').val() === root.child('drivers/' + auth.uid + '/market').val() || data.child('market').val() === root.child('drivers/' + auth.uid + '/city').val()) && (data.child('driver_id').val() == null || data.child('driver_id').val() === '' || data.child('driver_id').val() === 'waiting') && (!data.hasChild('driverId') || data.child('driverId').val() == null || data.child('driverId').val() === '' || data.child('driverId').val() === 'waiting') && (data.child('trip_state').val() === 'searching' || data.child('status').val() === 'searching' || data.child('trip_state').val() === 'requested' || data.child('status').val() === 'requesting' || data.child('trip_state').val() === 'searching_driver' || data.child('trip_state').val() === 'matching' || data.child('trip_state').val() === 'awaiting_match')))",
+        ".write": false
+      }
+    },
     "ride_requests": {
       ".read": "auth != null && ((query.orderByChild == 'rider_id' && query.equalTo == auth.uid) || (root.child('drivers/' + auth.uid).exists() && query.orderByChild == 'market_pool' && ((query.equalTo != null && (query.equalTo == root.child('drivers/' + auth.uid + '/market').val() || query.equalTo == root.child('drivers/' + auth.uid + '/market_pool').val() || query.equalTo == root.child('drivers/' + auth.uid + '/city').val())) || (query.equalTo == null && query.startAt != null && query.endAt != null && query.startAt == query.endAt && (query.startAt == root.child('drivers/' + auth.uid + '/market').val() || query.startAt == root.child('drivers/' + auth.uid + '/market_pool').val() || query.startAt == root.child('drivers/' + auth.uid + '/city').val())))))",
       ".indexOn": [

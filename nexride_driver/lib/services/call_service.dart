@@ -1,11 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:firebase_auth/firebase_auth.dart' show FirebaseAuth;
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 
 import '../support/realtime_database_error_support.dart';
 import 'ride_cloud_functions_service.dart';
@@ -151,14 +149,11 @@ class CallService {
   CallService({
     rtdb.FirebaseDatabase? database,
     String? agoraAppId,
-    String? tokenEndpoint,
   })  : _database = database ?? rtdb.FirebaseDatabase.instance,
-        _agoraAppId = _resolveAgoraAppId(agoraAppId),
-        _agoraTokenEndpoint = _resolveTokenEndpoint(tokenEndpoint);
+        _agoraAppId = _resolveAgoraAppId(agoraAppId);
 
   final rtdb.FirebaseDatabase _database;
   final String _agoraAppId;
-  final String _agoraTokenEndpoint;
   final String _agoraChannelPrefix = _resolveChannelPrefix();
   final Set<String> _syncedRideIds = <String>{};
   final Set<String> _syncedReceiverIds = <String>{};
@@ -678,61 +673,12 @@ class CallService {
       debugPrint('[CALL_TOKEN_FETCH_FAIL] rideId=$rideId source=callable error=$error');
     }
 
-    if (_agoraTokenEndpoint.isEmpty) {
-      _cachedTokenChannelId = null;
-      _cachedTokenUserId = null;
-      _cachedToken = null;
-      _cachedJoinAgoraChannel = null;
-      _cachedJoinRtcUid = null;
-      return null;
-    }
-
-    final uri = Uri.parse(_agoraTokenEndpoint).replace(
-      queryParameters: <String, String>{
-        'channel': rideId,
-        'uid': agoraUid,
-      },
-    );
-
-    try {
-      final response = await http.get(
-        uri,
-        headers: const <String, String>{'Accept': 'application/json'},
-      ).timeout(const Duration(seconds: 12));
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError('status_${response.statusCode}');
-      }
-
-      final decoded = jsonDecode(response.body);
-      if (decoded is! Map) {
-        throw const FormatException('invalid_json');
-      }
-
-      final responseMap = decoded.map<String, dynamic>(
-        (key, value) => MapEntry(key.toString(), value),
-      );
-      final token = responseMap['token']?.toString().trim() ?? '';
-      if (token.isEmpty) {
-        throw const FormatException('missing_token');
-      }
-
-      _cachedJoinAgoraChannel = null;
-      _cachedJoinRtcUid = null;
-      _cachedTokenChannelId = rideId;
-      _cachedTokenUserId = normalizedUserId;
-      _cachedToken = token;
-
-      debugPrint('[CALL_TOKEN_FETCH_OK] rideId=$rideId source=http_fallback');
-      return token;
-    } catch (error) {
-      _cachedTokenChannelId = null;
-      _cachedTokenUserId = null;
-      _cachedToken = null;
-      _cachedJoinAgoraChannel = null;
-      _cachedJoinRtcUid = null;
-      debugPrint('[CALL_TOKEN_FETCH_FAIL] rideId=$rideId error=$error');
-      return null;
-    }
+    _cachedTokenChannelId = null;
+    _cachedTokenUserId = null;
+    _cachedToken = null;
+    _cachedJoinAgoraChannel = null;
+    _cachedJoinRtcUid = null;
+    return null;
   }
 
   Future<bool> _transitionCallStatus({
@@ -1292,27 +1238,6 @@ String _resolveAgoraAppId(String? override) {
     defaultValue: 'dcbfe108c8c54bee946c7e9b4aac442c',
   );
   return appId.trim();
-}
-
-String _resolveTokenEndpoint(String? override) {
-  final explicit = (override ?? '').trim();
-  if (explicit.isNotEmpty) {
-    return explicit;
-  }
-
-  const endpoint = String.fromEnvironment('AGORA_TOKEN_ENDPOINT');
-  if (endpoint.trim().isNotEmpty) {
-    return endpoint.trim();
-  }
-
-  // Rider/legacy builds may expose one of these compile-time keys.
-  const fallbackCallToken = String.fromEnvironment('CALL_TOKEN_ENDPOINT');
-  if (fallbackCallToken.trim().isNotEmpty) {
-    return fallbackCallToken.trim();
-  }
-
-  const fallbackAgoraToken = String.fromEnvironment('AGORA_CALL_TOKEN_ENDPOINT');
-  return fallbackAgoraToken.trim();
 }
 
 String _resolveChannelPrefix() {

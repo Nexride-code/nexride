@@ -19,6 +19,73 @@ function pickupAreaHint(ride) {
   return String(ride?.pickup_area ?? p.area ?? p.city ?? "").trim().slice(0, 80) || "—";
 }
 
+async function supportCreateTicket(data, context, db) {
+  if (!context.auth?.uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const uid = normUid(context.auth.uid);
+  const subject = String(data?.subject ?? "").trim().slice(0, 200);
+  const body = String(data?.body ?? data?.message ?? "").trim().slice(0, 8000);
+  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  if (subject.length < 4) {
+    return { success: false, reason: "invalid_subject" };
+  }
+  const now = Date.now();
+  const ticketRef = db.ref("support_tickets").push();
+  const ticketId = normUid(ticketRef.key);
+  if (!ticketId) {
+    return { success: false, reason: "ticket_id_failed" };
+  }
+  await ticketRef.set({
+    createdByUserId: uid,
+    subject,
+    status: "open",
+    ride_id: rideId || null,
+    createdAt: now,
+    created_at: now,
+    updatedAt: now,
+    updated_at: now,
+    last_message: body ? body.slice(0, 500) : null,
+    last_message_at: body ? now : null,
+  });
+  if (body) {
+    const msgKey = db.ref("support_ticket_messages").push().key;
+    if (msgKey) {
+      await db.ref(`support_ticket_messages/${msgKey}`).set({
+        ticketId,
+        body,
+        authorUid: uid,
+        createdAt: now,
+        role: "user",
+      });
+    }
+  }
+  logger.info("supportCreateTicket", { ticketId, uid });
+  return { success: true, reason: "created", ticketId };
+}
+
+async function supportGetTicket(data, context, db) {
+  if (!context.auth?.uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const uid = normUid(context.auth.uid);
+  const ticketId = normUid(data?.ticketId ?? data?.ticket_id);
+  if (!ticketId) {
+    return { success: false, reason: "invalid_ticket_id" };
+  }
+  const snap = await db.ref(`support_tickets/${ticketId}`).get();
+  const row = snap.val();
+  if (!row || typeof row !== "object") {
+    return { success: false, reason: "not_found" };
+  }
+  const owner = normUid(row.createdByUserId);
+  const staff = await isNexRideAdminOrSupport(db, context);
+  if (owner !== uid && !staff) {
+    return { success: false, reason: "forbidden" };
+  }
+  return { success: true, ticket: row, ticketId };
+}
+
 async function supportSearchRide(data, context, db) {
   if (!(await isNexRideAdminOrSupport(db, context))) {
     return { success: false, reason: "unauthorized" };
@@ -156,6 +223,8 @@ async function supportSearchUser(data, context, db) {
 }
 
 module.exports = {
+  supportCreateTicket,
+  supportGetTicket,
   supportSearchRide,
   supportSearchUser,
   supportListTickets,

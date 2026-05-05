@@ -24,6 +24,7 @@ import '../services/call_service.dart';
 import '../services/dispatch_photo_upload_service.dart';
 import '../services/driver_alert_sound_service.dart';
 import '../services/local_backend_simulation_service.dart';
+import '../services/delivery_cloud_functions_service.dart';
 import '../services/ride_cloud_functions_service.dart';
 import '../services/road_route_service.dart';
 import '../services/driver_trip_safety_service.dart';
@@ -114,8 +115,8 @@ const List<String> _kDriverRiderReportReasons = <String>[
   'other',
 ];
 const List<String> _kDriverSettlementMethods = <String>[
-  'cash',
   'card',
+  'flutterwave',
   'bank_transfer',
   'unspecified',
 ];
@@ -123,7 +124,7 @@ const List<String> _kDriverEvidenceTypes = <String>[
   'chat log',
   'call log',
   'dropoff confirmation',
-  'cash handover note',
+  'payment confirmation',
   'other',
 ];
 
@@ -253,6 +254,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     with WidgetsBindingObserver {
   final rtdb.DatabaseReference _rideRequestsRef =
       rtdb.FirebaseDatabase.instance.ref('ride_requests');
+  final rtdb.DatabaseReference _deliveryRequestsRef =
+      rtdb.FirebaseDatabase.instance.ref('delivery_requests');
   final rtdb.DatabaseReference _driversRef =
       rtdb.FirebaseDatabase.instance.ref('drivers');
   final CallService _callService = CallService();
@@ -271,6 +274,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       FirebaseFunctions.instanceFor(region: 'us-central1');
   late final RideCloudFunctionsService _rideCloud =
       RideCloudFunctionsService(functions: _functions);
+  late final DeliveryCloudFunctionsService _deliveryCloud =
+      DeliveryCloudFunctionsService(functions: _functions);
   final RoadRouteService _roadRouteService = RoadRouteService();
   final Set<String> _presentedRideIds = <String>{};
   final Set<String> _timedOutRideIds = <String>{};
@@ -311,6 +316,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   StreamSubscription<Position>? _positionStream;
   StreamSubscription<rtdb.DatabaseEvent>? _rideRequestSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _driverOfferQueueChildRemovedSubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _deliveryOfferQueueChildAddedSubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _deliveryOfferQueueChildRemovedSubscription;
 
   /// Incremental mirror of RTDB `driver_offer_queue/{uid}/*` for ChildAdded/Removed processing.
   final Map<String, dynamic> _driverOfferQueueReplica = <String, dynamic>{};
@@ -4143,8 +4150,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
   String _paymentMethodLabel(String method) {
     return switch (method.trim().toLowerCase()) {
-      'cash' => 'Cash',
+      'cash' => 'In-app',
       'card' => 'Card',
+      'credit_card' => 'Card',
+      'debit_card' => 'Card',
+      'flutterwave' => 'Flutterwave',
       'bank_transfer' => 'Bank transfer',
       _ => 'Unspecified',
     };
@@ -4163,7 +4173,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return 'Payment review';
     }
     if (cashAccessStatus == 'limited') {
-      return 'Limited cash access';
+      return 'Limited payment access';
     }
     if (nonPaymentReports > 0) {
       return 'Prior payment issue';
@@ -7579,7 +7589,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     required String reason,
   }) async {
     final hadListener = _rideRequestSubscription != null ||
-        _driverOfferQueueChildRemovedSubscription != null;
+        _driverOfferQueueChildRemovedSubscription != null ||
+        _deliveryOfferQueueChildAddedSubscription != null ||
+        _deliveryOfferQueueChildRemovedSubscription != null;
     final previousCity = _rideRequestsListenerBoundCity;
     _rideRequestListenerToken += 1;
     final invalidatedToken = _rideRequestListenerToken;
@@ -7593,8 +7605,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
     final subscription = _rideRequestSubscription;
     final removedSub = _driverOfferQueueChildRemovedSubscription;
+    final deliveryAddedSub = _deliveryOfferQueueChildAddedSubscription;
+    final deliveryRemovedSub = _deliveryOfferQueueChildRemovedSubscription;
     _rideRequestSubscription = null;
     _driverOfferQueueChildRemovedSubscription = null;
+    _deliveryOfferQueueChildAddedSubscription = null;
+    _deliveryOfferQueueChildRemovedSubscription = null;
     _driverOfferQueueReplica.clear();
     _rideDiscoveryListenerHealthy = false;
     _socketStatus = 'disconnected';
@@ -7603,6 +7619,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _driverOfferQueueBoundUid = null;
     await subscription?.cancel();
     await removedSub?.cancel();
+    await deliveryAddedSub?.cancel();
+    await deliveryRemovedSub?.cancel();
     if (hadListener) {
       _logRideReq(
         '[MATCH_DEBUG][QUERY_DETACH:ride_requests?orderByChild=market_pool&equalTo=${previousCity ?? 'none'}] '
@@ -8495,8 +8513,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       );
       return null;
     }
-    final snapshot =
-        await _rideRequestChildGetIosSafe(rideId, 'load_live_popup_ride');
+    final isDeliveryOffer =
+        offerQueueFallbackData?['__nexride_request_kind'] == 'delivery';
+    final rtdb.DataSnapshot snapshot = isDeliveryOffer
+        ? await _deliveryRequestsRef.child(rideId.trim()).get()
+        : await _rideRequestChildGetIosSafe(rideId, 'load_live_popup_ride');
     final liveMap = _asStringDynamicMap(snapshot.value);
     final fb = offerQueueFallbackData;
     final useOfferFlow =
@@ -8881,7 +8902,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           'available': true,
           'status': 'available',
           'dispatch_state': 'available',
-          'active_services': <String>['ride', 'dispatch_delivery'],
+          'active_services': <String>['ride'],
           'market': cityToSave,
           'market_pool': cityToSave,
           'dispatch_market': cityToSave,
@@ -9619,6 +9640,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       RtdbRideRequestFields.expiresAt: offer['expires_at'],
       RtdbRideRequestFields.createdAt: offer['created_at'],
       '__nexride_from_offer_queue': true,
+      '__nexride_request_kind': offer['__nexride_request_kind'],
+      'delivery_id': offer['delivery_id'],
+      'delivery_state': offer['delivery_state'],
     };
   }
 
@@ -10828,6 +10852,52 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         },
         onError: onOfferQueueChildError,
       );
+      final deliveryOfferQueueRef = rtdb.FirebaseDatabase.instance.ref(
+        'delivery_offer_queue/$discoveryUid',
+      );
+      _deliveryOfferQueueChildAddedSubscription =
+          deliveryOfferQueueRef.onChildAdded.listen(
+        (event) async {
+          offerQueueStreamNoteEvent();
+          final key = event.snapshot.key?.trim();
+          if (key == null || key.isEmpty) {
+            return;
+          }
+          debugPrint('DRIVER_DELIVERY_OFFER_RECEIVED deliveryId=$key');
+          _driverOfferQueueReplica[key] = event.snapshot.value;
+          try {
+            await queueRideMapProcessing(
+              Map<String, dynamic>.from(_driverOfferQueueReplica),
+              source: 'delivery_child_added',
+              listenerToken: listenerToken,
+            );
+          } catch (error) {
+            _log('delivery offer queue child_added failed error=$error');
+          }
+        },
+        onError: onOfferQueueChildError,
+      );
+      _deliveryOfferQueueChildRemovedSubscription =
+          deliveryOfferQueueRef.onChildRemoved.listen(
+        (event) async {
+          offerQueueStreamNoteEvent();
+          final key = event.snapshot.key?.trim();
+          if (key != null && key.isNotEmpty) {
+            _driverOfferQueueReplica.remove(key);
+            _driverOfferRideCache.remove(key);
+          }
+          try {
+            await queueRideMapProcessing(
+              Map<String, dynamic>.from(_driverOfferQueueReplica),
+              source: 'delivery_child_removed',
+              listenerToken: listenerToken,
+            );
+          } catch (error) {
+            _log('delivery offer queue child_removed failed error=$error');
+          }
+        },
+        onError: onOfferQueueChildError,
+      );
       _logRideReq(
         '[MATCH_DEBUG][DRIVER_ATTACH] market=$driverCity token=$listenerToken '
         'reason=$reason prime_get=skipped_ios_safe',
@@ -12025,11 +12095,6 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     _acceptingPopupRideId = rideId;
-    _logRtdb(
-      'accept requested rideId=$rideId path=ride_requests/$rideId popupRideId=${popupRideId ?? rideId}',
-    );
-
-    final ref = _rideRequestsRef.child(rideId);
     final effectiveAcceptRequestedAt =
         acceptRequestedAt ?? DateTime.now().millisecondsSinceEpoch;
     if (_effectiveDriverId.isEmpty ||
@@ -12109,7 +12174,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       Map<String, dynamic>? preflightRideData = _driverOfferRideCache[rideId];
       rtdb.DataSnapshot? preflightSnapshot;
       if (preflightRideData == null) {
-        preflightSnapshot = await ref.get();
+        preflightSnapshot = await _rideRequestsRef.child(rideId).get();
+        preflightRideData = _asStringDynamicMap(preflightSnapshot.value);
+      }
+      if (preflightRideData == null) {
+        preflightSnapshot = await _deliveryRequestsRef.child(rideId).get();
         preflightRideData = _asStringDynamicMap(preflightSnapshot.value);
       }
       if (preflightRideData == null) {
@@ -12119,6 +12188,16 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         );
         return false;
       }
+      final isDeliveryRequest =
+          preflightRideData['__nexride_request_kind'] == 'delivery' ||
+          preflightRideData.containsKey('delivery_state');
+      _logRtdb(
+        'accept requested rideId=$rideId path=${isDeliveryRequest ? 'delivery_requests' : 'ride_requests'}/$rideId '
+        'popupRideId=${popupRideId ?? rideId}',
+      );
+      final rtdb.DatabaseReference ref = isDeliveryRequest
+          ? _deliveryRequestsRef.child(rideId)
+          : _rideRequestsRef.child(rideId);
       final serviceTypeForAccept = _valueAsText(
         preflightRideData['service_type'] ?? preflightRideData['serviceType'],
       ).trim();
@@ -12171,10 +12250,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         'DRIVER_ACCEPT_API_START rideId=$rideId driverId=$driverId',
       );
       print('ACCEPT_CALL_PAYLOAD driverId=$driverId authUid=${authUser.uid}');
-      final functions = FirebaseFunctions.instanceFor(region: 'us-central1');
-      final callable = functions.httpsCallable('acceptRide');
-      final callableResult = await callable.call(callablePayload);
-      final callableResponse = _asStringDynamicMap(callableResult.data);
+      final Map<String, dynamic>? callableResponse;
+      if (isDeliveryRequest) {
+        callableResponse = await _deliveryCloud.acceptDeliveryRequest(
+          deliveryId: rideId,
+        );
+      } else {
+        final callableResult = await FirebaseFunctions.instanceFor(
+          region: 'us-central1',
+        ).httpsCallable('acceptRide').call(callablePayload);
+        callableResponse = _asStringDynamicMap(callableResult.data);
+      }
       final acceptOk = callableResponse?['success'] == true;
       blockedReason = _valueAsText(callableResponse?['reason']);
       acceptLockWasIdempotent = callableResponse?['idempotent'] == true;

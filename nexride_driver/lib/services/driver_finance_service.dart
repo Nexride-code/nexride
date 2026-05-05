@@ -1333,8 +1333,9 @@ class DriverFinanceService {
 
   String _paymentMethodLabel(String value) {
     return switch (value.trim().toLowerCase()) {
-      'cash' => 'Cash',
+      'cash' => 'In-app',
       'card' => 'Card',
+      'flutterwave' => 'Flutterwave',
       'bank_transfer' => 'Bank transfer',
       '' || 'unspecified' => 'Unspecified',
       _ => _titleCase(value),

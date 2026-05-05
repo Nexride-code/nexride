@@ -35,13 +35,6 @@ class RideCloudFunctionsService {
         'tripId': rideId,
       });
 
-  /// @deprecated Prefer [acceptRide] — [driverId] is ignored; auth uid is used.
-  Future<Map<String, dynamic>> acceptRideRequest({
-    required String rideId,
-    required String driverId,
-  }) =>
-      acceptRide(rideId: rideId);
-
   Future<Map<String, dynamic>> driverEnroute({required String rideId}) =>
       _call('driverEnroute', <String, dynamic>{'rideId': rideId});
 

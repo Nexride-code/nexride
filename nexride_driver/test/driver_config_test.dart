@@ -167,7 +167,7 @@ void main() {
             },
           },
         ),
-        paymentMethod: 'cash',
+        paymentMethod: 'flutterwave',
         settlementStatus: 'trip_completed',
         completionState: 'driver_marked_completed',
         city: 'abuja',
@@ -194,7 +194,7 @@ void main() {
             },
           },
         ),
-        paymentMethod: 'cash',
+        paymentMethod: 'flutterwave',
         settlementStatus: 'trip_completed',
         completionState: 'driver_marked_completed',
         city: 'abuja',
@@ -263,7 +263,7 @@ void main() {
     expect(driverServiceCanReceiveRequests(verification, 'ride'), isTrue);
     expect(
       driverServiceCanReceiveRequests(verification, 'dispatch_delivery'),
-      isTrue,
+      isFalse,
     );
     expect(
       driverServiceCanReceiveRequests(verification, 'groceries_mart'),

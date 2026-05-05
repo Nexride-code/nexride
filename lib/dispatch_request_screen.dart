@@ -10,11 +10,11 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'config/rider_app_config.dart';
 import 'config/rtdb_ride_request_contract.dart';
-import 'services/rider_ride_cloud_functions_service.dart';
-import 'support/ride_create_metadata.dart';
+import 'services/rider_delivery_cloud_functions_service.dart';
 import 'services/dispatch_photo_upload_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
@@ -36,7 +36,6 @@ enum _DispatchItemPhotoSource { camera, gallery }
 
 class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   static const Color _gold = Color(0xFFB57A2A);
-  static const Duration _searchTimeoutDuration = Duration(seconds: 90);
   static const Duration _restoreReadTimeout = Duration(seconds: 6);
   static const int _maxRestorePasses = 3;
 
@@ -51,6 +50,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
   final rtdb.DatabaseReference _rideRequestsRef = rtdb.FirebaseDatabase.instance
       .ref('ride_requests');
+  final rtdb.DatabaseReference _deliveryRequestsRef = rtdb
+      .FirebaseDatabase
+      .instance
+      .ref('delivery_requests');
+  final rtdb.DatabaseReference _userActiveDeliveryRef = rtdb
+      .FirebaseDatabase
+      .instance
+      .ref('user_active_delivery');
   final rtdb.DatabaseReference _usersRef = rtdb.FirebaseDatabase.instance.ref(
     'users',
   );
@@ -67,19 +74,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       const RiderTrustRulesService();
   final DispatchPhotoUploadService _dispatchPhotoUploadService =
       const DispatchPhotoUploadService();
-  final RiderRideCloudFunctionsService _rideCloud =
-      RiderRideCloudFunctionsService();
+  final RiderDeliveryCloudFunctionsService _deliveryCloud =
+      RiderDeliveryCloudFunctionsService();
   final TripSafetyTelemetryService _tripSafetyService =
       TripSafetyTelemetryService();
 
   StreamSubscription<rtdb.DatabaseEvent>? _activeRequestSubscription;
   String? _activeRequestId;
   Map<String, dynamic>? _activeRequest;
-  Map<String, dynamic> _verification = <String, dynamic>{};
-  Map<String, dynamic> _riskFlags = <String, dynamic>{};
-  Map<String, dynamic> _paymentFlags = <String, dynamic>{};
-  Map<String, dynamic> _reputation = <String, dynamic>{};
-  Map<String, dynamic> _trustSummary = <String, dynamic>{};
   DispatchPhotoSelectedAsset? _packagePhotoAsset;
   String _selectedLaunchCity = RiderLaunchScope.defaultBrowseCity;
   bool _loading = true;
@@ -166,21 +168,11 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
       if (!mounted) {
         _selectedLaunchCity = preferredLaunchCity;
-        _verification = bundle.verification;
-        _riskFlags = bundle.riskFlags;
-        _paymentFlags = bundle.paymentFlags;
-        _reputation = bundle.reputation;
-        _trustSummary = bundle.trustSummary;
         return;
       }
 
       setState(() {
         _selectedLaunchCity = preferredLaunchCity;
-        _verification = bundle.verification;
-        _riskFlags = bundle.riskFlags;
-        _paymentFlags = bundle.paymentFlags;
-        _reputation = bundle.reputation;
-        _trustSummary = bundle.trustSummary;
       });
     } catch (error, stackTrace) {
       debugPrint('[Dispatch] trust hydrate failed: $error');
@@ -228,6 +220,73 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     try {
       for (var pass = 0; pass < _maxRestorePasses; pass++) {
         debugPrint('[Dispatch] restore pass=${pass + 1} userId=$userId');
+        final pointerSnap = await runOptionalStartupRead<rtdb.DataSnapshot>(
+          source: 'dispatch_request.restore_active_delivery_pointer',
+          path: 'user_active_delivery/$userId',
+          action: () => _userActiveDeliveryRef
+              .child(userId)
+              .get()
+              .timeout(_restoreReadTimeout),
+        );
+        if (pointerSnap != null &&
+            pointerSnap.exists &&
+            pointerSnap.value is Map) {
+          final ptr = _asStringDynamicMap(pointerSnap.value);
+          final deliveryId =
+              ptr?['delivery_id']?.toString().trim() ??
+              ptr?['deliveryId']?.toString().trim() ??
+              '';
+          if (deliveryId.isNotEmpty) {
+            final dSnap = await runOptionalStartupRead<rtdb.DataSnapshot>(
+              source: 'dispatch_request.restore_active_delivery_row',
+              path: 'delivery_requests/$deliveryId',
+              action: () => _deliveryRequestsRef
+                  .child(deliveryId)
+                  .get()
+                  .timeout(_restoreReadTimeout),
+            );
+            if (dSnap != null && dSnap.exists && dSnap.value is Map) {
+              final latestRequest =
+                  _asStringDynamicMap(dSnap.value) ?? <String, dynamic>{};
+              final status =
+                  TripStateMachine.uiStatusFromSnapshot(latestRequest);
+              if (status != 'completed' && status != 'cancelled') {
+                final assignmentReleased =
+                    await _releaseExpiredAssignedDispatchRequestIfNeeded(
+                      deliveryId,
+                      latestRequest,
+                    );
+                if (assignmentReleased) {
+                  continue;
+                }
+                final timedOut = await _cancelTimedOutDispatchRequestIfNeeded(
+                  deliveryId,
+                  latestRequest,
+                );
+                if (timedOut) {
+                  if (!mounted) {
+                    return;
+                  }
+                  setState(() {
+                    _loading = false;
+                  });
+                  return;
+                }
+                _watchRequest(deliveryId);
+                if (!mounted) {
+                  return;
+                }
+                setState(() {
+                  _activeRequestId = deliveryId;
+                  _activeRequest = latestRequest;
+                  _loading = false;
+                });
+                return;
+              }
+            }
+          }
+        }
+
         final snapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
           source: 'dispatch_request.restore_active',
           path: 'ride_requests[orderByChild=rider_id,equalTo=$userId]',
@@ -368,6 +427,72 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     return null;
   }
 
+  bool _deliveryPaymentVerified(Map<String, dynamic> row) {
+    final ps = (row['payment_status']?.toString() ?? '').trim().toLowerCase();
+    final tid = (row['payment_transaction_id']?.toString() ?? '').trim();
+    return ps == 'verified' && tid.isNotEmpty;
+  }
+
+  Future<Map<String, dynamic>?> _runFlutterwaveDeliveryCheckout({
+    required String deliveryId,
+    required double fare,
+  }) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final init = await _deliveryCloud.initiateFlutterwavePayment(
+      deliveryId: deliveryId,
+      amount: fare,
+      currency: 'NGN',
+      customerName: user?.displayName,
+      email: user?.email,
+    );
+    if (init['success'] != true) {
+      _showMessage(
+        'Could not start payment: ${riderDeliveryCallableReason(init)}',
+      );
+      return null;
+    }
+    final url = (init['authorization_url'] ?? init['authorizationUrl'] ?? '')
+        .toString()
+        .trim();
+    final txRef = (init['tx_ref'] ?? init['txRef'] ?? '').toString().trim();
+    if (url.isEmpty || txRef.isEmpty) {
+      _showMessage('Payment link missing.');
+      return null;
+    }
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme) {
+      _showMessage('Invalid payment link.');
+      return null;
+    }
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched) {
+      _showMessage('Could not open payment page.');
+      return null;
+    }
+    _showMessage(
+      'Complete payment in your browser, then return here. Matching starts after verification.',
+    );
+    for (var i = 0; i < 90; i++) {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      final snap = await _deliveryRequestsRef.child(deliveryId).get();
+      final row = _asStringDynamicMap(snap.value);
+      if (row != null && _deliveryPaymentVerified(row)) {
+        return row;
+      }
+      if (i % 3 == 2) {
+        try {
+          await _deliveryCloud.verifyFlutterwavePayment(
+            deliveryId: deliveryId,
+            reference: txRef,
+          );
+        } catch (_) {
+          /* keep polling */
+        }
+      }
+    }
+    return null;
+  }
+
   int _parseTimestamp(dynamic rawValue) {
     if (rawValue is num) {
       return rawValue.toInt();
@@ -416,6 +541,35 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     );
   }
 
+  String _deliveryCreateUserMessage(String reason) {
+    switch (reason) {
+      case 'package_description_required':
+      case 'package_description_too_long':
+        return 'Please describe your package in 3–2000 characters.';
+      case 'recipient_name_required':
+        return 'Please enter the recipient’s name.';
+      case 'recipient_phone_invalid':
+        return 'Enter a valid recipient phone number.';
+      case 'invalid_category':
+        return 'That package category is not supported.';
+      case 'customer_active_delivery':
+        return 'You already have an active delivery. Finish or cancel it first.';
+      case 'user_profile_required':
+        return 'Please complete your profile before sending a delivery.';
+      case 'invalid_market':
+      case 'pickup_location_out_of_region':
+      case 'dropoff_location_out_of_region':
+        return RiderLaunchScope.tripRequestAvailabilityMessage;
+      case 'invalid_fare':
+      case 'fare_above_limit':
+        return 'The delivery fare could not be calculated. Try again.';
+      case 'unsupported_payment_method':
+        return 'This payment method is not available for delivery yet.';
+      default:
+        return 'Unable to send your dispatch request right now.';
+    }
+  }
+
   void _showMessage(String message) {
     if (!mounted) {
       return;
@@ -432,6 +586,13 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   }
 
   String _dispatchPackagePhotoUrl(Map<String, dynamic>? request) {
+    final top =
+        request?['package_photo_url']?.toString().trim() ??
+        request?['packagePhotoUrl']?.toString().trim() ??
+        '';
+    if (top.isNotEmpty) {
+      return top;
+    }
     final dispatchDetails = _asStringDynamicMap(request?['dispatch_details']);
     final nestedUrl =
         dispatchDetails?['packagePhotoUrl']?.toString().trim() ?? '';
@@ -442,6 +603,20 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   }
 
   String _dispatchRecipientSummary(Map<String, dynamic>? request) {
+    final topName =
+        request?['recipient_name']?.toString().trim() ??
+        request?['recipientName']?.toString().trim() ??
+        '';
+    final topPhone =
+        request?['recipient_phone']?.toString().trim() ??
+        request?['recipientPhone']?.toString().trim() ??
+        '';
+    if (topName.isNotEmpty || topPhone.isNotEmpty) {
+      return <String>[
+        if (topName.isNotEmpty) topName,
+        if (topPhone.isNotEmpty) topPhone,
+      ].join(' • ');
+    }
     final dispatchDetails = _asStringDynamicMap(request?['dispatch_details']);
     final recipientName =
         dispatchDetails?['recipient_name']?.toString().trim() ?? '';
@@ -740,7 +915,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
   Future<void> _watchRequest(String requestId) async {
     await _activeRequestSubscription?.cancel();
-    _activeRequestSubscription = _rideRequestsRef
+    _activeRequestSubscription = _deliveryRequestsRef
         .child(requestId)
         .onValue
         .listen(
@@ -824,12 +999,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
     Map<String, dynamic>? expireRes;
     try {
-      expireRes = await _rideCloud.expireRideRequest(rideId: requestId);
+      expireRes = await _deliveryCloud.expireDeliveryRequest(
+        deliveryId: requestId,
+      );
     } catch (_) {}
-    if (!riderRideCallableSucceeded(expireRes)) {
+    if (!riderDeliveryCallableSucceeded(expireRes)) {
       try {
-        await _rideCloud.cancelRideRequest(
-          rideId: requestId,
+        await _deliveryCloud.cancelDeliveryRequest(
+          deliveryId: requestId,
           cancelReason: 'no_drivers_available',
         );
       } catch (_) {}
@@ -992,6 +1169,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       _showMessage('Pickup, dropoff, and package details are required.');
       return;
     }
+    if (recipientName.length < 2) {
+      _showMessage('Recipient name must be at least 2 characters.');
+      return;
+    }
+    if (recipientPhone.length < 8 || recipientPhone.length > 20) {
+      _showMessage('Enter a valid recipient phone number (8–20 digits).');
+      return;
+    }
 
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -1034,17 +1219,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       final dispatchSlug =
           normalizeRideMarketSlug(dispatchMarket) ?? dispatchMarket.trim().toLowerCase();
 
-      final requestRef = _rideRequestsRef.push();
-      final requestId = requestRef.key;
-      if (requestId == null || requestId.isEmpty) {
-        throw StateError('dispatch_request_id_missing');
-      }
+      final photoUploadKey =
+          'pending_${user.uid}_${DateTime.now().millisecondsSinceEpoch}';
 
       DispatchUploadedPhoto? uploadedPackagePhoto;
       if (packagePhotoAsset != null) {
         uploadedPackagePhoto = await _dispatchPhotoUploadService
             .uploadRidePhoto(
-              rideId: requestId,
+              rideId: photoUploadKey,
               actorId: user.uid,
               category: 'package_photo',
               asset: packagePhotoAsset,
@@ -1085,217 +1267,65 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         city: dispatchSlug,
         addressHint: dropoffAddress,
       );
-      final rideScope = _buildServiceAreaFields(city: dispatchSlug, area: pickupArea);
       final pickupScope = _buildServiceAreaFields(city: dispatchSlug, area: pickupArea);
       final destinationScope = _buildServiceAreaFields(
         city: dispatchSlug,
         area: destinationArea,
       );
       final packagePhotoUrl = uploadedPackagePhoto?.fileUrl ?? '';
-      final packagePhotoSubmittedAt = uploadedPackagePhoto == null
-          ? 0
-          : rtdb.ServerValue.timestamp;
-      final dispatchDetails = <String, dynamic>{
-        'package_details': packageDetails,
-        'recipient_name': recipientName,
-        'recipient_phone': recipientPhone,
-        'packagePhotoUrl': packagePhotoUrl,
-        'packagePhotoSubmittedAt': packagePhotoSubmittedAt,
-        'deliveryProofPhotoUrl': '',
-        'deliveryProofSubmittedAt': 0,
-        'pickupConfirmedAt': 0,
-        'deliveredAt': 0,
-        'deliveryProofStatus': 'pending',
-      };
-      final paymentPlaceholder = <String, dynamic>{
-        'provider': 'flutterwave_ready',
-        'status': 'placeholder_pending',
-        'intent_id': '',
-        'tx_ref': '',
-        'initialized_at': rtdb.ServerValue.timestamp,
-        'updated_at': rtdb.ServerValue.timestamp,
-      };
-      final pricingSnapshot = <String, dynamic>{
-        ...fareBreakdown.toMap(),
-        'traffic_window': fareBreakdown.trafficWindowLabel,
-        'distance_km': fareBreakdown.distanceKm,
-        'duration_min': fareBreakdown.durationMin,
-        'computed_at': rtdb.ServerValue.timestamp,
-      };
 
-      final payload = <String, dynamic>{
-        'service_type': RiderServiceType.dispatchDelivery.key,
-        RtdbRideRequestFields.rideId: requestId,
-        'rider_id': user.uid,
-        'driver_id': 'waiting',
-        'status': 'searching',
-        'trip_state': TripLifecycleState.searchingDriver,
-        'state_machine_version': TripStateMachine.schemaVersion,
-        'market': dispatchSlug,
-        'city': dispatchSlug,
-        RtdbRideRequestFields.marketPool: dispatchSlug,
-        'country': rideScope['country'],
-        'country_code': rideScope['country_code'],
-        'area': rideScope['area'],
-        'zone': rideScope['zone'],
-        'community': rideScope['community'],
-        'pickup_area': pickupScope['area'],
-        'pickup_zone': pickupScope['zone'],
-        'pickup_community': pickupScope['community'],
-        'destination_area': destinationScope['area'],
-        'destination_zone': destinationScope['zone'],
-        'destination_community': destinationScope['community'],
-        'service_area': rideScope,
-        'pickup_scope': pickupScope,
-        'destination_scope': destinationScope,
-        'pickup': <String, dynamic>{
-          'lat': pickup.lat,
-          'lng': pickup.lng,
-          ...pickupScope,
-        },
-        'destination': <String, dynamic>{
-          'lat': dropoff.lat,
-          'lng': dropoff.lng,
-          ...destinationScope,
-        },
-        'final_destination': <String, dynamic>{
-          'lat': dropoff.lat,
-          'lng': dropoff.lng,
-          ...destinationScope,
-        },
-        'pickup_address': pickupAddress,
-        'destination_address': dropoffAddress,
-        'final_destination_address': dropoffAddress,
-        'stops': <Map<String, dynamic>>[],
-        'stop_count': 1,
-        'fare': fareBreakdown.totalFare,
-        'distance_km': fareBreakdown.distanceKm,
-        'duration_min': fareBreakdown.durationMin,
-        RtdbRideRequestFields.etaMin: fareBreakdown.durationMin,
-        'dropoff': <String, dynamic>{
-          'lat': dropoff.lat,
-          'lng': dropoff.lng,
-          ...destinationScope,
-        },
-        'payment_method': 'cash',
-        RtdbRideRequestFields.paymentStatus: 'not_required',
-        'payment_placeholder': paymentPlaceholder,
-        'settlement_status': 'pending',
-        'support_status': 'normal',
-        'accepted_at': null,
-        'cancelled_at': null,
-        'completed_at': null,
-        'cancel_reason': '',
-        'fare_breakdown': fareBreakdown.toMap(),
-        'pricing_snapshot': pricingSnapshot,
-        'rider_trust_snapshot': <String, dynamic>{
-          'verificationStatus':
-              (_trustSummary['verificationStatus']?.toString().isNotEmpty ??
-                  false)
-              ? _trustSummary['verificationStatus']
-              : _verification['overallStatus'],
-          'verifiedBadge': _trustSummary['verifiedBadge'] == true,
-          'rating': _reputation['averageRating'] ?? 5.0,
-          'ratingCount': _reputation['ratingCount'] ?? 0,
-          'cashAccessStatus':
-              _trustSummary['cashAccessStatus'] ??
-              _paymentFlags['cashAccessStatus'] ??
-              'enabled',
-          'riskStatus':
-              _trustSummary['riskStatus'] ?? _riskFlags['status'] ?? 'clear',
-        },
-        'route_basis': <String, dynamic>{
-          'country': rideScope['country'],
-          'country_code': rideScope['country_code'],
-          'market': dispatchSlug,
-          'area': rideScope['area'],
-          'zone': rideScope['zone'],
-          'community': rideScope['community'],
-          'pickup_scope': pickupScope,
-          'destination_scope': destinationScope,
-          'pickup_address': pickupAddress,
-          'destination_address': dropoffAddress,
-          'stops': <Map<String, dynamic>>[],
-          'stop_count': 1,
-          'distance_km': fareBreakdown.distanceKm,
-          'duration_min': fareBreakdown.durationMin,
-          'fare_estimate': fareBreakdown.totalFare,
-          'fare_breakdown': fareBreakdown.toMap(),
-          'expected_route_points': <Map<String, double>>[
-            <String, double>{'lat': pickup.lat, 'lng': pickup.lng},
-            <String, double>{'lat': dropoff.lat, 'lng': dropoff.lng},
-          ],
-        },
-        'created_at': rtdb.ServerValue.timestamp,
-        'requested_at': rtdb.ServerValue.timestamp,
-        'search_started_at': rtdb.ServerValue.timestamp,
-        'updated_at': rtdb.ServerValue.timestamp,
-        'search_timeout_at':
-            DateTime.now().millisecondsSinceEpoch +
-            _searchTimeoutDuration.inMilliseconds,
-        'request_expires_at':
-            DateTime.now().millisecondsSinceEpoch +
-            _searchTimeoutDuration.inMilliseconds,
-        RtdbRideRequestFields.expiresAt:
-            DateTime.now().millisecondsSinceEpoch +
-            _searchTimeoutDuration.inMilliseconds,
-        'packagePhotoUrl': packagePhotoUrl,
-        'packagePhotoSubmittedAt': packagePhotoSubmittedAt,
-        'deliveryProofPhotoUrl': '',
-        'deliveryProofSubmittedAt': 0,
-        'pickupConfirmedAt': 0,
-        'deliveredAt': 0,
-        'deliveryProofStatus': 'pending',
-        'dispatch_details': dispatchDetails,
+      final pickupPayload = <String, dynamic>{
+        'lat': pickup.lat,
+        'lng': pickup.lng,
+        'address': pickupAddress,
+        ...pickupScope,
+      };
+      final dropoffPayload = <String, dynamic>{
+        'lat': dropoff.lat,
+        'lng': dropoff.lng,
+        'address': dropoffAddress,
+        ...destinationScope,
       };
 
       rtdbFlowLog(
-        '[NEXRIDE_RIDER_RTDB][DISPATCH_CREATE]',
-        'requestId=$requestId uid=${user.uid} market_pool=$dispatchSlug',
+        '[NEXRIDE_RIDER_RTDB][DELIVERY_CREATE_CALLABLE]',
+        'uid=${user.uid} market_pool=$dispatchSlug',
       );
       debugPrint(
-        '[RIDER_CREATE] rideId=$requestId rider_id=${user.uid} '
-        'status=${payload['status']} trip_state=${payload['trip_state']} '
-        'market=${payload['market']} market_pool=${payload[RtdbRideRequestFields.marketPool]}',
+        '[RIDER_DELIVERY_CREATE] rider_id=${user.uid} market=$dispatchSlug '
+        'fare=${fareBreakdown.totalFare}',
       );
-      final createRes = await _rideCloud
-          .createRideRequest(<String, dynamic>{
+      final createRes = await _deliveryCloud
+          .createDeliveryRequest(<String, dynamic>{
             'market': dispatchSlug,
-            'pickup': payload['pickup'],
-            'dropoff': payload['dropoff'],
-            'fare': payload['fare'],
+            'pickup': pickupPayload,
+            'dropoff': dropoffPayload,
+            'fare': fareBreakdown.totalFare,
             'currency': 'NGN',
-            'distance_km': payload['distance_km'],
-            'eta_min': payload[RtdbRideRequestFields.etaMin],
-            'eta_minutes': payload[RtdbRideRequestFields.etaMin],
-            'payment_method': payload['payment_method'],
-            'expires_at': payload[RtdbRideRequestFields.expiresAt],
-            'service_type': RiderServiceType.dispatchDelivery.key,
-            'ride_metadata': rideMetadataSubset(payload),
+            'distance_km': fareBreakdown.distanceKm,
+            'eta_min': fareBreakdown.durationMin,
+            'eta_minutes': fareBreakdown.durationMin,
+            'payment_method': 'flutterwave',
+            'package_description': packageDetails,
+            'recipient_name': recipientName,
+            'recipient_phone': recipientPhone,
+            'category': 'parcel',
+            if (packagePhotoUrl.isNotEmpty) 'package_photo_url': packagePhotoUrl,
           })
           .timeout(const Duration(seconds: 45));
-      if (!riderRideCallableSucceeded(createRes)) {
-        throw StateError(riderRideCallableReason(createRes));
+      if (!riderDeliveryCallableSucceeded(createRes)) {
+        final reason = riderDeliveryCallableReason(createRes);
+        throw StateError(reason);
       }
-      // Match server [createRideRequest]: ride row is created under push() on the
-      // backend, not necessarily the client prefetch key.
-      final effectiveRequestId = () {
-        final fromServer = (createRes['rideId'] ?? createRes['ride_id'] ?? '')
-            .toString()
-            .trim();
-        if (fromServer.isNotEmpty) {
-          return fromServer;
-        }
-        return requestId.trim();
-      }();
-      if (effectiveRequestId != requestId.trim()) {
-        debugPrint(
-          '[Dispatch] server ride id=$effectiveRequestId '
-          '(client prefetch was $requestId)',
-        );
+      final effectiveRequestId =
+          (createRes['deliveryId'] ?? createRes['delivery_id'] ?? '')
+              .toString()
+              .trim();
+      if (effectiveRequestId.isEmpty) {
+        throw StateError('delivery_id_missing');
       }
       final liveSnap =
-          await _rideRequestsRef.child(effectiveRequestId).get();
+          await _deliveryRequestsRef.child(effectiveRequestId).get();
       if (!liveSnap.exists) {
         throw StateError('dispatch_missing_after_create');
       }
@@ -1303,16 +1333,28 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       if (livePayload == null) {
         throw StateError('dispatch_invalid_after_create');
       }
-      debugPrint(
-        '[OPS_MIRROR] dispatch_create skipped rideId=$effectiveRequestId '
-        '(rider does not write admin_rides/support_queue)',
-      );
-      debugPrint('[Dispatch] request created requestId=$effectiveRequestId');
+      Map<String, dynamic> workingPayload =
+          Map<String, dynamic>.from(livePayload);
+      if (!_deliveryPaymentVerified(workingPayload)) {
+        final paidRow = await _runFlutterwaveDeliveryCheckout(
+          deliveryId: effectiveRequestId,
+          fare: fareBreakdown.totalFare,
+        );
+        if (paidRow == null) {
+          await _deliveryCloud.cancelDeliveryRequest(
+            deliveryId: effectiveRequestId,
+            cancelReason: 'payment_failed',
+          );
+          throw StateError('payment_failed');
+        }
+        workingPayload = paidRow;
+      }
+      debugPrint('[Dispatch] delivery created deliveryId=$effectiveRequestId');
       await _tripSafetyService.registerRideRequest(
         rideId: effectiveRequestId,
         riderId: user.uid,
         serviceType: RiderServiceType.dispatchDelivery.key,
-        ridePayload: livePayload,
+        ridePayload: workingPayload,
         expectedRoutePoints: <LatLng>[
           LatLng(pickup.lat, pickup.lng),
           LatLng(dropoff.lat, dropoff.lng),
@@ -1327,7 +1369,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
       setState(() {
         _activeRequestId = effectiveRequestId;
-        _activeRequest = livePayload;
+        _activeRequest = workingPayload;
       });
 
       _showMessage('Dispatch request sent successfully.');
@@ -1345,7 +1387,10 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       if (!mounted) {
         return;
       }
-      _showMessage('Unable to send your dispatch request right now.');
+      final message = error is StateError
+          ? _deliveryCreateUserMessage(error.message)
+          : 'Unable to send your dispatch request right now.';
+      _showMessage(message);
     } finally {
       if (mounted) {
         setState(() {
@@ -1613,24 +1658,44 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
           _DispatchInfoRow(
             icon: Icons.my_location,
             label: 'Pickup',
-            value: activeRequest['pickup_address']?.toString() ?? 'Pending',
+            value: activeRequest['pickup_address']?.toString().trim().isNotEmpty ==
+                    true
+                ? activeRequest['pickup_address'].toString()
+                : (_asStringDynamicMap(activeRequest['pickup'])?['address']
+                        ?.toString() ??
+                    'Pending'),
             iconColor: Colors.green,
           ),
           const SizedBox(height: 12),
           _DispatchInfoRow(
             icon: Icons.location_on_outlined,
             label: 'Dropoff',
-            value:
-                activeRequest['destination_address']?.toString() ?? 'Pending',
+            value: activeRequest['destination_address']
+                        ?.toString()
+                        .trim()
+                        .isNotEmpty ==
+                    true
+                ? activeRequest['destination_address'].toString()
+                : (_asStringDynamicMap(activeRequest['dropoff'])?['address']
+                        ?.toString() ??
+                    'Pending'),
             iconColor: Colors.redAccent,
           ),
-          if ((dispatchDetails?['package_details']?.toString().trim() ?? '')
+          if (((activeRequest['package_description'] ??
+                      activeRequest['packageDescription'] ??
+                      dispatchDetails?['package_details'])
+                  ?.toString()
+                  .trim() ??
+              '')
               .isNotEmpty) ...<Widget>[
             const SizedBox(height: 12),
             _DispatchInfoRow(
               icon: Icons.inventory_2_outlined,
               label: 'Package details',
-              value: dispatchDetails!['package_details'].toString(),
+              value: (activeRequest['package_description'] ??
+                      activeRequest['packageDescription'] ??
+                      dispatchDetails?['package_details'])
+                  .toString(),
             ),
           ],
           if (recipientSummary.isNotEmpty) ...<Widget>[

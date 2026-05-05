@@ -45,12 +45,7 @@ extension RiderServiceTypeX on RiderServiceType {
 
   bool get isEnabled => RiderFeatureFlags.isServiceEnabled(key);
 
-  bool get isLive => switch (this) {
-    RiderServiceType.ride => true,
-    RiderServiceType.dispatchDelivery => true,
-    RiderServiceType.groceriesMart => false,
-    RiderServiceType.restaurantsFood => false,
-  };
+  bool get isLive => isEnabled;
 }
 
 RiderServiceType riderServiceTypeFromKey(String? rawValue) {

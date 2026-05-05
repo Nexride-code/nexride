@@ -415,6 +415,10 @@ bool driverServiceCanReceiveRequests(
   Map<String, dynamic> verification,
   String serviceType,
 ) {
+  final key = serviceType.trim().toLowerCase();
+  if (!DriverFeatureFlags.activeRequestServiceTypes.contains(key)) {
+    return false;
+  }
   final normalized = normalizedDriverVerification(verification);
   final approvals = _asStringDynamicMap(normalized['serviceApprovals']);
   final serviceApproval = _asStringDynamicMap(approvals[serviceType]);

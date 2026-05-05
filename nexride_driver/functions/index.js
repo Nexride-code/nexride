@@ -19,6 +19,7 @@ function callableContext(request) {
 
 const { isNexRideAdmin } = require("./admin_auth");
 const ride = require("./ride_callables");
+const delivery = require("./delivery_callables");
 const paymentFlow = require("./payment_flow");
 const withdrawFlow = require("./withdraw_flow");
 const trackPublic = require("./track_public");
@@ -40,23 +41,34 @@ async function verifyPaymentInternal(reference) {
     };
   }
 
-  const rideId = String(existing.ride_id || "").trim();
+  let rideId = String(existing.ride_id || "").trim();
+  let deliveryId = String(existing.delivery_id || "").trim();
   const riderId = String(existing.rider_id || "").trim();
+  if (!rideId && !deliveryId) {
+    rideId = paymentFlow.extractRideIdFromNexrideTxRef(ref);
+    deliveryId = paymentFlow.extractDeliveryIdFromNexrideTxRef(ref);
+  }
   const rideSnap = rideId ? await db.ref(`ride_requests/${rideId}`).get() : null;
   const rideRow = rideSnap && rideSnap.val() && typeof rideSnap.val() === "object" ? rideSnap.val() : null;
+  const deliverySnap = deliveryId ? await db.ref(`delivery_requests/${deliveryId}`).get() : null;
+  const deliveryRow =
+    deliverySnap && deliverySnap.val() && typeof deliverySnap.val() === "object"
+      ? deliverySnap.val()
+      : null;
+  const entityRow = rideRow || deliveryRow;
   const expectedTx = String(
-    rideRow
-      ? (rideRow.customer_transaction_reference ?? rideRow.payment_reference ?? ref)
+    entityRow
+      ? (entityRow.customer_transaction_reference ?? entityRow.payment_reference ?? ref)
       : ref,
   ).trim();
   const expectCur = String(
-    rideRow?.currency ?? existing.currency ?? "NGN",
+    entityRow?.currency ?? existing.currency ?? "NGN",
   )
     .trim()
     .toUpperCase() || "NGN";
   let minFare;
-  if (rideRow) {
-    const f = Number(rideRow.fare ?? rideRow.total_delivery_fee ?? 0);
+  if (entityRow) {
+    const f = Number(entityRow.fare ?? entityRow.total_delivery_fee ?? 0);
     if (Number.isFinite(f) && f > 0) minFare = f;
   }
   if (minFare == null) {
@@ -81,6 +93,7 @@ async function verifyPaymentInternal(reference) {
     payKey,
     txRef: ref,
     rideId: rideId || null,
+    deliveryId: deliveryId || null,
     riderId: riderId || null,
     verified: v.ok,
     amount: v.amount ?? 0,
@@ -93,11 +106,12 @@ async function verifyPaymentInternal(reference) {
   if (!v.ok) {
     return { success: false, reason: v.reason || "verification_failed" };
   }
-  const driverId = rideRow ? String(rideRow.driver_id || "").trim() : "";
+  const driverId = entityRow ? String(entityRow.driver_id || "").trim() : "";
   await paymentFlow.persistVerifiedFlutterwaveCharge(db, {
     transactionId: payKey,
     txRef: String(v.tx_ref || ref).trim(),
     rideId: rideId || null,
+    deliveryId: deliveryId || null,
     riderId: riderId || null,
     driverId: driverId || null,
     amount: v.amount ?? 0,
@@ -129,6 +143,19 @@ async function verifyPaymentInternal(reference) {
     await ride.fanOutDriverOffersIfEligible(db, rideId, freshSnap.val() || {});
     await trackPublic.syncRideTrackPublic(db, rideId);
   }
+  if (deliveryId) {
+    const ts = Date.now();
+    await db.ref(`delivery_requests/${deliveryId}`).update({
+      payment_status: "verified",
+      payment_verified_at: ts,
+      payment_provider: "flutterwave",
+      payment_transaction_id: payKey,
+      paid_at: ts,
+      updated_at: ts,
+    });
+    const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val() || {};
+    await delivery.fanOutDeliveryOffersIfEligible(db, deliveryId, freshDel);
+  }
   return {
     success: true,
     reason: "verified",
@@ -144,12 +171,12 @@ exports.createRideRequest = onCall(rideCallOpts, async (request) =>
   ride.createRideRequest(request.data, callableContext(request), db),
 );
 
-// acceptRide and acceptRideRequest both invoke ride.acceptRideRequest (single implementation).
+// Single client-facing accept entrypoint: [acceptRide] → ride.acceptRideRequest (implementation).
 exports.acceptRide = onCall(rideCallOpts, async (request) =>
   ride.acceptRideRequest(request.data, callableContext(request), db),
 );
 
-/** @deprecated Prefer acceptRide — same handler as exports.acceptRide */
+// Alias for older mobile builds — identical to [acceptRide] (one implementation).
 exports.acceptRideRequest = exports.acceptRide;
 
 exports.driverEnroute = onCall(rideCallOpts, async (request) =>
@@ -183,10 +210,34 @@ exports.patchRideRequestMetadata = onCall(rideCallOpts, async (request) =>
   ride.patchRideRequestMetadata(request.data, callableContext(request), db),
 );
 
+exports.createDeliveryRequest = onCall(rideCallOpts, async (request) =>
+  delivery.createDeliveryRequest(request.data, callableContext(request), db),
+);
+
+exports.acceptDeliveryRequest = onCall(rideCallOpts, async (request) =>
+  delivery.acceptDeliveryRequest(request.data, callableContext(request), db),
+);
+
+exports.updateDeliveryState = onCall(rideCallOpts, async (request) =>
+  delivery.updateDeliveryState(request.data, callableContext(request), db),
+);
+
+exports.expireDeliveryRequest = onCall(rideCallOpts, async (request) =>
+  delivery.expireDeliveryRequest(request.data, callableContext(request), db),
+);
+
+exports.cancelDeliveryRequest = onCall(rideCallOpts, async (request) =>
+  delivery.cancelDeliveryRequest(request.data, callableContext(request), db),
+);
+
 /** Public tracking — `token` is `ride_requests.track_token` (share link). */
 exports.getRideTrackSummary = onCall(
   { region: REGION, invoker: "public" },
   async (request) => trackPublic.getRideTrackSummary(request.data, db),
+);
+
+exports.createTripShareToken = onCall(rideCallOpts, async (request) =>
+  trackPublic.createTripShareToken(request.data, callableContext(request), db),
 );
 
 /** Agora RTC — server-signed token; requires AGORA_APP_ID + AGORA_APP_CERTIFICATE in env. */
@@ -209,6 +260,15 @@ exports.adminRejectWithdrawal = onCall(rideCallOpts, async (request) =>
 exports.adminVerifyDriver = onCall(rideCallOpts, async (request) =>
   adminCallables.adminVerifyDriver(request.data, callableContext(request), db),
 );
+exports.adminApproveManualPayment = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminApproveManualPayment(request.data, callableContext(request), db),
+);
+exports.adminSuspendDriver = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminSuspendDriver(request.data, callableContext(request), db),
+);
+exports.adminListSupportTickets = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListSupportTickets(request.data, callableContext(request), db),
+);
 exports.adminListPendingWithdrawals = onCall(rideCallOpts, async (request) =>
   adminCallables.adminListPendingWithdrawals(request.data, callableContext(request), db),
 );
@@ -222,6 +282,12 @@ exports.adminListRiders = onCall(rideCallOpts, async (request) =>
   adminCallables.adminListRiders(request.data, callableContext(request), db),
 );
 
+exports.supportCreateTicket = onCall(rideCallOpts, async (request) =>
+  supportCallables.supportCreateTicket(request.data, callableContext(request), db),
+);
+exports.supportGetTicket = onCall(rideCallOpts, async (request) =>
+  supportCallables.supportGetTicket(request.data, callableContext(request), db),
+);
 exports.supportSearchRide = onCall(rideCallOpts, async (request) =>
   supportCallables.supportSearchRide(request.data, callableContext(request), db),
 );
@@ -290,11 +356,15 @@ exports.createWalletTransaction = onCall(rideCallOpts, async (request) => {
   if (!ctx.auth || !(await isNexRideAdmin(db, ctx))) {
     return { success: false, reason: "unauthorized" };
   }
+  const idk = String(request.data?.idempotencyKey ?? "").trim();
+  if (!idk) {
+    return { success: false, reason: "idempotency_key_required" };
+  }
   return createWalletTransactionInternal(db, {
     userId: request.data?.userId,
     amount: request.data?.amount,
     type: request.data?.type,
-    idempotencyKey: request.data?.idempotencyKey,
+    idempotencyKey: idk,
   });
 });
 

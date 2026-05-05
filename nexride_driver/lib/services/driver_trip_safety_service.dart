@@ -531,8 +531,8 @@ class DriverTripSafetyService {
       if (normalizedSettlement.isNotEmpty)
         'trip_settlement_hooks/$rideId/settlement': normalizedSettlement,
       'trip_settlement_hooks/$rideId/supportedSettlementModes': <String>[
-        'cash',
         'card',
+        'flutterwave',
         'bank_transfer',
         'online_wallet',
       ],

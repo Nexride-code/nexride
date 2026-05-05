@@ -10,6 +10,7 @@ const {
   createHostedPaymentLink,
 } = require("./flutterwave_api");
 const { fanOutDriverOffersIfEligible } = require("./ride_callables");
+const { fanOutDeliveryOffersIfEligible } = require("./delivery_callables");
 const { syncRideTrackPublic } = require("./track_public");
 
 function normUid(uid) {
@@ -20,10 +21,32 @@ function nowMs() {
   return Date.now();
 }
 
+function flutterwaveWebhookDedupeKey(transactionId, txRef) {
+  const tid = String(transactionId || "").trim();
+  if (tid) {
+    return `tid_${tid.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120)}`;
+  }
+  const tr = String(txRef || "").trim();
+  if (tr) {
+    return `xref_${tr.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 180)}`;
+  }
+  return "";
+}
+
 function extractRideIdFromNexrideTxRef(txRef) {
   const s = String(txRef || "");
   if (!s.startsWith("nexride_")) return "";
   const rest = s.slice("nexride_".length);
+  if (rest.startsWith("del_")) return "";
+  const i = rest.lastIndexOf("_");
+  if (i <= 0) return "";
+  return rest.slice(0, i);
+}
+
+function extractDeliveryIdFromNexrideTxRef(txRef) {
+  const s = String(txRef || "");
+  if (!s.startsWith("nexride_del_")) return "";
+  const rest = s.slice("nexride_del_".length);
   const i = rest.lastIndexOf("_");
   if (i <= 0) return "";
   return rest.slice(0, i);
@@ -37,6 +60,7 @@ async function mirrorPaymentRecords(db, {
   payKey,
   txRef,
   rideId,
+  deliveryId,
   riderId,
   verified,
   amount,
@@ -55,6 +79,7 @@ async function mirrorPaymentRecords(db, {
     transaction_id: key,
     tx_ref: ref || null,
     ride_id: rideId || null,
+    delivery_id: deliveryId || null,
     rider_id: riderId || null,
     verified: !!verified,
     amount: Number(amount || 0) || 0,
@@ -88,21 +113,37 @@ async function initiateFlutterwavePayment(data, context, db) {
   }
   const riderId = normUid(context.auth.uid);
   const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const deliveryId = normUid(data?.deliveryId ?? data?.delivery_id);
   const amount = Number(data?.amount ?? 0);
   const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
   const email = String(
     data?.email ?? context.auth.token?.email ?? `${riderId}@nexride.local`,
   ).trim();
-  if (!rideId || !Number.isFinite(amount) || amount <= 0) {
+  if ((!rideId && !deliveryId) || !Number.isFinite(amount) || amount <= 0) {
     return { success: false, reason: "invalid_input" };
   }
-  const rideSnap = await db.ref(`ride_requests/${rideId}`).get();
-  const ride = rideSnap.val();
-  if (!ride || typeof ride !== "object" || normUid(ride.rider_id) !== riderId) {
-    return { success: false, reason: "forbidden" };
+  if (rideId && deliveryId) {
+    return { success: false, reason: "invalid_input" };
+  }
+  let ride = null;
+  let delivery = null;
+  if (rideId) {
+    const rideSnap = await db.ref(`ride_requests/${rideId}`).get();
+    ride = rideSnap.val();
+    if (!ride || typeof ride !== "object" || normUid(ride.rider_id) !== riderId) {
+      return { success: false, reason: "forbidden" };
+    }
+  } else {
+    const delSnap = await db.ref(`delivery_requests/${deliveryId}`).get();
+    delivery = delSnap.val();
+    if (!delivery || typeof delivery !== "object" || normUid(delivery.customer_id) !== riderId) {
+      return { success: false, reason: "forbidden" };
+    }
   }
   const txRefKey = db.ref("payment_transactions").push().key;
-  const tx_ref = `nexride_${rideId}_${txRefKey}`;
+  const tx_ref = deliveryId
+    ? `nexride_del_${deliveryId}_${txRefKey}`
+    : `nexride_${rideId}_${txRefKey}`;
   const redirectUrl = String(
     data?.redirect_url ?? data?.redirectUrl ?? "https://nexride.app/pay/return",
   ).trim();
@@ -116,8 +157,10 @@ async function initiateFlutterwavePayment(data, context, db) {
       email: email || `${riderId}@nexride.local`,
       name: String(data?.customer_name ?? "NexRide rider").trim(),
     },
-    meta: { ride_id: rideId, rider_id: riderId },
-    customizations: { title: "NexRide trip" },
+    meta: deliveryId
+      ? { delivery_id: deliveryId, rider_id: riderId }
+      : { ride_id: rideId, rider_id: riderId },
+    customizations: { title: deliveryId ? "NexRide delivery" : "NexRide trip" },
   };
   const r = await createHostedPaymentLink(body);
   if (!r.ok) {
@@ -130,7 +173,8 @@ async function initiateFlutterwavePayment(data, context, db) {
   const now = nowMs();
   await db.ref(`payment_transactions/${tx_ref}`).set({
     tx_ref,
-    ride_id: rideId,
+    ride_id: rideId || null,
+    delivery_id: deliveryId || null,
     rider_id: riderId,
     amount,
     currency,
@@ -140,13 +184,22 @@ async function initiateFlutterwavePayment(data, context, db) {
     created_at: now,
     updated_at: now,
   });
-  await db.ref(`ride_requests/${rideId}`).update({
-    payment_reference: tx_ref,
-    customer_transaction_reference: tx_ref,
-    payment_status: "pending",
-    updated_at: now,
-  });
-  await syncRideTrackPublic(db, rideId);
+  if (rideId) {
+    await db.ref(`ride_requests/${rideId}`).update({
+      payment_reference: tx_ref,
+      customer_transaction_reference: tx_ref,
+      payment_status: "pending",
+      updated_at: now,
+    });
+    await syncRideTrackPublic(db, rideId);
+  } else {
+    await db.ref(`delivery_requests/${deliveryId}`).update({
+      payment_reference: tx_ref,
+      customer_transaction_reference: tx_ref,
+      payment_status: "pending",
+      updated_at: now,
+    });
+  }
   return {
     success: true,
     tx_ref,
@@ -160,20 +213,37 @@ async function verifyFlutterwavePayment(data, context, db) {
     return { success: false, reason: "unauthorized" };
   }
   const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const deliveryId = normUid(data?.deliveryId ?? data?.delivery_id);
   const reference = String(data?.reference ?? data?.tx_ref ?? data?.transactionId ?? data?.transaction_id ?? "").trim();
-  if (!rideId || !reference) {
+  if ((!rideId && !deliveryId) || !reference) {
     return { success: false, reason: "invalid_input" };
   }
-  const rideSnap = await db.ref(`ride_requests/${rideId}`).get();
-  const ride = rideSnap.val();
-  if (!ride || typeof ride !== "object" || normUid(ride.rider_id) !== normUid(context.auth.uid)) {
-    return { success: false, reason: "forbidden" };
+  if (rideId && deliveryId) {
+    return { success: false, reason: "invalid_input" };
+  }
+  const uid = normUid(context.auth.uid);
+  let row = null;
+  let entityRef = null;
+  if (rideId) {
+    entityRef = db.ref(`ride_requests/${rideId}`);
+    const rideSnap = await entityRef.get();
+    row = rideSnap.val();
+    if (!row || typeof row !== "object" || normUid(row.rider_id) !== uid) {
+      return { success: false, reason: "forbidden" };
+    }
+  } else {
+    entityRef = db.ref(`delivery_requests/${deliveryId}`);
+    const delSnap = await entityRef.get();
+    row = delSnap.val();
+    if (!row || typeof row !== "object" || normUid(row.customer_id) !== uid) {
+      return { success: false, reason: "forbidden" };
+    }
   }
   const expectedTx = String(
-    ride.customer_transaction_reference ?? ride.payment_reference ?? reference,
+    row.customer_transaction_reference ?? row.payment_reference ?? reference,
   ).trim();
-  const expectCur = String(ride.currency ?? "NGN").trim().toUpperCase() || "NGN";
-  const minFare = Number(ride.fare ?? ride.total_delivery_fee ?? 0);
+  const expectCur = String(row.currency ?? "NGN").trim().toUpperCase() || "NGN";
+  const minFare = Number(row.fare ?? row.total_delivery_fee ?? 0);
   const v = await verifyFlutterwavePaymentStrict({
     transactionId: /^\d+$/.test(reference) ? reference : "",
     txRef: reference,
@@ -189,8 +259,9 @@ async function verifyFlutterwavePayment(data, context, db) {
     await mirrorPaymentRecords(db, {
       payKey,
       txRef: reference,
-      rideId,
-      riderId: normUid(ride.rider_id),
+      rideId: rideId || null,
+      deliveryId: deliveryId || null,
+      riderId: normUid(row.rider_id ?? row.customer_id),
       verified: false,
       amount: v.amount ?? 0,
       providerStatus: v.providerStatus || "unknown",
@@ -198,25 +269,28 @@ async function verifyFlutterwavePayment(data, context, db) {
       webhookEvent: "callable_verify",
       webhookApplied: false,
     });
-    await db.ref(`ride_requests/${rideId}`).update({
+    await entityRef.update({
       payment_status: "failed",
       updated_at: now,
     });
-    await syncRideTrackPublic(db, rideId);
+    if (rideId) {
+      await syncRideTrackPublic(db, rideId);
+    }
     return { success: false, reason: v.reason || "verification_failed" };
   }
   await persistVerifiedFlutterwaveCharge(db, {
     transactionId: payKey,
     txRef: String(v.tx_ref || reference).trim(),
-    rideId,
-    riderId: normUid(ride.rider_id),
-    driverId: normUid(ride.driver_id) || null,
+    rideId: rideId || null,
+    deliveryId: deliveryId || null,
+    riderId: normUid(row.rider_id ?? row.customer_id),
+    driverId: normUid(row.driver_id) || null,
     amount: v.amount ?? 0,
     currency: v.currency || expectCur,
     rawStatus: String(v.payload?.data?.status ?? ""),
     webhookBody: { event: "callable_verify", data: v.payload?.data },
   });
-  await db.ref(`ride_requests/${rideId}`).update({
+  await entityRef.update({
     payment_status: "verified",
     payment_verified_at: now,
     payment_provider: "flutterwave",
@@ -224,9 +298,14 @@ async function verifyFlutterwavePayment(data, context, db) {
     paid_at: now,
     updated_at: now,
   });
-  const fresh = (await db.ref(`ride_requests/${rideId}`).get()).val();
-  await fanOutDriverOffersIfEligible(db, rideId, fresh || ride);
-  await syncRideTrackPublic(db, rideId);
+  if (rideId) {
+    const fresh = (await db.ref(`ride_requests/${rideId}`).get()).val();
+    await fanOutDriverOffersIfEligible(db, rideId, fresh || row);
+    await syncRideTrackPublic(db, rideId);
+  } else {
+    const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val() || {};
+    await fanOutDeliveryOffersIfEligible(db, deliveryId, freshDel);
+  }
   return { success: true, reason: "verified", amount: v.amount, transaction_id: payKey };
 }
 
@@ -234,6 +313,7 @@ async function persistVerifiedFlutterwaveCharge(db, {
   transactionId,
   txRef,
   rideId,
+  deliveryId,
   riderId,
   driverId,
   amount,
@@ -250,6 +330,7 @@ async function persistVerifiedFlutterwaveCharge(db, {
     transaction_id: tId,
     tx_ref: ref || null,
     ride_id: rideId || null,
+    delivery_id: deliveryId || null,
     rider_id: riderId || null,
     driver_id: driverId || null,
     amount: Number(amount) || 0,
@@ -337,6 +418,15 @@ async function handleFlutterwaveWebhook(req, res, db) {
     return;
   }
 
+  const webhookDedupeKey = flutterwaveWebhookDedupeKey(transactionId, txRef);
+  if (webhookDedupeKey) {
+    const seenSnap = await db.ref(`webhook_applied/flutterwave_webhook/${webhookDedupeKey}`).get();
+    if (seenSnap.exists()) {
+      res.status(200).send("ok-duplicate-webhook");
+      return;
+    }
+  }
+
   const meta = data?.meta && typeof data.meta === "object" ? data.meta : {};
   const ptSnap = txRef ? await db.ref(`payment_transactions/${txRef}`).get() : null;
   const pt = ptSnap ? ptSnap.val() : null;
@@ -348,26 +438,52 @@ async function handleFlutterwaveWebhook(req, res, db) {
     rideId = String(pt.ride_id ?? "").trim();
   }
 
+  let deliveryId = String(meta?.delivery_id ?? meta?.deliveryId ?? "").trim();
+  if (!deliveryId) {
+    deliveryId = extractDeliveryIdFromNexrideTxRef(txRef);
+  }
+  if (!deliveryId && pt && typeof pt === "object") {
+    deliveryId = String(pt.delivery_id ?? "").trim();
+  }
+
   const rideSnap = rideId ? await db.ref(`ride_requests/${rideId}`).get() : null;
   const ride = rideSnap ? rideSnap.val() : null;
-  const expectedTxFromRide =
-    ride && typeof ride === "object"
-      ? String(
-          ride.customer_transaction_reference ??
-            ride.payment_reference ??
-            "",
-        ).trim()
-      : "";
+  const deliverySnap = deliveryId ? await db.ref(`delivery_requests/${deliveryId}`).get() : null;
+  const deliveryRecord =
+    deliverySnap && deliverySnap.val() && typeof deliverySnap.val() === "object"
+      ? deliverySnap.val()
+      : null;
+
+  let expectedTxFromEntity = "";
+  if (ride && typeof ride === "object") {
+    expectedTxFromEntity = String(
+      ride.customer_transaction_reference ?? ride.payment_reference ?? "",
+    ).trim();
+  } else if (deliveryRecord) {
+    expectedTxFromEntity = String(
+      deliveryRecord.customer_transaction_reference ??
+        deliveryRecord.payment_reference ??
+        "",
+    ).trim();
+  }
   const expectedTxRefForVerify =
-    (expectedTxFromRide || txRef || "").trim() || undefined;
+    (expectedTxFromEntity || txRef || "").trim() || undefined;
   const expectedCurrency = String(
-    (ride && ride.currency) || (pt && pt.currency) || hookCurrency || "NGN",
+    (ride && ride.currency) ||
+      (deliveryRecord && deliveryRecord.currency) ||
+      (pt && pt.currency) ||
+      hookCurrency ||
+      "NGN",
   )
     .trim()
     .toUpperCase() || "NGN";
   let minAmount;
   if (ride && typeof ride === "object") {
     const f = Number(ride.fare ?? ride.total_delivery_fee ?? 0);
+    if (Number.isFinite(f) && f > 0) minAmount = f;
+  }
+  if (minAmount == null && deliveryRecord) {
+    const f = Number(deliveryRecord.fare ?? 0);
     if (Number.isFinite(f) && f > 0) minAmount = f;
   }
   if (minAmount == null && pt && typeof pt === "object") {
@@ -420,9 +536,16 @@ async function handleFlutterwaveWebhook(req, res, db) {
 
   try {
     const riderId = String(
-      (meta?.rider_id ?? meta?.riderId ?? (ride && ride.rider_id) ?? (pt && pt.rider_id) ?? ""),
+      (meta?.rider_id ??
+        meta?.riderId ??
+        (ride && ride.rider_id) ??
+        (deliveryRecord && deliveryRecord.customer_id) ??
+        (pt && pt.rider_id) ??
+        ""),
     ).trim();
-    const driverId = String((ride && ride.driver_id) || "").trim();
+    const driverId = String(
+      (ride && ride.driver_id) || (deliveryRecord && deliveryRecord.driver_id) || "",
+    ).trim();
     const finalTxRef = String(v.tx_ref || txRef || "").trim();
 
     console.log("PAYMENT_APPLY_START", payTid);
@@ -431,6 +554,7 @@ async function handleFlutterwaveWebhook(req, res, db) {
       transactionId: payTid,
       txRef: finalTxRef,
       rideId: rideId || null,
+      deliveryId: deliveryId || null,
       riderId: riderId || null,
       driverId: driverId || null,
       amount: v.amount ?? hookAmount,
@@ -462,6 +586,28 @@ async function handleFlutterwaveWebhook(req, res, db) {
       await fanOutDriverOffersIfEligible(db, rideId, fresh || ride || {});
       await syncRideTrackPublic(db, rideId);
     }
+    if (deliveryId) {
+      await db.ref(`delivery_requests/${deliveryId}`).update({
+        payment_status: "verified",
+        payment_provider: "flutterwave",
+        payment_transaction_id: payTid,
+        payment_verified_at: now,
+        paid_at: now,
+        updated_at: now,
+      });
+      const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val();
+      await fanOutDeliveryOffersIfEligible(db, deliveryId, freshDel || deliveryRecord || {});
+    }
+
+    if (webhookDedupeKey) {
+      await db.ref(`webhook_applied/flutterwave_webhook/${webhookDedupeKey}`).set({
+        applied_at: now,
+        flutterwave_transaction_id: payTid,
+        tx_ref: finalTxRef || txRef || null,
+        ride_id: rideId || null,
+        delivery_id: deliveryId || null,
+      });
+    }
 
     console.log("PAYMENT_APPLIED", payTid);
     res.status(200).send("ok");
@@ -482,4 +628,6 @@ module.exports = {
   handleFlutterwaveWebhook,
   mirrorPaymentRecords,
   persistVerifiedFlutterwaveCharge,
+  extractRideIdFromNexrideTxRef,
+  extractDeliveryIdFromNexrideTxRef,
 };
