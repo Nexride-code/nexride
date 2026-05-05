@@ -955,26 +955,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         remoteSessionStartedAt > 0 &&
         sessionAgeMs < maxRehydrateSessionMs;
     if (canRehydrateOnlineSession) {
-      _onlineSessionStartedAt = remoteSessionStartedAt;
-      _lastAvailabilityIntentOnline = lastIntentOnline;
-      _isOnline = true;
-      _rideStatus = 'idle';
-      if (mounted) {
-        setState(() {
-          _isOnline = true;
-          _lastAvailabilityIntentOnline = lastIntentOnline;
-          _rideStatus = 'idle';
-        });
-      }
-      _updateDriverMarker();
-      _startLiveLocationStream();
+      // Product requirement: driver must explicitly tap GO ONLINE each session.
+      // Even when backend still shows a previous online session, start in offline-safe mode.
       _log(
-        'startup session rehydrated online driverId=$driverId '
-        'online_session_started_at=$_onlineSessionStartedAt '
-        '(skipped RTDB offline wipe — server still shows available session)',
+        'startup found rehydratable online session but forcing manual go-online '
+        'driverId=$driverId remote_session_started_at=$remoteSessionStartedAt',
       );
-      unawaited(_listenForRideRequests(reason: 'startup_rehydrate_online'));
-      return;
     }
 
     await _clearDriverActiveRideNode(

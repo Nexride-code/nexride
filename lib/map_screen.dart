@@ -6095,13 +6095,31 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         ]);
         debugPrint('RIDER_CREATE_CALLABLE_FAIL reason=$reason');
         if (reason == 'rider_active_trip' && recoveredRideId.isNotEmpty) {
-          _logRideFlow(
-            '[RIDER_REQ] create_recover_existing_ride '
-            'reason=$reason rideId=$recoveredRideId',
+          final recoveredSnap = await _rideRequestsRef.child(recoveredRideId).get();
+          final recoveredData = _asStringDynamicMap(recoveredSnap.value);
+          final recoveredCanonical = TripStateMachine.canonicalStateFromSnapshot(
+            recoveredData,
           );
-          rideId = recoveredRideId;
-          resumedExistingActiveTrip = true;
-          _showSnackBar('You already have an active ride. Resuming it now.');
+          final recoveredRiderId = _valueAsText(recoveredData?['rider_id']);
+          final recoveredStillOpen =
+              recoveredData != null &&
+              recoveredRiderId == user.uid &&
+              !TripStateMachine.isTerminal(recoveredCanonical);
+          if (recoveredStillOpen) {
+            _logRideFlow(
+              '[RIDER_REQ] create_recover_existing_ride '
+              'reason=$reason rideId=$recoveredRideId',
+            );
+            rideId = recoveredRideId;
+            resumedExistingActiveTrip = true;
+            _showSnackBar('You already have an active ride. Resuming it now.');
+          } else {
+            _logRideFlow(
+              '[RIDER_REQ] create_recover_existing_ride skipped '
+              'reason=stale_pointer recoveredRideId=$recoveredRideId canonical=$recoveredCanonical',
+            );
+            throw StateError('rider_active_trip_stale_pointer');
+          }
         } else {
           throw StateError(reason);
         }

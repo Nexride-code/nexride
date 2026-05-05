@@ -770,7 +770,10 @@ async function supersedePriorOpenRideForRider(db, riderId) {
     return { ok: true };
   }
   if (!isOpenPoolRide(prev)) {
-    return { ok: false, reason: "rider_active_trip", rideId: prevId };
+    // Stale pointer to a non-open ride (e.g. already cancelled/closed by server flow).
+    // Clear it and allow creating a fresh request instead of surfacing rider_active_trip.
+    await db.ref(`rider_active_ride/${r}`).remove();
+    return { ok: true };
   }
   let supersedeFail = "";
   const tx = await prevRef.transaction((cur) => {
@@ -814,6 +817,10 @@ async function supersedePriorOpenRideForRider(db, riderId) {
       isPlaceholderDriverId(fresh.driver_id) &&
       isOpenPoolRide(fresh)
     ) {
+      return { ok: true };
+    }
+    if (supersedeFail === "not_open") {
+      await db.ref(`rider_active_ride/${r}`).remove();
       return { ok: true };
     }
     return { ok: false, reason: "rider_active_trip", rideId: prevId };
