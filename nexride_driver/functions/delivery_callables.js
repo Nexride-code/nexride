@@ -43,6 +43,7 @@ const PAYMENT_METHODS_ALLOWED = new Set([
   "creditcard",
   "debit_card",
   "flutterwave",
+  "bank_transfer",
 ]);
 
 /** Driver-only linear progression after accept. */

@@ -208,6 +208,77 @@ async function initiateFlutterwavePayment(data, context, db) {
   };
 }
 
+/**
+ * Rider bank transfer — registers `payment_transactions/{tx_ref}` for admin/manual verification.
+ * Dispatch stays blocked until `payment_status === "verified"` (e.g. adminApproveManualPayment).
+ */
+async function registerBankTransferPayment(data, context, db) {
+  if (!context.auth) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const riderId = normUid(context.auth.uid);
+  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  if (!rideId) {
+    return { success: false, reason: "invalid_input" };
+  }
+  const rideSnap = await db.ref(`ride_requests/${rideId}`).get();
+  const ride = rideSnap.val();
+  if (!ride || typeof ride !== "object") {
+    return { success: false, reason: "ride_missing" };
+  }
+  if (normUid(ride.rider_id) !== riderId) {
+    return { success: false, reason: "forbidden" };
+  }
+  const rawPm = String(ride.payment_method ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (rawPm !== "bank_transfer") {
+    return { success: false, reason: "payment_method_not_bank_transfer" };
+  }
+  const fare = Number(ride.fare ?? 0);
+  if (!Number.isFinite(fare) || fare <= 0) {
+    return { success: false, reason: "invalid_fare" };
+  }
+  const currency = String(ride.currency ?? "NGN").trim().toUpperCase() || "NGN";
+
+  const key = db.ref("payment_transactions").push().key;
+  if (!key) {
+    return { success: false, reason: "key_alloc_failed" };
+  }
+  const tx_ref = `nexride_bt_${rideId}_${key}`;
+  const now = nowMs();
+  await db.ref(`payment_transactions/${tx_ref}`).set({
+    tx_ref,
+    ride_id: rideId,
+    delivery_id: null,
+    rider_id: riderId,
+    amount: fare,
+    currency,
+    status: "pending_bank_transfer",
+    verified: false,
+    provider: "bank_transfer",
+    created_at: now,
+    updated_at: now,
+  });
+  await db.ref(`ride_requests/${rideId}`).update({
+    payment_reference: tx_ref,
+    customer_transaction_reference: tx_ref,
+    payment_status: "pending",
+    updated_at: now,
+  });
+  await syncRideTrackPublic(db, rideId);
+  return {
+    success: true,
+    reason: "registered",
+    tx_ref,
+    amount: fare,
+    currency,
+    instructions:
+      "Put this reference in your transfer narration. NexRide verifies bank transfers before drivers are matched.",
+  };
+}
+
 async function verifyFlutterwavePayment(data, context, db) {
   if (!context.auth) {
     return { success: false, reason: "unauthorized" };
@@ -624,6 +695,7 @@ async function handleFlutterwaveWebhook(req, res, db) {
 
 module.exports = {
   initiateFlutterwavePayment,
+  registerBankTransferPayment,
   verifyFlutterwavePayment,
   handleFlutterwaveWebhook,
   mirrorPaymentRecords,

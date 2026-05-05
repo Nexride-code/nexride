@@ -332,6 +332,7 @@ const PAYMENT_METHODS_ALLOWED = new Set([
   "creditcard",
   "debit_card",
   "flutterwave",
+  "bank_transfer",
 ]);
 
 const MAX_FARE_NGN_DEFAULT = 25_000_000;

@@ -100,6 +100,14 @@ class RiderRideCloudFunctionsService {
         'ride_id': rideId,
         'reference': reference,
       });
+
+  Future<Map<String, dynamic>> registerBankTransferPayment({
+    required String rideId,
+  }) =>
+      _call('registerBankTransferPayment', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+      });
 }
 
 bool riderRideCallableSucceeded(Map<String, dynamic>? response) =>

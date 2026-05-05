@@ -341,6 +341,14 @@ exports.verifyFlutterwavePayment = onCall(
     ),
 );
 
+exports.registerBankTransferPayment = onCall(rideCallOpts, async (request) =>
+  paymentFlow.registerBankTransferPayment(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
 exports.flutterwaveWebhook = onRequest(
   {
     region: REGION,

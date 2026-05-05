@@ -22,6 +22,9 @@ class TripLifecycleState {
     expired,
   };
 
+  /// UI-only — no matching `trip_state` in RTDB (no ride document loaded locally).
+  static const String planning = 'planning';
+
   /// Legacy names used across the driver UI map to the same RTDB strings.
   static const String requested = searching;
   static const String searchingDriver = searching;

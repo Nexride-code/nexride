@@ -228,7 +228,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Map<String, dynamic> _trustSummary = <String, dynamic>{};
   Map<String, dynamic> _trustRulesConfig = const <String, dynamic>{};
   String _selectedLaunchCity = RiderLaunchScope.defaultBrowseCity;
-  /// Online only (Flutterwave); must match Cloud Function allow-list.
+  /// `flutterwave` / `bank_transfer` — must match Cloud Function allow-list.
   String _riderTripPaymentMethod = 'flutterwave';
 
   static const Color _gold = Color(0xFFD4AF37);
@@ -1073,13 +1073,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   void _syncRiderPaymentMethodFromRide(Map<String, dynamic> rideData) {
     final pm = _valueAsText(rideData['payment_method']).toLowerCase();
-    if (pm == 'card' ||
+    if (pm == 'bank_transfer') {
+      _riderTripPaymentMethod = 'bank_transfer';
+    } else if (pm == 'card' ||
         pm == 'credit_card' ||
         pm == 'debit_card' ||
         pm == 'flutterwave') {
       _riderTripPaymentMethod = pm == 'flutterwave' ? 'flutterwave' : 'card';
     }
   }
+
+  bool get _isTripPaymentSelectionLocked =>
+      (_currentRideId != null && _currentRideId!.trim().isNotEmpty) ||
+      _hasActiveRide;
 
   bool _ridePaymentVerified(Map<String, dynamic> ride) {
     final ps = _valueAsText(
@@ -1155,6 +1161,55 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
     }
     return false;
+  }
+
+  Future<bool> _pollRidePaymentVerified(
+    String rideId, {
+    required int maxAttempts,
+    Duration interval = const Duration(seconds: 2),
+  }) async {
+    for (var i = 0; i < maxAttempts; i++) {
+      if (_rideRequestUserAborted) {
+        return false;
+      }
+      await Future<void>.delayed(interval);
+      final snap = await _rideRequestsRef.child(rideId).get();
+      final row = _asStringDynamicMap(snap.value);
+      if (row != null && _ridePaymentVerified(row)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Registers bank transfer metadata; polls for verification — does **not** fail the ride on timeout.
+  Future<bool> _registerBankTransferAndPoll(String rideId) async {
+    final reg = await _rideCloud.registerBankTransferPayment(rideId: rideId);
+    if (reg['success'] != true) {
+      _showSnackBar(
+        'Bank transfer registration failed: ${riderRideCallableReason(reg)}',
+      );
+      return false;
+    }
+    final txRef = _firstNonEmptyText(<dynamic>[reg['tx_ref'], reg['txRef']]);
+    if (txRef.isEmpty) {
+      _showSnackBar('Missing payment reference — try again.');
+      return false;
+    }
+    _showSnackBar(
+      'Bank reference: $txRef — include it exactly in your transfer narration.',
+    );
+    final verified = await _pollRidePaymentVerified(
+      rideId,
+      maxAttempts: 120,
+      interval: const Duration(seconds: 3),
+    );
+    if (!verified) {
+      _showSnackBar(
+        'Awaiting transfer confirmation. Driver matching starts after NexRide verifies payment.',
+      );
+    }
+    return true;
   }
 
   String? get _currentRiderUid => FirebaseAuth.instance.currentUser?.uid.trim();
@@ -1287,8 +1342,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   String get _currentCanonicalRideState {
     final snap = _currentRideSnapshot;
+    // Empty snapshot must not imply "matching" — that mismatched `_effectiveRideStatus`
+    // when the session intentionally maps stale "searching" to `idle` for UX.
     if (snap == null || snap.isEmpty) {
-      return TripStateMachine.canonicalStateFromSnapshot(const {});
+      return TripLifecycleState.planning;
     }
     return TripStateMachine.canonicalStateFromSnapshot(snap);
   }
@@ -4043,10 +4100,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 accentColor: _routeShadow,
               ),
               _buildMetricPill(
-                icon: Icons.payments_rounded,
+                icon: Icons.credit_card_rounded,
                 label: 'Fare',
                 value: '₦${_fare.toStringAsFixed(0)}',
-                accentColor: _panelSuccess,
+                accentColor: _gold,
               ),
             ],
           ),
@@ -4067,6 +4124,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildTripPaymentMethodSelectorCard() {
+    final locked = _isTripPaymentSelectionLocked;
     return _buildPanelCard(
       backgroundColor: Colors.white,
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -4075,7 +4133,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         children: [
           Row(
             children: [
-              Icon(Icons.payments_outlined, color: _gold, size: 20),
+              Icon(Icons.wallet_outlined, color: _gold, size: 20),
               const SizedBox(width: 8),
               const Expanded(
                 child: Text(
@@ -4091,13 +4149,67 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 6),
           Text(
-            'Trips are paid in-app with card (Flutterwave). Payment is verified on our servers before drivers are matched.',
+            locked
+                ? 'Payment method is fixed for this request.'
+                : 'Choose card checkout or bank transfer. Drivers are matched only after NexRide verifies payment on our servers.',
             style: const TextStyle(
               color: _panelMutedInk,
               fontSize: 12,
               fontWeight: FontWeight.w600,
               height: 1.35,
             ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ChoiceChip(
+                label: const Text('Card (Flutterwave)'),
+                selected:
+                    _riderTripPaymentMethod != 'bank_transfer',
+                onSelected: (selected) {
+                  if (!selected || locked) {
+                    return;
+                  }
+                  setState(() => _riderTripPaymentMethod = 'flutterwave');
+                },
+                selectedColor: _gold.withValues(alpha: 0.22),
+                labelStyle: TextStyle(
+                  color: _riderTripPaymentMethod != 'bank_transfer'
+                      ? _panelInk
+                      : _panelMutedInk,
+                  fontWeight: FontWeight.w700,
+                ),
+                side: BorderSide(
+                  color: _riderTripPaymentMethod != 'bank_transfer'
+                      ? _gold
+                      : _panelBorder,
+                ),
+              ),
+              ChoiceChip(
+                label: const Text('Bank transfer'),
+                selected: _riderTripPaymentMethod == 'bank_transfer',
+                onSelected: (selected) {
+                  if (!selected || locked) {
+                    return;
+                  }
+                  setState(() => _riderTripPaymentMethod = 'bank_transfer');
+                },
+                selectedColor: _gold.withValues(alpha: 0.22),
+                labelStyle: TextStyle(
+                  color: _riderTripPaymentMethod == 'bank_transfer'
+                      ? _panelInk
+                      : _panelMutedInk,
+                  fontWeight: FontWeight.w700,
+                ),
+                side: BorderSide(
+                  color: _riderTripPaymentMethod == 'bank_transfer'
+                      ? _gold
+                      : _panelBorder,
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -5867,7 +5979,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'updated_at': rtdb.ServerValue.timestamp,
         'payment_context': <String, dynamic>{
           'method': _riderTripPaymentMethod,
-          'channel': 'card',
+          'channel': _riderTripPaymentMethod == 'bank_transfer'
+              ? 'bank_transfer'
+              : 'card',
         },
       };
 
@@ -6042,25 +6156,49 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         );
       }
       if (!_ridePaymentVerified(committedRideData)) {
-        final paidOk = await _runFlutterwaveHostedCheckoutFlow(
-          rideId: rideId,
-          rideSnapshot: committedRideData,
-        );
-        if (!paidOk) {
-          _logRideFlow('RIDER_PAYMENT_ABORT rideId=$rideId');
-          try {
-            await _rideCloud.cancelRideRequest(
-              rideId: rideId,
-              cancelReason: 'payment_failed',
-            );
-          } catch (e) {
-            _logRideFlow('cancel after payment fail error=$e');
+        final pmNorm = _valueAsText(committedRideData['payment_method'])
+            .trim()
+            .toLowerCase()
+            .replaceAll(RegExp(r'[\s-]+'), '_');
+        if (pmNorm == 'bank_transfer') {
+          final bankOk = await _registerBankTransferAndPoll(rideId);
+          if (!bankOk) {
+            _logRideFlow('RIDER_BANK_REGISTRATION_ABORT rideId=$rideId');
+            try {
+              await _rideCloud.cancelRideRequest(
+                rideId: rideId,
+                cancelReason: 'bank_transfer_registration_failed',
+              );
+            } catch (e) {
+              _logRideFlow('cancel after bank registration fail error=$e');
+            }
+            _clearRideSearchTimeout(reason: 'payment_failed');
+            _pendingRideRequestSubmissionId = null;
+            _showSnackBar('Could not set up bank transfer. Trip request cancelled.');
+            await _resetRideState(clearDestination: true);
+            return;
           }
-          _clearRideSearchTimeout(reason: 'payment_failed');
-          _pendingRideRequestSubmissionId = null;
-          _showSnackBar('Payment was not completed. Trip request cancelled.');
-          await _resetRideState(clearDestination: true);
-          return;
+        } else {
+          final paidOk = await _runFlutterwaveHostedCheckoutFlow(
+            rideId: rideId,
+            rideSnapshot: committedRideData,
+          );
+          if (!paidOk) {
+            _logRideFlow('RIDER_PAYMENT_ABORT rideId=$rideId');
+            try {
+              await _rideCloud.cancelRideRequest(
+                rideId: rideId,
+                cancelReason: 'payment_failed',
+              );
+            } catch (e) {
+              _logRideFlow('cancel after payment fail error=$e');
+            }
+            _clearRideSearchTimeout(reason: 'payment_failed');
+            _pendingRideRequestSubmissionId = null;
+            _showSnackBar('Payment was not completed. Trip request cancelled.');
+            await _resetRideState(clearDestination: true);
+            return;
+          }
         }
         final postPaySnap = await _rideRequestsRef.child(rideId).get().timeout(
               const Duration(seconds: 18),
@@ -6072,7 +6210,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _syncRideOperationalViews(
           rideId: rideId,
           rideData: Map<String, dynamic>.from(committedRideData),
-          lastEvent: 'rider_payment_verified',
+          lastEvent:
+              pmNorm == 'bank_transfer'
+                  ? 'rider_bank_transfer_registered'
+                  : 'rider_payment_verified',
         );
       }
       if (_rideRequestUserAborted) {
