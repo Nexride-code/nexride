@@ -23,22 +23,22 @@ dependencies:
 
   # Location
   geolocator: ^10.1.0
-  geoflutterfire2: ^2.3.15
   geocoding: ^2.1.0
 
-  # Firebase
-  firebase_core: ^2.24.0
-  firebase_auth: ^4.17.4
-  firebase_database: ^10.0.0
-  firebase_storage: ^11.7.7
-  cloud_functions: ^4.7.6
+  # Firebase (keep in sync; avoids web ^0.5 vs ^1 conflicts with file_picker 8.x)
+  firebase_core: ^3.8.1
+  firebase_auth: ^5.5.1
+  firebase_database: ^11.3.0
+  firebase_storage: ^12.4.0
+  cloud_functions: ^5.6.1
+  firebase_messaging: ^15.2.0
 
   # HTTP (Google Directions API)
   http: ^1.2.1
   agora_rtc_engine: 6.5.3
   permission_handler: ^11.4.0
   image_picker: ^1.1.2
-  file_picker: ^4.6.1
+  file_picker: ^8.1.7
 
   # Polyline
   flutter_polyline_points: ^2.1.0
@@ -51,6 +51,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.2
+  flutter_launcher_icons: ^0.14.3
 
 flutter:
   uses-material-design: true
@@ -59,3 +60,11 @@ flutter:
     - assets/car.png
     - assets/animations/
     - assets/sounds/ride_request.mp3
+    - assets/branding/nexride_launcher.png
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/branding/nexride_launcher.png
+  adaptive_icon_background: "#0D0D0D"
+  adaptive_icon_foreground: assets/branding/nexride_launcher.png

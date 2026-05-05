@@ -57,19 +57,16 @@ class AdminDataService {
           'users',
           adminUid: adminUid,
           adminEmail: adminEmail,
-          critical: true,
         ),
         _safeMapAt(
           'drivers',
           adminUid: adminUid,
           adminEmail: adminEmail,
-          critical: true,
         ),
         _safeMapAt(
           'ride_requests',
           adminUid: adminUid,
           adminEmail: adminEmail,
-          critical: true,
         ),
         _safeMapAt(
           'wallets',

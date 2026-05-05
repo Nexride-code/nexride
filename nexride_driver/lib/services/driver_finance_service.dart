@@ -909,7 +909,10 @@ class DriverFinanceService {
       rideData['commissionAmount'],
       rideData['commission_amount'],
     ]);
-    final commission = explicitCommission ?? settlement.commissionAmount;
+    final isSubscriptionModel = settlement.appliedModel == 'subscription';
+    final commission = isSubscriptionModel
+        ? 0.0
+        : (explicitCommission ?? settlement.commissionAmount);
 
     final explicitNet = _firstAvailableDoubleOrNull(<dynamic>[
       settlementContext['driverPayoutNgn'],
@@ -924,8 +927,9 @@ class DriverFinanceService {
       rideData['netEarning'],
       rideData['driverPayout'],
     ]);
-    final netEarning = explicitNet ??
-        (grossFare - commission < 0 ? 0.0 : grossFare - commission);
+    final netEarning = isSubscriptionModel
+        ? grossFare
+        : (explicitNet ?? (grossFare - commission < 0 ? 0.0 : grossFare - commission));
 
     final settlementStatus = _normalizedSettlementStatus(
       _firstText(<dynamic>[

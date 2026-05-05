@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_database/firebase_database.dart';
 
 import '../models/support_models.dart';
@@ -22,15 +23,35 @@ class SupportTicketService {
   Future<SupportPortalSnapshot> fetchPortalSnapshot({
     required SupportSession session,
   }) async {
-    final responses = await Future.wait<DataSnapshot>(<Future<DataSnapshot>>[
-      _ticketsRef.get(),
-      _staffRef.get(),
-      _logsRef.get(),
-    ]);
-
-    final ticketMap = _map(responses[0].value);
-    final staffMap = _map(responses[1].value);
-    final logsMap = _map(responses[2].value);
+    Map<String, dynamic> ticketMap = <String, dynamic>{};
+    Map<String, dynamic> staffMap = <String, dynamic>{};
+    Map<String, dynamic> logsMap = <String, dynamic>{};
+    try {
+      final responses = await Future.wait<DataSnapshot>(<Future<DataSnapshot>>[
+        _ticketsRef.get(),
+        _staffRef.get(),
+        _logsRef.get(),
+      ]);
+      ticketMap = _map(responses[0].value);
+      staffMap = _map(responses[1].value);
+      logsMap = _map(responses[2].value);
+    } catch (error) {
+      if (!_isPermissionDenied(error)) {
+        rethrow;
+      }
+      final callable = FirebaseFunctions.instance.httpsCallable(
+        'supportListTickets',
+      );
+      final result = await callable.call(<String, dynamic>{});
+      final data = _map(result.data);
+      final rows = data['tickets'];
+      if (rows is List) {
+        ticketMap = <String, dynamic>{
+          for (var i = 0; i < rows.length; i++)
+            'callable_${i + 1}': rows[i],
+        };
+      }
+    }
 
     final tickets = ticketMap.entries
         .map(
@@ -494,6 +515,12 @@ class SupportTicketService {
   }
 
   String _fallbackKey() => DateTime.now().microsecondsSinceEpoch.toString();
+
+  bool _isPermissionDenied(Object error) {
+    final message = error.toString().toLowerCase();
+    return message.contains('permission-denied') ||
+        message.contains('permission denied');
+  }
 
   Map<String, dynamic> _map(dynamic value) {
     return supportMap(value);

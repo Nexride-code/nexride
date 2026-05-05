@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -62,6 +63,7 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
   bool _isLoading = true;
   bool _isLoadingDetail = false;
   bool _isSubmittingAction = false;
+  bool _tokenRefreshedForDashboardLoad = false;
   String _creatorTypeFilter = 'All';
   String _priorityFilter = 'All';
   String _statusFilter = 'All';
@@ -104,6 +106,14 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
     }
 
     try {
+      if (!_tokenRefreshedForDashboardLoad) {
+        if (_authService != null) {
+          await _authService!.forceTokenRefresh();
+        } else {
+          await FirebaseAuth.instance.currentUser?.getIdToken(true);
+        }
+        _tokenRefreshedForDashboardLoad = true;
+      }
       await _ticketService.touchStaffPresence(session: widget.session);
       final snapshot = await _ticketService.fetchPortalSnapshot(
         session: widget.session,
@@ -179,14 +189,14 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
 
   String _friendlySupportLoadFailureMessage(Object error) {
     if (_isPermissionDenied(error)) {
-      return 'Your signed-in account is no longer authorized to read the support workspace. Confirm `/support_staff/${widget.session.uid}` has an enabled `support_agent` or `support_manager` role, or add `/admins/${widget.session.uid}` = true.';
+      return 'Your account is signed in but does not have access. Contact the NexRide system administrator.';
     }
     return 'We could not load the support queue right now. Please retry in a moment.';
   }
 
   String _friendlySupportDetailFailureMessage(Object error) {
     if (_isPermissionDenied(error)) {
-      return 'This account is not authorized to open the selected support ticket anymore. Refresh after restoring `/support_staff/${widget.session.uid}` or `/admins/${widget.session.uid}` access.';
+      return 'Your account is signed in but does not have access. Contact the NexRide system administrator.';
     }
     return 'The selected ticket could not be loaded. Try refreshing and opening it again.';
   }

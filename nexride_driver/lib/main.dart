@@ -14,8 +14,10 @@ import 'firebase_options.dart';
 import 'screens/driver_login_screen.dart';
 import 'screens/driver_map_screen.dart';
 import 'support/app_role.dart';
+import 'support/production_user_messages.dart';
 import 'support/driver_profile_bootstrap_support.dart';
 import 'support/driver_profile_support.dart';
+import 'services/driver_push_notification_service.dart';
 
 final ValueNotifier<_FatalAppError?> _fatalAppError =
     ValueNotifier<_FatalAppError?>(null);
@@ -75,6 +77,7 @@ Future<void> _initializeFirebase({
     print("RUNTIME_DB_URL: ${FirebaseDatabase.instance.databaseURL}");
     print("RUNTIME_UID: ${FirebaseAuth.instance.currentUser?.uid}");
     _logStartup('Firebase initializeApp succeeded.');
+    await DriverPushNotificationService.instance.initialize();
 
     final database = FirebaseDatabase.instance;
     if (!kIsWeb) {
@@ -413,9 +416,9 @@ class _AppBootstrapRoute extends StatelessWidget {
                       isLoading: true,
                     )
                   : const _BootstrapStatusScreen(
-                      title: 'Loading NexRide',
+                      title: 'Move with NexRide',
                       message:
-                          'Starting Firebase services and restoring the current session.',
+                          'Ride. Deliver. Earn.\nPreparing your driver session…',
                       loading: true,
                     );
             }
@@ -427,10 +430,10 @@ class _AppBootstrapRoute extends StatelessWidget {
               return _FatalErrorView(
                 title: adminRoute
                     ? 'Admin screen failed to load'
-                    : 'NexRide failed to start',
+                    : 'NexRide Driver',
                 message: adminRoute
                     ? 'Firebase startup failed before the admin route could render.'
-                    : 'Firebase startup failed before the requested route could render.',
+                    : kNexRideFriendlyFailureMessage,
                 error: snapshot.error ??
                     StateError('Unknown bootstrap error on $routeName'),
                 stackTrace: snapshot.stackTrace,
@@ -485,9 +488,12 @@ class _FatalErrorView extends StatelessWidget {
         icon: Icons.error_outline_rounded,
       );
     }
+    final displayTitle = kDebugMode ? title : 'NexRide Driver';
+    final displayMessage =
+        kDebugMode ? message : kNexRideFriendlyFailureMessage;
     return _BootstrapStatusScreen(
-      title: title,
-      message: message,
+      title: displayTitle,
+      message: displayMessage,
       error: error,
       stackTrace: stackTrace,
     );
@@ -511,14 +517,20 @@ class _BootstrapStatusScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bool showTechnical = kDebugMode && error != null;
     return Scaffold(
-      backgroundColor: kDriverCream,
+      backgroundColor: kDriverDark,
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 640),
             child: Card(
+              color: Colors.black.withValues(alpha: 0.92),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+                side: BorderSide(color: kDriverGold.withValues(alpha: 0.35)),
+              ),
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Column(
@@ -527,16 +539,16 @@ class _BootstrapStatusScreen extends StatelessWidget {
                     if (loading)
                       const CircularProgressIndicator(color: kDriverGold)
                     else
-                      const Icon(
+                      Icon(
                         Icons.warning_amber_rounded,
-                        color: kDriverGold,
+                        color: kDriverGold.withValues(alpha: 0.9),
                         size: 36,
                       ),
                     const SizedBox(height: 18),
                     Text(
                       title,
                       style: const TextStyle(
-                        color: Colors.black,
+                        color: Colors.white,
                         fontSize: 24,
                         fontWeight: FontWeight.w800,
                       ),
@@ -544,17 +556,17 @@ class _BootstrapStatusScreen extends StatelessWidget {
                     const SizedBox(height: 12),
                     Text(
                       message,
-                      style: const TextStyle(
-                        color: Colors.black87,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.82),
                         height: 1.5,
                       ),
                     ),
-                    if (error != null) ...<Widget>[
+                    if (showTechnical) ...<Widget>[
                       const SizedBox(height: 16),
                       SelectableText(
                         error.toString(),
-                        style: const TextStyle(
-                          color: Colors.black,
+                        style: TextStyle(
+                          color: Colors.amberAccent.shade100,
                           fontSize: 13,
                           height: 1.5,
                         ),
@@ -567,7 +579,7 @@ class _BootstrapStatusScreen extends StatelessWidget {
                       SelectableText(
                         stackTrace.toString(),
                         style: const TextStyle(
-                          color: Colors.black87,
+                          color: Colors.white70,
                           fontSize: 12,
                           height: 1.45,
                         ),
@@ -756,6 +768,7 @@ class _AuthGateState extends State<AuthGate> {
       _profile = seededProfile;
     }
     _setDebugStep('opening driver map');
+    unawaited(DriverPushNotificationService.instance.registerCurrentUserToken());
     await _bootstrapDriverSession(user);
   }
 
@@ -996,7 +1009,7 @@ class _StartupStatusView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: kDriverCream,
+      backgroundColor: kDriverDark,
       body: SafeArea(
         child: Center(
           child: Padding(
@@ -1006,15 +1019,11 @@ class _StartupStatusView extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.all(28),
                 decoration: BoxDecoration(
-                  color: Colors.white,
+                  color: Colors.black.withValues(alpha: 0.92),
                   borderRadius: BorderRadius.circular(28),
-                  boxShadow: const <BoxShadow>[
-                    BoxShadow(
-                      color: Color(0x14000000),
-                      blurRadius: 24,
-                      offset: Offset(0, 16),
-                    ),
-                  ],
+                  border: Border.all(
+                    color: kDriverGold.withValues(alpha: 0.45),
+                  ),
                 ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -1033,13 +1042,33 @@ class _StartupStatusView extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 18),
+                    const Text(
+                      'Move with NexRide',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white70,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Ride. Deliver. Earn.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Color(0xAAFFFFFF),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     Text(
                       title,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.w900,
-                        color: Colors.black87,
+                        color: Colors.white,
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -1047,7 +1076,7 @@ class _StartupStatusView extends StatelessWidget {
                       message,
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        color: Colors.black.withValues(alpha: 0.64),
+                        color: Colors.white.withValues(alpha: 0.78),
                         height: 1.5,
                       ),
                     ),

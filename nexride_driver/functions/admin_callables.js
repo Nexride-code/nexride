@@ -27,8 +27,41 @@ function pickupAreaHint(ride) {
   );
 }
 
+async function _adminAccessSnapshot(db, context) {
+  const uid = normUid(context?.auth?.uid);
+  const token = context?.auth?.token && typeof context.auth.token === "object"
+    ? context.auth.token
+    : {};
+  if (!uid) {
+    return { uid: "", email: "", claims: token, rtdbAdmin: false, allowed: false };
+  }
+  const rtdbAdmin = (await db.ref(`admins/${uid}`).get()).val() === true;
+  const allowed = token.admin === true || rtdbAdmin;
+  return {
+    uid,
+    email: String(token.email ?? "").trim().toLowerCase(),
+    claims: token,
+    rtdbAdmin,
+    allowed,
+  };
+}
+
+async function _requireAdmin(functionName, context, db) {
+  const access = await _adminAccessSnapshot(db, context);
+  if (!access.allowed) {
+    logger.warn(
+      `ADMIN_CALL_DENIED function=${functionName} uid=${access.uid || "none"} email=${access.email || "none"} claims=${JSON.stringify(access.claims)} rtdbAdmin=${access.rtdbAdmin}`,
+    );
+    return false;
+  }
+  logger.info(
+    `ADMIN_CALL_ALLOWED function=${functionName} uid=${access.uid} email=${access.email || "none"} rtdbAdmin=${access.rtdbAdmin}`,
+  );
+  return true;
+}
+
 async function adminListLiveRides(_data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminListLiveRides", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const snap = await db.ref("active_trips").get();
@@ -57,7 +90,7 @@ async function adminListLiveRides(_data, context, db) {
 }
 
 async function adminGetRideDetails(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminGetRideDetails", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const rideId = normUid(data?.rideId ?? data?.ride_id);
@@ -101,7 +134,7 @@ async function adminGetRideDetails(data, context, db) {
 }
 
 async function adminApproveWithdrawal(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminApproveWithdrawal", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   return withdrawFlow.approveWithdrawal(
@@ -112,7 +145,7 @@ async function adminApproveWithdrawal(data, context, db) {
 }
 
 async function adminRejectWithdrawal(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminRejectWithdrawal", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   return withdrawFlow.approveWithdrawal(
@@ -123,7 +156,7 @@ async function adminRejectWithdrawal(data, context, db) {
 }
 
 async function adminVerifyDriver(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminVerifyDriver", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const driverId = normUid(data?.driverId ?? data?.driver_id ?? data?.uid);
@@ -171,7 +204,7 @@ async function adminVerifyDriver(data, context, db) {
  * (evidence reviewed out-of-band). Requires audit note + matching payment_transactions row.
  */
 async function adminApproveManualPayment(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminApproveManualPayment", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const adminUid = normUid(context.auth.uid);
@@ -318,7 +351,7 @@ async function adminApproveManualPayment(data, context, db) {
 }
 
 async function adminSuspendDriver(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminSuspendDriver", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const driverId = normUid(data?.driverId ?? data?.driver_id ?? data?.uid);
@@ -357,7 +390,7 @@ async function adminSuspendDriver(data, context, db) {
 }
 
 async function adminListSupportTickets(_data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminListSupportTickets", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const snap = await db.ref("support_tickets").orderByKey().limitToLast(200).get();
@@ -376,7 +409,7 @@ async function adminListSupportTickets(_data, context, db) {
 }
 
 async function adminListPendingWithdrawals(_data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminListPendingWithdrawals", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const snap = await db.ref("withdraw_requests").orderByChild("status").equalTo("pending").limitToFirst(80).get();
@@ -390,7 +423,7 @@ async function adminListPendingWithdrawals(_data, context, db) {
 }
 
 async function adminListPayments(_data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminListPayments", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const snap = await db.ref("payments").orderByKey().limitToLast(50).get();
@@ -408,7 +441,7 @@ async function adminListPayments(_data, context, db) {
 }
 
 async function adminListDrivers(_data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminListDrivers", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const snap = await db.ref("drivers").limitToFirst(120).get();
@@ -425,7 +458,7 @@ async function adminListDrivers(_data, context, db) {
 }
 
 async function adminListRiders(_data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
+  if (!(await _requireAdmin("adminListRiders", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const snap = await db.ref("users").limitToFirst(120).get();

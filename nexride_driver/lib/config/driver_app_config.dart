@@ -4,6 +4,7 @@ class DriverFeatureFlags {
   /// Phase 1: car rides only (no dispatch / mart / food offers).
   static const Set<String> activeRequestServiceTypes = <String>{
     'ride',
+    'dispatch_delivery',
   };
 
   static bool serviceCanReceiveRequestsWithoutVerification(String serviceType) {

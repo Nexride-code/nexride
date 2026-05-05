@@ -25,7 +25,11 @@ const withdrawFlow = require("./withdraw_flow");
 const trackPublic = require("./track_public");
 const adminCallables = require("./admin_callables");
 const supportCallables = require("./support_callables");
+const adminRoles = require("./admin_roles");
 const { getRideCallRtcToken } = require("./ride_call_rtc");
+const { resolveDriverMonetization } = require("./driver_monetization");
+const pushNotifications = require("./push_notifications");
+const safetyEscalation = require("./safety_escalation");
 
 async function verifyPaymentInternal(reference) {
   const ref = String(reference || "").trim();
@@ -301,6 +305,30 @@ exports.supportUpdateTicket = onCall(rideCallOpts, async (request) =>
   supportCallables.supportUpdateTicket(request.data, callableContext(request), db),
 );
 
+exports.setUserRole = onCall(rideCallOpts, async (request) =>
+  adminRoles.setUserRole(request.data, callableContext(request), db),
+);
+
+exports.bootstrapFirstAdmin = onCall(rideCallOpts, async (request) =>
+  adminRoles.bootstrapFirstAdmin(request.data, callableContext(request), db),
+);
+
+exports.registerDevicePushToken = onCall(rideCallOpts, async (request) =>
+  pushNotifications.registerDevicePushToken(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+exports.escalateSafetyIncident = onCall(rideCallOpts, async (request) =>
+  safetyEscalation.escalateSafetyIncident(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
 exports.verifyPayment = onCall(
   { region: REGION, secrets: [flutterwaveSecretKey] },
   async (request) => {
@@ -397,8 +425,6 @@ exports.recordTripCompletion = onCall(
       return { success: false, reason: "invalid_ride_id" };
     }
 
-    const feeNgn = platformFeeNgn();
-
     const rideRef = db.ref(`ride_requests/${rideId}`);
     const rideSnap = await rideRef.get();
     const rideVal = rideSnap.val();
@@ -435,10 +461,12 @@ exports.recordTripCompletion = onCall(
       return { success: false, reason: "missing_trip_participants" };
     }
 
+    const monetization = await resolveDriverMonetization(db, driverId);
+    const feeNgn = monetization.isSubscription ? 0 : platformFeeNgn();
     const totalDeliveryFee = Number(
       rideVal.total_delivery_fee_paid || rideVal.total_delivery_fee || verification.amount || 0
     );
-    if (!Number.isFinite(totalDeliveryFee) || totalDeliveryFee <= feeNgn) {
+    if (!Number.isFinite(totalDeliveryFee) || totalDeliveryFee <= 0) {
       return { success: false, reason: "invalid_trip_amount" };
     }
     const driverEarning = totalDeliveryFee - feeNgn;
@@ -454,14 +482,16 @@ exports.recordTripCompletion = onCall(
       return { success: false, reason: riderDebit.reason || "rider_debit_failed" };
     }
 
-    const platformFeeTx = await createWalletTransactionInternal(db, {
-      userId: "nexride_platform",
-      amount: feeNgn,
-      type: "platform_fee_credit",
-      idempotencyKey: `${completionIdem}_platform_fee`,
-    });
-    if (!platformFeeTx.success) {
-      return { success: false, reason: platformFeeTx.reason || "platform_fee_failed" };
+    if (feeNgn > 0) {
+      const platformFeeTx = await createWalletTransactionInternal(db, {
+        userId: "nexride_platform",
+        amount: feeNgn,
+        type: "platform_fee_credit",
+        idempotencyKey: `${completionIdem}_platform_fee`,
+      });
+      if (!platformFeeTx.success) {
+        return { success: false, reason: platformFeeTx.reason || "platform_fee_failed" };
+      }
     }
 
     const driverCredit = await createWalletTransactionInternal(db, {
@@ -481,6 +511,7 @@ exports.recordTripCompletion = onCall(
       wallet_credit_status: "credited",
       platform_fee_ngn: feeNgn,
       rider_earning_credited: driverEarning,
+      monetization_model_applied: monetization.isSubscription ? "subscription" : "commission",
       updated_at: Date.now(),
     });
     await trackPublic.syncRideTrackPublic(db, rideId);
@@ -490,6 +521,7 @@ exports.recordTripCompletion = onCall(
       amount: driverEarning,
       platformFee: feeNgn,
       grossAmount: totalDeliveryFee,
+      monetization_model_applied: monetization.isSubscription ? "subscription" : "commission",
       status: "credited",
       created_at: Date.now(),
       updated_at: Date.now(),

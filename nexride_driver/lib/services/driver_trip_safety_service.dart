@@ -3,6 +3,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../support/driver_profile_support.dart';
 import '../support/realtime_database_error_support.dart';
+import 'ride_cloud_functions_service.dart';
 import 'support_ticket_bridge_service.dart';
 
 class DriverTripSafetyService {
@@ -12,6 +13,7 @@ class DriverTripSafetyService {
   final rtdb.FirebaseDatabase _database;
 
   rtdb.DatabaseReference get _rootRef => _database.ref();
+  RideCloudFunctionsService get _rideCloud => RideCloudFunctionsService();
   SupportTicketBridgeService get _supportTicketBridge =>
       const SupportTicketBridgeService();
 
@@ -163,6 +165,26 @@ class DriverTripSafetyService {
       'createdAt': rtdb.ServerValue.timestamp,
       'updatedAt': rtdb.ServerValue.timestamp,
     });
+
+    final normalizedFlag = flagType.trim().toLowerCase();
+    final normalizedSeverity = (severity ?? '').trim().toLowerCase();
+    final shouldEscalate =
+        normalizedFlag.contains('sos') ||
+        normalizedSeverity == 'critical' ||
+        normalizedSeverity == 'high';
+    if (shouldEscalate) {
+      try {
+        await _rideCloud.escalateSafetyIncident(
+          rideId: rideId,
+          riderId: riderId,
+          driverId: driverId,
+          serviceType: serviceType,
+          flagType: flagType,
+          details: message,
+          sourceFlagId: flagRef.key ?? '',
+        );
+      } catch (_) {}
+    }
   }
 
   Future<void> createTripDispute({
@@ -453,6 +475,28 @@ class DriverTripSafetyService {
         ? 'trip_completed'
         : settlementStatus.trim();
     final normalizedReviewStatus = (reviewStatus ?? 'not_required').trim();
+    final modelSnapshot = _map(normalizedSettlement['businessModelSnapshot']);
+    final selectedModel =
+        (modelSnapshot['selectedModel'] ?? modelSnapshot['selected_model'])
+            ?.toString()
+            .trim()
+            .toLowerCase();
+    if (selectedModel == 'subscription' && normalizedSettlement.isNotEmpty) {
+      final grossFromSettlement = _firstPositiveDouble(<dynamic>[
+        normalizedSettlement['grossFareNgn'],
+        normalizedSettlement['grossFare'],
+        grossFare,
+      ]);
+      normalizedSettlement['commissionAmountNgn'] = 0;
+      normalizedSettlement['commissionAmount'] = 0;
+      normalizedSettlement['commission'] = 0;
+      normalizedSettlement['driverPayoutNgn'] = grossFromSettlement;
+      normalizedSettlement['driverPayout'] = grossFromSettlement;
+      normalizedSettlement['netEarningNgn'] = grossFromSettlement;
+      normalizedSettlement['netEarning'] = grossFromSettlement;
+      normalizedSettlement['appliedModel'] = 'subscription';
+      normalizedSettlement['effectiveModel'] = 'subscription';
+    }
     final countsTowardWallet =
         driverSettlementCountsTowardWallet(normalizedSettlementStatus);
     final driverTripRecord = _buildDriverTripRecord(

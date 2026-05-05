@@ -255,7 +255,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
                 ),
                 const SizedBox(height: 12),
                 _infoLine('Firebase Auth email/password sign-in'),
-                _infoLine('Admin access from `/admins/{uid}` = true'),
+                _infoLine('Access granted by admin role assignment'),
               ],
             ),
           ),

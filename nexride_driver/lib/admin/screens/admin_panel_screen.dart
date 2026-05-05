@@ -54,6 +54,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   AdminSection _section = AdminSection.dashboard;
   bool _isLoading = true;
   String? _errorMessage;
+  bool _tokenRefreshedForDashboardLoad = false;
 
   String _riderCityFilter = 'All';
   String _riderStatusFilter = 'All';
@@ -100,6 +101,10 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
 
     try {
+      if (!_tokenRefreshedForDashboardLoad) {
+        await _authService.forceTokenRefresh();
+        _tokenRefreshedForDashboardLoad = true;
+      }
       final snapshot = await _dataService
           .fetchSnapshot(
             adminEmail: widget.session.email,
@@ -689,7 +694,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
 
   String _buildLoadFailureMessage(Object error) {
     if (_isPermissionDenied(error)) {
-      return 'Your signed-in account is no longer authorized to read admin data. Confirm `/admins/${widget.session.uid}` = true, then sign in again.';
+      return 'Your account is signed in but does not have access. Contact the NexRide system administrator.';
     }
     final details = error.toString().replaceFirst('Exception: ', '').trim();
     if (details.isNotEmpty) {

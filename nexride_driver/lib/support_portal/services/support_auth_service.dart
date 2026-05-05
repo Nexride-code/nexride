@@ -58,14 +58,15 @@ class SupportAuthService {
       if (user == null) {
         throw StateError('Signed in but no Firebase user was returned.');
       }
+      // Force fresh claims immediately after login.
+      await user.getIdToken(true);
 
       final session = await _sessionForUser(user);
       if (session == null) {
         await auth.signOut();
         throw StateError(
-          'This account signed in to Firebase, but it does not have NexRide Support access yet. '
-          'Grant a `support_agent` or `support_manager` role in `/support_staff/${user.uid}`, '
-          'or add `/admins/${user.uid}` = true for admin access.',
+          'Your account is signed in but does not have access. '
+          'Contact the NexRide system administrator.',
         );
       }
       debugPrint(
@@ -79,6 +80,14 @@ class SupportAuthService {
 
   Future<void> signOut() => auth.signOut();
 
+  Future<void> forceTokenRefresh() async {
+    final user = auth.currentUser;
+    if (user == null) {
+      return;
+    }
+    await user.getIdToken(true);
+  }
+
   Future<SupportSession?> _sessionForUser(User user) async {
     final email = user.email?.trim().toLowerCase() ?? '';
     final defaultDisplayName = (user.displayName?.trim().isNotEmpty ?? false)
@@ -87,6 +96,48 @@ class SupportAuthService {
 
     final supportRecord = await _loadSupportStaffRecord(user.uid);
     final supportRole = _roleFromSupportRecord(supportRecord);
+
+    final claims = await _readClaims(user);
+    final claimRole = normalizeSupportRole(
+      _firstText(<dynamic>[claims['role']]),
+    );
+    final claimSupport = claims['support'] == true;
+    final claimSupportStaff = claims['support_staff'] == true;
+    final claimAdmin = claims['admin'] == true;
+    final claimRoleAllowed =
+        claimRole == 'support_agent' || claimRole == 'support_manager';
+    final claimAllowed = claimSupport || claimSupportStaff || claimRoleAllowed;
+    final rtdbAdmin = await _loadAdminRoleFromDatabase(user.uid);
+    final hasAdminOverride = claimAdmin || rtdbAdmin.isNotEmpty;
+    final hasRtdbSupport = supportRole.isNotEmpty;
+    final finalAllowed = hasAdminOverride || claimAllowed || hasRtdbSupport;
+    debugPrint(
+      'SUPPORT_AUTH_DEBUG uid=${user.uid} email=$email '
+      'claims=$claims supportRecord=$supportRecord '
+      'rtdbAdmin=${rtdbAdmin.isNotEmpty} finalAllowed=$finalAllowed',
+    );
+
+    if (hasAdminOverride) {
+      return SupportSession.adminOverride(
+        uid: user.uid,
+        email: email,
+        displayName: defaultDisplayName,
+        role: 'admin',
+        accessMode: claimAdmin ? 'custom_claim_admin' : 'admins_node',
+      );
+    }
+    if (claimAllowed) {
+      final resolvedRole = claimRoleAllowed ? claimRole : 'support_agent';
+      return SupportSession(
+        uid: user.uid,
+        email: email,
+        displayName: defaultDisplayName,
+        role: resolvedRole,
+        accessMode: 'custom_claim_support',
+        permissions: SupportPermissions.forRole(resolvedRole),
+      );
+    }
+
     if (supportRole.isNotEmpty) {
       return SupportSession(
         uid: user.uid,
@@ -101,21 +152,26 @@ class SupportAuthService {
       );
     }
 
-    final adminRole = await _loadAdminRoleFromDatabase(user.uid);
-    if (adminRole.isNotEmpty) {
-      return SupportSession.adminOverride(
-        uid: user.uid,
-        email: email,
-        displayName: defaultDisplayName,
-        role: adminRole,
-        accessMode: 'admins_node',
-      );
-    }
-
     debugPrint(
       '[SupportAuth] no support access for uid=${user.uid} email=$email',
     );
     return null;
+  }
+
+  Future<Map<String, dynamic>> _readClaims(User user) async {
+    try {
+      final token = await user.getIdTokenResult();
+      final claims = token.claims;
+      if (claims == null) {
+        return const <String, dynamic>{};
+      }
+      return claims.map<String, dynamic>(
+        (String key, dynamic value) => MapEntry(key, value),
+      );
+    } catch (error) {
+      debugPrint('[SupportAuth] claim lookup failed uid=${user.uid} error=$error');
+      return const <String, dynamic>{};
+    }
   }
 
   Future<User?> _resolveCurrentUser() async {

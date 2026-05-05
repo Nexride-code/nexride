@@ -89,8 +89,8 @@ class _SupportGateScreenState extends State<SupportGateScreen> {
         final signedInButUnauthorized =
             session == null && _authService.hasAuthenticatedUser;
         if (signedInButUnauthorized) {
-          final message =
-              'This Firebase account is signed in, but `/support_staff/${_authService.authenticatedUid}` is missing a valid enabled support role and `/admins/${_authService.authenticatedUid}` is not set to `true`.';
+          const message =
+              'Your account is signed in but does not have access. Contact the NexRide system administrator.';
           if (widget.mode == SupportGateMode.dashboard) {
             _logDecision(
               'signed-in but unauthorized for support dashboard uid=${_authService.authenticatedUid}',
@@ -102,7 +102,7 @@ class _SupportGateScreenState extends State<SupportGateScreen> {
             return const AdminFullscreenState(
               title: 'Support access not authorized',
               message:
-                  'This signed-in account does not have support access in the live Realtime Database. We are returning you to the support login screen.',
+                  'Your account is signed in but does not have access. Contact the NexRide system administrator.',
               icon: Icons.lock_outline_rounded,
               isLoading: true,
             );

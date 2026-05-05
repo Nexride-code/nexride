@@ -7,6 +7,7 @@ import 'package:lottie/lottie.dart';
 
 import 'ride_type_screen.dart';
 import 'rider_login.dart';
+import 'support/production_user_messages.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'support/startup_rtdb_support.dart';
@@ -77,10 +78,7 @@ class _SplashScreenState extends State<SplashScreen> {
     _startupInProgress = true;
     final runId = ++_startupRunId;
     _scheduleStartupFailSafe();
-    _setStartupState(
-      message:
-          'Checking your NexRide session. If startup takes too long, NexRide will continue in safe mode.',
-    );
+    _setStartupState(message: 'Getting things ready…');
 
     User? authenticatedUser;
     var nextScreen = _fallbackScreenFor(_auth.currentUser);
@@ -114,10 +112,7 @@ class _SplashScreenState extends State<SplashScreen> {
 
       final signedInUser = authenticatedUser;
 
-      _setStartupState(
-        message:
-            'Checking your NexRide session and preparing your rider account.',
-      );
+      _setStartupState(message: 'Preparing your NexRide rider account…');
 
       final profileResult = await _runStartupStep<Map<String, dynamic>>(
         label: 'profile fetch',
@@ -395,21 +390,24 @@ class _SplashScreenState extends State<SplashScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: <Widget>[
                     const Text(
-                      'NexRide',
+                      'Move with NexRide',
+                      textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontSize: 52,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFFB7792B),
-                        letterSpacing: 3,
+                        fontSize: 30,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFFD4AF37),
+                        height: 1.15,
+                        letterSpacing: 0.8,
                       ),
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Your Ride, Anytime',
+                      'Ride. Deliver. Earn.',
+                      textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 16,
                         color: Colors.white70,
-                        letterSpacing: 1,
+                        letterSpacing: 1.6,
                       ),
                     ),
                     const SizedBox(height: 28),
@@ -424,8 +422,7 @@ class _SplashScreenState extends State<SplashScreen> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        _startupMessage ??
-                            'Checking your NexRide session and preparing your rider account.',
+                        _startupMessage ?? 'Preparing your NexRide rider account…',
                         textAlign: TextAlign.center,
                         style: const TextStyle(
                           color: Colors.white70,
@@ -448,8 +445,7 @@ class _SplashScreenState extends State<SplashScreen> {
                             ),
                             const SizedBox(height: 12),
                             Text(
-                              _startupMessage ??
-                                  'We could not finish loading NexRide right now.',
+                              kNexRideFriendlyFailureMessage,
                               textAlign: TextAlign.center,
                               style: const TextStyle(
                                 color: Colors.black87,

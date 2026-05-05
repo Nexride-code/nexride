@@ -57,6 +57,8 @@ class AdminAuthService {
       if (user == null) {
         throw StateError('Signed in but no Firebase user was returned.');
       }
+      // Force fresh claims immediately after login.
+      await user.getIdToken(true);
 
       final session = await _sessionForUser(user);
       if (session == null) {
@@ -65,8 +67,8 @@ class AdminAuthService {
         );
         await auth.signOut();
         throw StateError(
-          'This account signed in to Firebase, but it does not have NexRide admin access yet. '
-          'Add `/admins/${user.uid}` = true in Realtime Database.',
+          'Your account is signed in but does not have access. '
+          'Contact the NexRide system administrator.',
         );
       }
       debugPrint(
@@ -80,21 +82,36 @@ class AdminAuthService {
 
   Future<void> signOut() => auth.signOut();
 
+  Future<void> forceTokenRefresh() async {
+    final user = auth.currentUser;
+    if (user == null) {
+      return;
+    }
+    await user.getIdToken(true);
+  }
+
   Future<AdminSession?> _sessionForUser(User user) async {
     final email = user.email?.trim().toLowerCase() ?? '';
     final displayName = (user.displayName?.trim().isNotEmpty ?? false)
         ? user.displayName!.trim()
         : (email.isNotEmpty ? email.split('@').first : 'Admin');
 
+    final claims = await _readClaims(user);
+    final claimAdmin = claims['admin'] == true;
     final hasDatabaseAccess = await _hasDatabaseAdminAccess(user.uid);
-    if (!hasDatabaseAccess) {
+    final finalAllowed = claimAdmin || hasDatabaseAccess;
+    debugPrint(
+      'ADMIN_AUTH_DEBUG uid=${user.uid} email=$email '
+      'claims=$claims rtdbAdmin=$hasDatabaseAccess finalAllowed=$finalAllowed',
+    );
+    if (!finalAllowed) {
       debugPrint(
         '[AdminAuth] no admin access path matched for uid=${user.uid} email=$email',
       );
       return null;
     }
 
-    const accessMode = 'admins_node';
+    final accessMode = claimAdmin ? 'custom_claim_admin' : 'admins_node';
     debugPrint('[AdminAuth] admin access granted via $accessMode');
     return AdminSession(
       uid: user.uid,
@@ -102,6 +119,22 @@ class AdminAuthService {
       displayName: displayName,
       accessMode: accessMode,
     );
+  }
+
+  Future<Map<String, dynamic>> _readClaims(User user) async {
+    try {
+      final idToken = await user.getIdTokenResult();
+      final claims = idToken.claims;
+      if (claims == null) {
+        return const <String, dynamic>{};
+      }
+      return claims.map<String, dynamic>(
+        (String key, dynamic value) => MapEntry(key, value),
+      );
+    } catch (error) {
+      debugPrint('[AdminAuth] custom claim lookup failed uid=${user.uid} error=$error');
+      return const <String, dynamic>{};
+    }
   }
 
   Future<User?> _resolveCurrentUser() async {

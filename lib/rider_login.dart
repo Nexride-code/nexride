@@ -4,6 +4,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'ride_type_screen.dart';
 import 'rider_signup.dart';
 import 'services/rider_trust_bootstrap_service.dart';
+import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
 
 class RiderLogin extends StatefulWidget {
@@ -34,70 +35,33 @@ class _RiderLoginState extends State<RiderLogin> {
     setState(() => isLoading = true);
 
     try {
-      // 🔐 LOGIN
       UserCredential userCredential = await auth.signInWithEmailAndPassword(
         email: emailController.text.trim(),
         password: passwordController.text.trim(),
       );
 
-      String uid = userCredential.user!.uid;
+      final uid = userCredential.user!.uid;
+      final email = emailController.text.trim();
 
       final existingUser = await readUserProfileWithFallback(
         rootRef: dbRef,
         uid: uid,
         source: 'rider_login.user_profile',
       );
+
       final userData = <String, dynamic>{
         ...existingUser,
         if (existingUser.isEmpty) ...<String, dynamic>{
           "uid": uid,
-          "name": emailController.text.split("@")[0],
-          "email": emailController.text.trim(),
+          "name": email.split("@")[0],
+          "email": email,
           "phone": "",
           "role": "rider",
           "created_at": ServerValue.timestamp,
         },
       };
 
-      final bundle = await _trustBootstrapService.ensureRiderTrustState(
-        riderId: uid,
-        existingUser: userData,
-        fallbackName: emailController.text.split("@")[0],
-        fallbackEmail: emailController.text.trim(),
-      );
-
-      final bootstrapReady = await hasRiderBootstrapArtifacts(
-        rootRef: dbRef,
-        riderId: uid,
-        source: 'rider_login.bootstrap_check',
-      );
-      if (!bootstrapReady) {
-        await persistRiderOwnedBootstrap(
-          rootRef: dbRef,
-          riderId: uid,
-          userProfile: <String, dynamic>{
-            ...userData,
-            ...bundle.userProfile,
-            "created_at": userData["created_at"] ?? ServerValue.timestamp,
-          },
-          verification: bundle.verification,
-          deviceFingerprints: bundle.deviceFingerprints,
-          source: 'rider_login.bootstrap_write',
-        );
-      } else {
-        await dbRef.child('users/$uid').update(<String, dynamic>{
-          'updated_at': ServerValue.timestamp,
-        });
-      }
-
-      debugPrint(
-        existingUser.isNotEmpty
-            ? "✅ Rider profile found"
-            : "✅ Rider profile created",
-      );
-
-      // ✅ ROLE CHECK
-      if (userData["role"] != "rider") {
+      if (userData["role"]?.toString() != "rider") {
         await auth.signOut();
         if (!mounted) {
           return;
@@ -105,6 +69,59 @@ class _RiderLoginState extends State<RiderLogin> {
         showMessage("Access denied ❌");
         setState(() => isLoading = false);
         return;
+      }
+
+      RiderTrustBootstrapBundle bundle;
+      try {
+        bundle = await _trustBootstrapService.ensureRiderTrustState(
+          riderId: uid,
+          existingUser: userData,
+          fallbackName: email.split("@")[0],
+          fallbackEmail: email,
+        );
+
+        final bootstrapReady = await hasRiderBootstrapArtifacts(
+          rootRef: dbRef,
+          riderId: uid,
+          source: 'rider_login.bootstrap_check',
+        );
+        if (!bootstrapReady) {
+          await persistRiderOwnedBootstrap(
+            rootRef: dbRef,
+            riderId: uid,
+            userProfile: <String, dynamic>{
+              ...userData,
+              ...bundle.userProfile,
+              "created_at": userData["created_at"] ?? ServerValue.timestamp,
+            },
+            verification: bundle.verification,
+            deviceFingerprints: bundle.deviceFingerprints,
+            source: 'rider_login.bootstrap_write',
+          );
+        } else {
+          await dbRef.child('users/$uid').update(<String, dynamic>{
+            'updated_at': ServerValue.timestamp,
+          });
+        }
+
+        debugPrint(
+          existingUser.isNotEmpty
+              ? '✅ Rider profile synced'
+              : '✅ Rider profile initialized',
+        );
+      } catch (error, stackTrace) {
+        debugPrint('[RiderLogin] RTDB bootstrap failed after auth: $error');
+        debugPrintStack(
+          label: '[RiderLogin] RTDB bootstrap',
+          stackTrace: stackTrace,
+        );
+        await persistRiderMinimalPresence(
+          rootRef: dbRef,
+          uid: uid,
+          email: email,
+          name: userData['name']?.toString(),
+          source: 'rider_login.minimal_presence',
+        );
       }
 
       if (!mounted) {
@@ -126,19 +143,10 @@ class _RiderLoginState extends State<RiderLogin> {
       } else {
         showMessage(e.message ?? "Login failed");
       }
-    } catch (e) {
-      debugPrint("GENERAL ERROR: $e");
-      if (e is StartupRtdbException) {
-        showMessage(
-          startupDebugMessage(
-            "We could not finish loading your rider account right now ❌",
-            path: e.path,
-            error: e.cause,
-          ),
-        );
-      } else {
-        showMessage("Something went wrong ❌");
-      }
+    } catch (e, stackTrace) {
+      debugPrint('[RiderLogin] unexpected: $e');
+      debugPrintStack(label: '[RiderLogin]', stackTrace: stackTrace);
+      showMessage(kNexRideFriendlyFailureMessage);
     }
 
     if (mounted) {

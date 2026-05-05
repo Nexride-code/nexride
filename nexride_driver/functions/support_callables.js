@@ -19,6 +19,58 @@ function pickupAreaHint(ride) {
   return String(ride?.pickup_area ?? p.area ?? p.city ?? "").trim().slice(0, 80) || "—";
 }
 
+async function _supportAccessSnapshot(db, context) {
+  const uid = normUid(context?.auth?.uid);
+  const token = context?.auth?.token && typeof context.auth.token === "object"
+    ? context.auth.token
+    : {};
+  const claimRole = String(token.role ?? "").trim().toLowerCase();
+  if (!uid) {
+    return {
+      uid: "",
+      email: "",
+      claims: token,
+      supportRecord: null,
+      rtdbAdmin: false,
+      allowed: false,
+    };
+  }
+  const [adminSnap, supportSnap] = await Promise.all([
+    db.ref(`admins/${uid}`).get(),
+    db.ref(`support_staff/${uid}`).get(),
+  ]);
+  const rtdbAdmin = adminSnap.val() === true;
+  const supportRecord = supportSnap.val();
+  const supportRole = String(supportRecord?.role ?? "").trim().toLowerCase();
+  const supportEnabled = !!supportRecord && supportRecord.enabled !== false && supportRecord.disabled !== true;
+  const supportRoleValid = supportRole === "support_agent" || supportRole === "support_manager";
+  const claimSupport = token.support === true || token.support_staff === true;
+  const claimRoleValid = claimRole === "support_agent" || claimRole === "support_manager";
+  const allowed = token.admin === true || rtdbAdmin || claimSupport || claimRoleValid || (supportEnabled && supportRoleValid);
+  return {
+    uid,
+    email: String(token.email ?? "").trim().toLowerCase(),
+    claims: token,
+    supportRecord: supportRecord ?? null,
+    rtdbAdmin,
+    allowed,
+  };
+}
+
+async function _requireSupport(functionName, context, db) {
+  const access = await _supportAccessSnapshot(db, context);
+  if (!access.allowed) {
+    logger.warn(
+      `SUPPORT_CALL_DENIED function=${functionName} uid=${access.uid || "none"} email=${access.email || "none"} claims=${JSON.stringify(access.claims)} supportRecord=${JSON.stringify(access.supportRecord)} rtdbAdmin=${access.rtdbAdmin}`,
+    );
+    return false;
+  }
+  logger.info(
+    `SUPPORT_CALL_ALLOWED function=${functionName} uid=${access.uid} email=${access.email || "none"} rtdbAdmin=${access.rtdbAdmin}`,
+  );
+  return true;
+}
+
 async function supportCreateTicket(data, context, db) {
   if (!context.auth?.uid) {
     return { success: false, reason: "unauthorized" };
@@ -87,7 +139,7 @@ async function supportGetTicket(data, context, db) {
 }
 
 async function supportSearchRide(data, context, db) {
-  if (!(await isNexRideAdminOrSupport(db, context))) {
+  if (!(await _requireSupport("supportSearchRide", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const rideId = normUid(data?.rideId ?? data?.ride_id);
@@ -141,7 +193,7 @@ async function supportSearchRide(data, context, db) {
 }
 
 async function supportListTickets(_data, context, db) {
-  if (!(await isNexRideAdminOrSupport(db, context))) {
+  if (!(await _requireSupport("supportListTickets", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const snap = await db.ref("support_tickets").orderByKey().limitToLast(60).get();
@@ -158,7 +210,7 @@ async function supportListTickets(_data, context, db) {
 }
 
 async function supportUpdateTicket(data, context, db) {
-  if (!(await isNexRideAdminOrSupport(db, context))) {
+  if (!(await _requireSupport("supportUpdateTicket", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const ticketId = normUid(data?.ticketId ?? data?.ticket_id);
@@ -197,7 +249,7 @@ async function supportUpdateTicket(data, context, db) {
 }
 
 async function supportSearchUser(data, context, db) {
-  if (!(await isNexRideAdminOrSupport(db, context))) {
+  if (!(await _requireSupport("supportSearchUser", context, db))) {
     return { success: false, reason: "unauthorized" };
   }
   const uid = normUid(data?.uid ?? data?.userId ?? data?.user_id);

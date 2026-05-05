@@ -86,7 +86,7 @@
     ]
   },
   "database": {
-    "rules": "database.rules.json"
+    "rules": "nexride_driver/database.rules.json"
   },
   "storage": {
     "rules": "storage.rules"

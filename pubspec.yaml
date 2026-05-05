@@ -21,6 +21,7 @@ dependencies:
   firebase_database: ^10.4.5
   cloud_functions: ^4.7.6
   firebase_storage: ^11.7.7
+  firebase_messaging: ^14.9.4
 
   # MAPS
   google_maps_flutter: ^2.6.0
@@ -47,6 +48,7 @@ dev_dependencies:
     sdk: flutter
 
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
 
 dependency_overrides:
   agora_rtc_engine:
@@ -59,3 +61,11 @@ flutter:
   assets:
   - assets/car.png
   - assets/animations/
+  - assets/branding/nexride_launcher.png
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/branding/nexride_launcher.png
+  adaptive_icon_background: "#0D0D0D"
+  adaptive_icon_foreground: assets/branding/nexride_launcher.png

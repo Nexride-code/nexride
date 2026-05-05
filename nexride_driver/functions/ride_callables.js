@@ -16,6 +16,8 @@ const {
   summarizeDriverForFanout,
 } = require("./driver_dispatch_gates");
 const { ensureRideChatThread } = require("./ride_chat_admin");
+const { sendPushToUser } = require("./push_notifications");
+const { resolveDriverMonetization } = require("./driver_monetization");
 
 const TRIP_STATE = {
   searching: "searching",
@@ -551,6 +553,18 @@ async function writeDriverOfferPaths(db, rid, riderId, d, market, ridePayload, p
       [`ride_offer_fanout/${rid}/${d}`]: true,
       [`driver_offer_queue/${d}/${rid}`]: payload,
       [`driver_offer_queue_debug/${d}/${rid}`]: payload,
+    });
+    await sendPushToUser(db, d, {
+      notification: {
+        title: "New trip request",
+        body: "A rider request is available near you.",
+      },
+      data: {
+        type: "driver_offer",
+        rideId: rid,
+        serviceType: "ride",
+        market,
+      },
     });
     console.log("OFFER_WRITE_SUCCESS", `path=${qPath}`);
     return true;
@@ -1576,6 +1590,8 @@ async function driverEnroute(data, context, db) {
   if (!rideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
   }
+  const monetization = await resolveDriverMonetization(db, driverId);
+  const settlementFee = monetization.isSubscription ? 0 : platformFeeNgn();
   const rideRef = db.ref(`ride_requests/${rideId}`);
   let reason = "unknown";
   const tx = await rideRef.transaction((cur) => {
@@ -1736,14 +1752,15 @@ async function completeTrip(data, context, db) {
     }
     const now = nowMs();
     const gross = grossFareFromRide(cur);
-    const fee = platformFeeNgn();
-    const driverPayout = Math.max(0, gross - fee);
+    const driverPayout = Math.max(0, gross - settlementFee);
     const settlement = {
       grossFareNgn: gross,
-      commissionAmountNgn: fee,
+      commissionAmountNgn: settlementFee,
       driverPayoutNgn: driverPayout,
       netEarningNgn: driverPayout,
       currency: String(cur.currency ?? "NGN"),
+      selectedModel: monetization.selectedModel,
+      effectiveModel: monetization.effectiveModel,
       recorded_at: now,
       source: "driver_complete_trip",
     };
@@ -1755,8 +1772,8 @@ async function completeTrip(data, context, db) {
       trip_completed: true,
       settlement,
       grossFare: gross,
-      commission: fee,
-      commissionAmount: fee,
+      commission: settlementFee,
+      commissionAmount: settlementFee,
       driverPayout,
       netEarning: driverPayout,
       updated_at: now,
@@ -1786,8 +1803,7 @@ async function completeTrip(data, context, db) {
 
   if (rideHasVerifiedOnlinePayment(ride)) {
     const gross = grossFareFromRide(ride);
-    const fee = platformFeeNgn();
-    const driverPayout = Math.max(0, gross - fee);
+    const driverPayout = Math.max(0, gross - settlementFee);
     if (driverPayout > 0 && driverId) {
       const ledgerRef = db.ref(`driver_wallet_ledger/${driverId}/${rideId}_fare_credit`);
       const ltxn = await ledgerRef.transaction((cur) => {

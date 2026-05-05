@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../support/driver_profile_bootstrap_support.dart';
 import '../support/driver_profile_support.dart';
+import '../support/production_user_messages.dart';
 import '../support/realtime_database_error_support.dart';
 import '../trip_sync/trip_state_machine.dart';
 import 'driver_signup.dart';
@@ -142,6 +143,13 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
 
       if (!snapshot.exists) {
         profileUpdate['created_at'] = ServerValue.timestamp;
+        profileUpdate['role'] = 'driver';
+        profileUpdate['services'] = <String>['ride'];
+        profileUpdate['market'] = 'lagos';
+        profileUpdate['market_pool'] = 'lagos';
+        profileUpdate['online'] = false;
+        profileUpdate['status'] = 'active';
+        profileUpdate['serviceTypes'] = <String>['ride'];
       }
 
       final rootUpdates = <String, Object?>{
@@ -196,18 +204,37 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
         default:
           showMessage(error.message ?? 'Login error');
       }
-    } catch (error) {
+    } catch (error, stackTrace) {
       debugPrint('[DriverLogin] unexpected error $error');
-      final debugPath = FirebaseAuth.instance.currentUser == null
-          ? 'auth'
-          : driverProfilePath(FirebaseAuth.instance.currentUser!.uid);
-      showMessage(
-        realtimeDatabaseDebugMessage(
-          'We could not finish driver startup. Please try again.',
-          path: debugPath,
-          error: error,
-        ),
-      );
+      debugPrintStack(label: '[DriverLogin]', stackTrace: stackTrace);
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        try {
+          final rootRef = FirebaseDatabase.instance.ref();
+          await rootRef.child(driverProfilePath(user.uid)).update(<String, Object?>{
+            'uid': user.uid,
+            'id': user.uid,
+            'email': emailController.text.trim(),
+            'role': 'driver',
+            'online': false,
+            'status': 'active',
+            'services': <String>['ride'],
+            'serviceTypes': <String>['ride'],
+            'market': 'lagos',
+            'market_pool': 'lagos',
+            'created_at': ServerValue.timestamp,
+            'updated_at': ServerValue.timestamp,
+          });
+          debugPrint('[DriverLogin] minimal driver seed attempted uid=${user.uid}');
+        } catch (minimalError, minimalStack) {
+          debugPrint('[DriverLogin] minimal driver seed failed: $minimalError');
+          debugPrintStack(
+            label: '[DriverLogin] minimal seed',
+            stackTrace: minimalStack,
+          );
+        }
+      }
+      showMessage(kNexRideFriendlyFailureMessage);
     } finally {
       if (mounted) {
         setState(() => isLoading = false);

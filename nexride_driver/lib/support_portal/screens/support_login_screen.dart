@@ -248,7 +248,7 @@ class _SupportLoginScreenState extends State<SupportLoginScreen>
                 SizedBox(height: 12),
                 _SupportInfoLine('support_agent'),
                 _SupportInfoLine('support_manager'),
-                _SupportInfoLine('admin override via `/admins/{uid}`'),
+                _SupportInfoLine('admin role override'),
               ],
             ),
           ),

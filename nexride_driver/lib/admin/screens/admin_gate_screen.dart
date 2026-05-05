@@ -86,8 +86,8 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
         final signedInButUnauthorized =
             session == null && _authService.hasAuthenticatedUser;
         if (signedInButUnauthorized) {
-          final message =
-              'This Firebase account is signed in, but `/admins/${_authService.authenticatedUid}` is not set to `true` in Realtime Database.';
+          const message =
+              'Your account is signed in but does not have access. Contact the NexRide system administrator.';
           if (widget.mode == AdminGateMode.dashboard) {
             _logDecision(
               'signed-in but unauthorized for dashboard uid=${_authService.authenticatedUid}',
@@ -99,7 +99,7 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
             return const AdminFullscreenState(
               title: 'Admin access not authorized',
               message:
-                  'This signed-in account does not have admin access in the live Realtime Database. We are returning you to the admin login screen.',
+                  'Your account is signed in but does not have access. Contact the NexRide system administrator.',
               icon: Icons.lock_outline_rounded,
               isLoading: true,
             );

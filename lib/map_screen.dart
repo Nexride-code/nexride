@@ -29,6 +29,7 @@ import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'services/rider_ride_cloud_functions_service.dart';
+import 'services/rider_push_notification_service.dart';
 import 'services/trip_safety_service.dart';
 import 'service_type.dart';
 import 'share_trip_rtdb.dart';
@@ -2132,6 +2133,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       ),
     );
     _ensureRiderActiveRidePointerListener();
+    unawaited(RiderPushNotificationService.instance.registerCurrentUserToken());
   }
 
   int _rideActivityTimestamp(Map<String, dynamic> rideData) {
@@ -6071,24 +6073,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'RIDER_CREATE_CALLABLE_START uid=${user.uid} market=$dispatchMarket '
         'fare=${fareBreakdown.totalFare} payment=${searchingPayload['payment_method']}',
       );
-      final createRes = await _rideCloud
-          .createRideRequest(<String, dynamic>{
-            'market': dispatchMarket,
-            'pickup': pickupPayload,
-            'dropoff': destinationPayload,
-            'fare': fareBreakdown.totalFare,
-            'currency': 'NGN',
-            'distance_km': fareBreakdown.distanceKm,
-            'eta_min': fareBreakdown.durationMin,
-            'eta_minutes': fareBreakdown.durationMin,
-            'payment_method': searchingPayload['payment_method'],
-            'expires_at': searchTimeoutAt,
-            'service_type': RiderServiceType.ride.key,
-            'ride_metadata': rideMetadataSubset(searchingPayload),
-          })
+      final createPayload = <String, dynamic>{
+        'market': dispatchMarket,
+        'pickup': pickupPayload,
+        'dropoff': destinationPayload,
+        'fare': fareBreakdown.totalFare,
+        'currency': 'NGN',
+        'distance_km': fareBreakdown.distanceKm,
+        'eta_min': fareBreakdown.durationMin,
+        'eta_minutes': fareBreakdown.durationMin,
+        'payment_method': searchingPayload['payment_method'],
+        'expires_at': searchTimeoutAt,
+        'service_type': RiderServiceType.ride.key,
+        'ride_metadata': rideMetadataSubset(searchingPayload),
+      };
+      var createRes = await _rideCloud
+          .createRideRequest(createPayload)
           .timeout(const Duration(seconds: 45));
       if (!riderRideCallableSucceeded(createRes)) {
-        final reason = riderRideCallableReason(createRes);
+        var reason = riderRideCallableReason(createRes);
         final recoveredRideId = _firstNonEmptyText(<dynamic>[
           createRes['rideId'],
           createRes['ride_id'],
@@ -6118,7 +6121,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               '[RIDER_REQ] create_recover_existing_ride skipped '
               'reason=stale_pointer recoveredRideId=$recoveredRideId canonical=$recoveredCanonical',
             );
-            throw StateError('rider_active_trip_stale_pointer');
+            _showSnackBar('Refreshing trip session, please wait...');
+            createRes = await _rideCloud
+                .createRideRequest(createPayload)
+                .timeout(const Duration(seconds: 45));
+            reason = riderRideCallableReason(createRes);
+            if (!riderRideCallableSucceeded(createRes)) {
+              throw StateError(reason);
+            }
+            rideId = _firstNonEmptyText(<dynamic>[
+              createRes['rideId'],
+              createRes['ride_id'],
+            ]);
           }
         } else {
           throw StateError(reason);

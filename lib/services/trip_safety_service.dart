@@ -251,6 +251,27 @@ class TripSafetyTelemetryService {
       'createdAt': rtdb.ServerValue.timestamp,
       'updatedAt': rtdb.ServerValue.timestamp,
     });
+
+    final normalizedFlag = flagType.trim().toLowerCase();
+    final normalizedSeverity = (severity ?? '').trim().toLowerCase();
+    final shouldEscalate =
+        normalizedFlag.contains('sos') ||
+        normalizedSeverity == 'critical' ||
+        normalizedSeverity == 'high';
+    if (shouldEscalate) {
+      try {
+        await RiderRideCloudFunctionsService.instance.escalateSafetyIncident(
+          rideId: rideId,
+          riderId: riderId,
+          driverId: driverId,
+          flagType: flagType,
+          details: message,
+          sourceFlagId: flagRef.key ?? '',
+        );
+      } catch (error) {
+        debugPrint('RIDER_SOS_ESCALATE_FAIL error=$error');
+      }
+    }
   }
 
   Future<void> createTripDispute({

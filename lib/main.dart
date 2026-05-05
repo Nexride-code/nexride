@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'firebase_options.dart';
+import 'services/rider_push_notification_service.dart';
 import 'splash_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await RiderPushNotificationService.instance.initialize();
 
   final database = FirebaseDatabase.instance;
   database.setPersistenceEnabled(true);

@@ -108,6 +108,34 @@ class RiderRideCloudFunctionsService {
         'rideId': rideId,
         'ride_id': rideId,
       });
+
+  Future<Map<String, dynamic>> registerDevicePushToken({
+    required String token,
+    required String platform,
+  }) =>
+      _call('registerDevicePushToken', <String, dynamic>{
+        'token': token,
+        'platform': platform,
+        'app': 'rider',
+      });
+
+  Future<Map<String, dynamic>> escalateSafetyIncident({
+    required String rideId,
+    required String riderId,
+    required String driverId,
+    required String flagType,
+    required String details,
+    String sourceFlagId = '',
+  }) =>
+      _call('escalateSafetyIncident', <String, dynamic>{
+        'rideId': rideId,
+        'riderId': riderId,
+        'driverId': driverId,
+        'serviceType': 'ride',
+        'flagType': flagType,
+        'details': details,
+        if (sourceFlagId.trim().isNotEmpty) 'sourceFlagId': sourceFlagId.trim(),
+      });
 }
 
 bool riderRideCallableSucceeded(Map<String, dynamic>? response) =>

@@ -8871,6 +8871,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _logRtdb('online publish start driverId=$driverId');
       onlinePublishAttempted = true;
       try {
+        final publishedActiveServices =
+            _effectiveDriverServiceTypes().toList(growable: false);
         await _driversRef.child(driverId).update({
           'id': driverId,
           'uid': driverId,
@@ -8888,7 +8890,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           'available': true,
           'status': 'available',
           'dispatch_state': 'available',
-          'active_services': <String>['ride'],
+          'active_services': publishedActiveServices,
           'market': cityToSave,
           'market_pool': cityToSave,
           'dispatch_market': cityToSave,

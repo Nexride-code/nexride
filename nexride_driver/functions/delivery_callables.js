@@ -13,6 +13,7 @@
 const { ServerValue } = require("firebase-admin/database");
 const { evaluateDriverForOffer, loadDispatchGates } = require("./driver_dispatch_gates");
 const ride = require("./ride_callables");
+const { sendPushToUser } = require("./push_notifications");
 
 const MAX_FARE_NGN_DEFAULT = 25_000_000;
 const MIN_LAT_NG = 4.2;
@@ -286,6 +287,18 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
       await db.ref().update({
         [`delivery_offer_fanout/${rid}/${d}`]: true,
         [qPath]: payload,
+      });
+      await sendPushToUser(db, d, {
+        notification: {
+          title: "New dispatch request",
+          body: "A delivery request is available near you.",
+        },
+        data: {
+          type: "driver_offer",
+          deliveryId: rid,
+          serviceType: "dispatch_delivery",
+          market,
+        },
       });
       console.log("DELIVERY_OFFER_WRITE_SUCCESS", `path=${qPath}`);
       offersWritten += 1;

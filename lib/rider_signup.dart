@@ -4,6 +4,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'ride_type_screen.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'support/firebase_rtdb_guard.dart';
+import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
 
 class RiderSignup extends StatefulWidget {
@@ -38,11 +39,10 @@ class _RiderSignupState extends State<RiderSignup> {
 
     try {
       // 🔐 CREATE AUTH ACCOUNT
-      UserCredential userCredential = await FirebaseAuth.instance
-          .createUserWithEmailAndPassword(
-            email: emailController.text.trim(),
-            password: passwordController.text.trim(),
-          );
+      await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: emailController.text.trim(),
+        password: passwordController.text.trim(),
+      );
 
       final authUser = await waitForAuthenticatedUser();
       String uid = authUser.uid;
@@ -63,21 +63,36 @@ class _RiderSignupState extends State<RiderSignup> {
         fallbackPhone: phoneController.text.trim(),
       );
 
-      await runWithDatabaseRetry<void>(
-        label: 'rider_signup.bootstrap_write',
-        action: () => persistRiderOwnedBootstrap(
+      try {
+        await runWithDatabaseRetry<void>(
+          label: 'rider_signup.bootstrap_write',
+          action: () => persistRiderOwnedBootstrap(
+            rootRef: dbRef,
+            riderId: uid,
+            userProfile: <String, dynamic>{
+              ...baseUser,
+              ...bundle.userProfile,
+              "created_at": ServerValue.timestamp,
+            },
+            verification: bundle.verification,
+            deviceFingerprints: bundle.deviceFingerprints,
+            source: 'rider_signup.bootstrap_write',
+          ),
+        );
+      } catch (error, stackTrace) {
+        debugPrint('[RiderSignup] full bootstrap write failed: $error');
+        debugPrintStack(
+          label: '[RiderSignup] bootstrap',
+          stackTrace: stackTrace,
+        );
+        await persistRiderMinimalPresence(
           rootRef: dbRef,
-          riderId: uid,
-          userProfile: <String, dynamic>{
-            ...baseUser,
-            ...bundle.userProfile,
-            "created_at": ServerValue.timestamp,
-          },
-          verification: bundle.verification,
-          deviceFingerprints: bundle.deviceFingerprints,
-          source: 'rider_signup.bootstrap_write',
-        ),
-      );
+          uid: uid,
+          email: baseUser['email']?.toString() ?? '',
+          name: baseUser['name']?.toString(),
+          source: 'rider_signup.minimal_presence',
+        );
+      }
 
       if (!mounted) {
         return;
@@ -94,19 +109,10 @@ class _RiderSignupState extends State<RiderSignup> {
       } else {
         showMessage(e.message ?? "Signup failed");
       }
-    } catch (e) {
-      debugPrint('$e');
-      if (e is StartupRtdbException) {
-        showMessage(
-          startupDebugMessage(
-            "We could not finish setting up your rider account ❌",
-            path: e.path,
-            error: e.cause,
-          ),
-        );
-      } else {
-        showMessage("Error occurred ❌");
-      }
+    } catch (e, stackTrace) {
+      debugPrint('[RiderSignup] unexpected $e');
+      debugPrintStack(label: '[RiderSignup]', stackTrace: stackTrace);
+      showMessage(kNexRideFriendlyFailureMessage);
     }
 
     if (mounted) {

@@ -7,8 +7,8 @@ class RiderFeatureFlags {
   static bool get showTrustWarnings => false;
   static bool get enableOnlinePaymentMethods => true;
 
-  /// Phase 1 production: car rides only (no dispatch / mart / food entry).
-  static const bool phase1CarRidesOnly = true;
+  /// Enable both ride + dispatch delivery in production.
+  static const bool phase1CarRidesOnly = false;
 
   /// Cash is not supported; trips use Flutterwave (card/online) only.
   static const bool disableCashTripPayments = true;

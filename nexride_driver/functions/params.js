@@ -14,7 +14,7 @@ const flutterwaveSecretKey = defineSecret("FLUTTERWAVE_SECRET_KEY");
 const flutterwaveWebhookSecret = defineSecret("FLUTTERWAVE_WEBHOOK_SECRET");
 
 const nexridePlatformFeeNgn = defineString("NEXRIDE_PLATFORM_FEE_NGN", {
-  default: "350",
+  default: "30",
   description: "Flat platform fee in NGN for trip settlement",
 });
 
@@ -26,7 +26,7 @@ function flutterwaveSecretForVerify() {
 
 function platformFeeNgn() {
   const n = Number(nexridePlatformFeeNgn.value());
-  return Number.isFinite(n) && n > 0 ? n : 350;
+  return Number.isFinite(n) && n > 0 ? n : 30;
 }
 
 module.exports = {
