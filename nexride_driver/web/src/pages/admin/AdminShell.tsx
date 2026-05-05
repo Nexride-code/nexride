@@ -387,8 +387,9 @@ function TicketsPage() {
         Use the <Link to="/support/tickets">support desk</Link> for ticket threads, or call{" "}
         <code>supportListTickets</code> from a support-signed-in session.
       </p>
-      <p style={{ color: "#a60" }}>
-        TODO: embed ticket list here for admins (reuse support callables) to avoid context-switching.
+      <p style={{ color: "#555" }}>
+        In-app ticket listing for admins is planned; until then, use the support desk link above or callables from an
+        authenticated support session.
       </p>
     </div>
   );
@@ -464,7 +465,10 @@ function SettingsPage() {
   return (
     <div>
       <h2>Settings</h2>
-      <p style={{ color: "#555" }}>TODO: platform fee env, Flutterwave mode, feature flags (server-driven).</p>
+      <p style={{ color: "#555" }}>
+        Platform fee, Flutterwave mode, and feature flags are controlled in Firebase (Remote Config / RTDB app config),
+        not in this web shell. Confirm values in the Firebase console before changing live pricing.
+      </p>
     </div>
   );
 }

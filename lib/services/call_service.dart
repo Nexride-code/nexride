@@ -1231,12 +1231,11 @@ String _resolveTokenEndpoint(String? override) {
     return explicit;
   }
 
+  // Production uses HTTPS callable [getRideCallRtcToken] only (see [fetchAgoraToken]).
+  // Optional HTTP token URL is legacy / emergency override — set explicitly at build time
+  // if required; never default to a public Cloud Function URL.
   const endpoint = String.fromEnvironment('AGORA_TOKEN_ENDPOINT');
-  if (endpoint.trim().isNotEmpty) {
-    return endpoint.trim();
-  }
-
-  return 'https://us-central1-nexride-8d5bc.cloudfunctions.net/generateAgoraToken';
+  return endpoint.trim();
 }
 
 String _resolveChannelPrefix() {

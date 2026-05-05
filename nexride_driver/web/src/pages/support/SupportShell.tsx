@@ -259,7 +259,10 @@ function RefundsPage() {
     <div>
       <h2>Refunds / payment status</h2>
       <p style={{ color: "#555" }}>Search a ride, then cross-check payment rows in admin Payments or Flutterwave dashboard.</p>
-      <p style={{ color: "#a60" }}>TODO: dedicated refund workflow callable (policy-gated).</p>
+      <p style={{ color: "#555" }}>
+        Automated refunds are not exposed in this console; process adjustments in admin Payments or the Flutterwave
+        dashboard following your finance policy.
+      </p>
     </div>
   );
 }
@@ -269,7 +272,10 @@ function EscalationsPage() {
     <div>
       <h2>Escalations</h2>
       <p style={{ color: "#555" }}>Escalate to ops by updating ticket status and message.</p>
-      <p style={{ color: "#a60" }}>TODO: SLA timers and assignment fields.</p>
+      <p style={{ color: "#555" }}>
+        SLA timers and ticket assignment fields are not configured in this build; track response targets in your ops
+        playbook until those fields ship.
+      </p>
     </div>
   );
 }

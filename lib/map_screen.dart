@@ -356,6 +356,42 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// After [rider_active_trip], the server returns an existing [rideId] but a
+  /// one-shot [DatabaseReference.get] can stall waiting on the server socket
+  /// while the UI already showed "Resuming…". Prefer the realtime channel,
+  /// which often delivers the cached row immediately.
+  Future<Map<String, dynamic>> _awaitRideSnapshotForActiveTripResume(
+    String rideId,
+  ) async {
+    final normalized = rideId.trim();
+    if (normalized.isEmpty) {
+      throw StateError('ride_missing_after_create');
+    }
+    _logRideFlow(
+      '[RIDER_REQ] resume_snapshot_listener_first rideId=$normalized',
+    );
+    try {
+      return await _rideRequestsRef
+          .child(normalized)
+          .onValue
+          .expand((rtdb.DatabaseEvent event) {
+            if (!event.snapshot.exists || event.snapshot.value is! Map) {
+              return const Iterable<Map<String, dynamic>>.empty();
+            }
+            return <Map<String, dynamic>>[
+              Map<String, dynamic>.from(event.snapshot.value as Map),
+            ];
+          })
+          .first
+          .timeout(const Duration(seconds: 30));
+    } on TimeoutException catch (e) {
+      _logRideFlow(
+        '[RIDER_REQ] resume_snapshot_listener_timeout rideId=$normalized err=$e',
+      );
+      throw StateError('ride_resume_snapshot_timeout');
+    }
+  }
+
   void _showSnackBar(String message) {
     if (!mounted) {
       return;
@@ -1468,6 +1504,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     if (error is TimeoutException) {
       return 'We could not confirm your ride request in time. Please try again.';
+    }
+    if (error is StateError && error.message == 'ride_resume_snapshot_timeout') {
+      return 'We could not load your active trip. Check your connection, then try again '
+          'or open your trip from the home screen.';
     }
     final rawMessage = error
         .toString()
@@ -5639,6 +5679,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     });
 
     String? rideId;
+    var resumedExistingActiveTrip = false;
     try {
       _rideRequestUserAborted = false;
       _logRideFlow(
@@ -5947,6 +5988,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             'reason=$reason rideId=$recoveredRideId',
           );
           rideId = recoveredRideId;
+          resumedExistingActiveTrip = true;
           _showSnackBar('You already have an active ride. Resuming it now.');
         } else {
           throw StateError(reason);
@@ -5962,15 +6004,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         throw StateError('missing_ride_id_in_create_response');
       }
       _pendingRideRequestSubmissionId = rideId;
-      final verifySnapshot = await _rideRequestsRef.child(rideId).get().timeout(
-            const Duration(seconds: 18),
-          );
-      if (!verifySnapshot.exists) {
-        throw StateError('ride_missing_after_create');
-      }
-      final committedRideData = _asStringDynamicMap(verifySnapshot.value);
-      if (committedRideData == null) {
-        throw StateError('ride_invalid_after_create');
+      final Map<String, dynamic> committedRideData;
+      if (resumedExistingActiveTrip) {
+        committedRideData = await _awaitRideSnapshotForActiveTripResume(rideId);
+      } else {
+        final verifySnapshot = await _rideRequestsRef.child(rideId).get().timeout(
+              const Duration(seconds: 18),
+            );
+        if (!verifySnapshot.exists) {
+          throw StateError('ride_missing_after_create');
+        }
+        final parsed = _asStringDynamicMap(verifySnapshot.value);
+        if (parsed == null) {
+          throw StateError('ride_invalid_after_create');
+        }
+        committedRideData = parsed;
       }
       await _syncRideOperationalViews(
         rideId: rideId,
