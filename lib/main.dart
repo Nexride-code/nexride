@@ -1,25 +1,52 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'firebase_options.dart';
 import 'services/rider_push_notification_service.dart';
 import 'splash_screen.dart';
+import 'support/app_startup_state.dart';
 
 void main() async {
+  debugPrint('APP_START');
   WidgetsFlutterBinding.ensureInitialized();
+  debugPrint('FIREBASE_INIT_START');
 
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  await RiderPushNotificationService.instance.initialize();
+  AppStartupState startupState = const AppStartupState(firebaseReady: false);
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    ).timeout(const Duration(seconds: 4));
+    final database = FirebaseDatabase.instance;
+    database.setPersistenceEnabled(true);
+    database.setPersistenceCacheSizeBytes(10000000);
+    startupState = const AppStartupState(firebaseReady: true);
+    debugPrint('FIREBASE_INIT_OK');
+  } catch (error) {
+    debugPrint('FIREBASE_INIT_FAIL error=$error');
+    startupState = const AppStartupState(
+      firebaseReady: false,
+      safeErrorMessage:
+          'Unable to connect to NexRide services right now. Please sign in again.',
+    );
+  }
 
-  final database = FirebaseDatabase.instance;
-  database.setPersistenceEnabled(true);
-  database.setPersistenceCacheSizeBytes(10000000);
+  runApp(NexRideApp(startupState: startupState));
 
-  runApp(const NexRideApp());
+  if (startupState.firebaseReady) {
+    unawaited(
+      RiderPushNotificationService.instance.initialize().catchError((Object e) {
+        debugPrint('PUSH_INIT_FAIL error=$e');
+      }),
+    );
+  }
 }
 
 class NexRideApp extends StatelessWidget {
-  const NexRideApp({super.key});
+  const NexRideApp({super.key, required this.startupState});
+
+  final AppStartupState startupState;
 
   static const Color _brandGold = Color(0xFFD4AF37);
   static const Color _brandGoldSoft = Color(0xFFE9D7A4);
@@ -95,7 +122,7 @@ class NexRideApp extends StatelessWidget {
       ),
 
       // START APP WITH SPLASH SCREEN
-      home: const SplashScreen(),
+      home: SplashScreen(startupState: startupState),
     );
   }
 }

@@ -10,11 +10,14 @@ import 'ride_type_screen.dart';
 import 'rider_login.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
+import 'support/app_startup_state.dart';
 import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
 
 class SplashScreen extends StatefulWidget {
-  const SplashScreen({super.key});
+  const SplashScreen({super.key, required this.startupState});
+
+  final AppStartupState startupState;
 
   @override
   State<SplashScreen> createState() => _SplashScreenState();
@@ -39,11 +42,9 @@ class _StartupStepResult<T> {
 }
 
 class _SplashScreenState extends State<SplashScreen> {
-  static const Duration _kStartupStepTimeout = Duration(seconds: 6);
-  static const Duration _kStartupFailSafeTimeout = Duration(seconds: 8);
+  static const Duration _kStartupStepTimeout = Duration(seconds: 2);
+  static const Duration _kStartupFailSafeTimeout = Duration(seconds: 5);
 
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-  final DatabaseReference _rootRef = FirebaseDatabase.instance.ref();
   final RiderTrustBootstrapService _bootstrapService =
       const RiderTrustBootstrapService();
   final RiderTrustRulesService _trustRulesService =
@@ -56,6 +57,23 @@ class _SplashScreenState extends State<SplashScreen> {
   bool _backgroundBootstrapQueued = false;
   int _startupRunId = 0;
   Timer? _startupFailSafeTimer;
+  User? _lastKnownUser;
+
+  FirebaseAuth? get _authOrNull {
+    try {
+      return FirebaseAuth.instance;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  DatabaseReference? get _rootRefOrNull {
+    try {
+      return FirebaseDatabase.instance.ref();
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   void initState() {
@@ -81,22 +99,43 @@ class _SplashScreenState extends State<SplashScreen> {
     _scheduleStartupFailSafe();
     _setStartupState(message: 'Starting NexRide…');
 
+    if (!widget.startupState.firebaseReady) {
+      _setStartupState(
+        message: widget.startupState.safeErrorMessage ??
+            'Unable to connect right now.',
+      );
+      _logStartup('ROUTE_DECISION target=login reason=firebase_unavailable');
+      _navigateTo(const RiderLogin());
+      _startupInProgress = false;
+      return;
+    }
+
+    final auth = _authOrNull;
+    if (auth == null) {
+      _setStartupState(message: 'Unable to start. Please sign in again.');
+      _logStartup('ROUTE_DECISION target=login reason=auth_unavailable');
+      _navigateTo(const RiderLogin());
+      _startupInProgress = false;
+      return;
+    }
+
     User? authenticatedUser;
-    var nextScreen = _fallbackScreenFor(_auth.currentUser);
+    var nextScreen = _fallbackScreenFor(auth.currentUser);
     var shouldStartBackgroundBootstrap = false;
     var existingUser = <String, dynamic>{};
     var startupRules = RiderTrustBootstrapService.defaultRules;
 
     try {
+      _logStartup('AUTH_CHECK_START');
       final authResult = await _runStartupStep<User?>(
         label: 'auth check',
-        fallbackValue: _auth.currentUser,
+        fallbackValue: auth.currentUser,
         action: () async {
-          final currentUser = _auth.currentUser;
+          final currentUser = auth.currentUser;
           if (currentUser != null) {
             return currentUser;
           }
-          return _auth.authStateChanges().first.timeout(
+          return auth.authStateChanges().first.timeout(
             _kStartupStepTimeout,
             onTimeout: () => null,
           );
@@ -104,9 +143,12 @@ class _SplashScreenState extends State<SplashScreen> {
       );
 
       authenticatedUser = authResult.value;
+      _lastKnownUser = authenticatedUser;
+      _logStartup('AUTH_CHECK_OK hasUser=${authenticatedUser != null}');
       nextScreen = _fallbackScreenFor(authenticatedUser);
 
       if (authenticatedUser == null) {
+        _logStartup('ROUTE_DECISION target=login reason=no_authenticated_user');
         _logStartup('bootstrap complete authenticated=false');
         return;
       }
@@ -115,48 +157,38 @@ class _SplashScreenState extends State<SplashScreen> {
 
       _setStartupState(message: 'Signing you in…');
 
+      _logStartup('PROFILE_LOAD_START riderId=${signedInUser.uid}');
       final profileResult = await _runStartupStep<Map<String, dynamic>>(
         label: 'profile fetch',
         fallbackValue: <String, dynamic>{},
         action: () => _fetchExistingUserProfile(signedInUser),
       );
       existingUser = profileResult.value;
+      _logStartup('PROFILE_LOAD_OK riderId=${signedInUser.uid}');
 
       if (!profileResult.succeeded) {
-        shouldStartBackgroundBootstrap = true;
+        nextScreen = const RiderLogin();
+        _setStartupState(
+          message: 'Unable to load your profile right now. Please sign in again.',
+        );
+        _logStartup('ROUTE_DECISION target=login reason=profile_load_failed');
         _logStartup(
           'profile fetch fallback enabled riderId=${signedInUser.uid}',
         );
-        _logStartup('bootstrap complete authenticated=true background=true');
         return;
       }
 
-      final configResult = await _runStartupStep<Map<String, dynamic>>(
-        label: 'config load',
-        fallbackValue: RiderTrustBootstrapService.defaultRules,
-        action: _loadStartupConfig,
-      );
-      startupRules = configResult.value;
-
-      final bootstrapResult = await _runStartupStep<bool>(
-        label: 'session bootstrap',
-        fallbackValue: false,
-        action: () async {
-          await _bootstrapSignedInRider(
-            signedInUser,
-            existingUser: existingUser,
-            preloadedRules: startupRules,
-          );
-          return true;
-        },
-      );
-      shouldStartBackgroundBootstrap = !bootstrapResult.succeeded;
-      _logStartup(
-        'bootstrap complete authenticated=true success=${bootstrapResult.succeeded}',
-      );
+      _logStartup('ROUTE_DECISION target=home reason=authenticated_profile_ok');
+      shouldStartBackgroundBootstrap = true;
+      _logStartup('bootstrap deferred to background riderId=${signedInUser.uid}');
     } catch (error) {
       _logStartup('startup route failed error=$error');
-      shouldStartBackgroundBootstrap = authenticatedUser != null;
+      nextScreen = const RiderLogin();
+      _setStartupState(
+        message: 'Unable to start NexRide right now. Please sign in again.',
+      );
+      _logStartup('ROUTE_DECISION target=login reason=startup_exception');
+      shouldStartBackgroundBootstrap = false;
     } finally {
       _startupInProgress = false;
 
@@ -180,6 +212,10 @@ class _SplashScreenState extends State<SplashScreen> {
     required Map<String, dynamic> existingUser,
     required Map<String, dynamic> preloadedRules,
   }) async {
+    final rootRef = _rootRefOrNull;
+    if (rootRef == null) {
+      throw StateError('firebase_db_unavailable');
+    }
     final bundle = await _bootstrapService
         .ensureRiderTrustState(
           riderId: user.uid,
@@ -195,14 +231,14 @@ class _SplashScreenState extends State<SplashScreen> {
         .timeout(_kStartupStepTimeout);
 
     final bootstrapReady = await hasRiderBootstrapArtifacts(
-      rootRef: _rootRef,
+      rootRef: rootRef,
       riderId: user.uid,
       source: 'splash_screen.bootstrap_check',
     );
     if (!bootstrapReady) {
       try {
         await persistRiderOwnedBootstrap(
-          rootRef: _rootRef,
+          rootRef: rootRef,
           riderId: user.uid,
           userProfile: <String, dynamic>{
             ...existingUser,
@@ -220,7 +256,7 @@ class _SplashScreenState extends State<SplashScreen> {
           stackTrace: st,
         );
         await persistMinimalRiderProfileBestEffort(
-          rootRef: _rootRef,
+          rootRef: rootRef,
           riderId: user.uid,
           email: user.email ?? '',
           displayNameFallback:
@@ -234,8 +270,12 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<Map<String, dynamic>> _fetchExistingUserProfile(User user) async {
+    final rootRef = _rootRefOrNull;
+    if (rootRef == null) {
+      return <String, dynamic>{};
+    }
     return readUserProfileWithFallback(
-      rootRef: _rootRef,
+      rootRef: rootRef,
       uid: user.uid,
       source: 'splash_screen.user_profile',
     ).timeout(_kStartupStepTimeout, onTimeout: () => <String, dynamic>{});
@@ -354,8 +394,13 @@ class _SplashScreenState extends State<SplashScreen> {
         return;
       }
 
-      _logStartup('failsafe timeout fired');
-      _navigateTo(_fallbackScreenFor(_auth.currentUser));
+      _logStartup('SPLASH_TIMEOUT');
+      final auth = _authOrNull;
+      final fallbackUser = auth?.currentUser ?? _lastKnownUser;
+      _logStartup(
+        'ROUTE_DECISION target=${fallbackUser == null ? 'login' : 'home'} reason=splash_timeout',
+      );
+      _navigateTo(_fallbackScreenFor(fallbackUser));
     });
   }
 
