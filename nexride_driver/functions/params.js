@@ -17,6 +17,10 @@ const nexridePlatformFeeNgn = defineString("NEXRIDE_PLATFORM_FEE_NGN", {
   default: "30",
   description: "Flat platform fee in NGN for trip settlement",
 });
+const flutterwavePublicKey = defineString("FLUTTERWAVE_PUBLIC_KEY", {
+  default: "",
+  description: "Flutterwave public key returned to rider app for checkout metadata",
+});
 
 const REGION = "us-central1";
 
@@ -33,6 +37,7 @@ module.exports = {
   flutterwaveSecretKey,
   flutterwaveWebhookSecret,
   nexridePlatformFeeNgn,
+  flutterwavePublicKey,
   REGION,
   flutterwaveSecretForVerify,
   platformFeeNgn,

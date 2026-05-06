@@ -76,6 +76,16 @@ class _RiderRideStatusDecision {
   final String? reason;
 }
 
+class _FlutterwaveCheckoutResult {
+  const _FlutterwaveCheckoutResult({
+    required this.paid,
+    required this.checkoutOpened,
+  });
+
+  final bool paid;
+  final bool checkoutOpened;
+}
+
 enum _ActiveTripPrecheckOutcome {
   noPointer,
   staleCleared,
@@ -1105,17 +1115,39 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return ps == 'verified' && ptid.isNotEmpty;
   }
 
+  String _paymentInitBackendMessage(Map<String, dynamic> init) {
+    final reason = riderRideCallableReason(init);
+    final provider = _asStringDynamicMap(init['provider']);
+    final backendMessage = _firstNonEmptyText(<dynamic>[
+      init['message'],
+      init['error'],
+      provider?['message'],
+      provider?['error'],
+      provider?['status'],
+      reason,
+    ]);
+    return backendMessage.isEmpty ? reason : backendMessage;
+  }
+
   /// Opens Flutterwave hosted checkout; polls RTDB and calls verify until paid or timeout.
-  Future<bool> _runFlutterwaveHostedCheckoutFlow({
+  Future<_FlutterwaveCheckoutResult> _runFlutterwaveHostedCheckoutFlow({
     required String rideId,
     required Map<String, dynamic> rideSnapshot,
   }) async {
     final fare = _asDouble(rideSnapshot['fare']) ?? 0;
     if (!fare.isFinite || fare <= 0) {
       _showSnackBar('Invalid fare for payment.');
-      return false;
+      return const _FlutterwaveCheckoutResult(
+        paid: false,
+        checkoutOpened: false,
+      );
     }
     final user = FirebaseAuth.instance.currentUser;
+    if (kDebugMode) {
+      debugPrint(
+        'PAYMENT_INIT_START rideId=$rideId uid=${user?.uid ?? ''} amount=$fare currency=NGN',
+      );
+    }
     final init = await _rideCloud.initiateFlutterwavePayment(
       rideId: rideId,
       amount: fare,
@@ -1123,9 +1155,46 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       customerName: user?.displayName,
       email: user?.email,
     );
+    if (kDebugMode) {
+      debugPrint('PAYMENT_INIT_RESPONSE rideId=$rideId response=$init');
+    }
     if (init['success'] != true) {
-      _showSnackBar('Could not start payment: ${riderRideCallableReason(init)}');
-      return false;
+      final backendError = _paymentInitBackendMessage(init);
+      if (kDebugMode) {
+        debugPrint(
+          'PAYMENT_INIT_FAIL rideId=$rideId reason=$backendError response=$init',
+        );
+      }
+      _showSnackBar('Could not start payment: $backendError');
+      return const _FlutterwaveCheckoutResult(
+        paid: false,
+        checkoutOpened: false,
+      );
+    }
+    final initStatus = _valueAsText(init['status']).toLowerCase();
+    final initPublicKey = _valueAsText(init['public_key']);
+    final initAmount = _asDouble(init['amount']) ?? 0;
+    final initCurrency = _valueAsText(init['currency']).toUpperCase();
+    final initCustomer = _asStringDynamicMap(init['customer']);
+    if (initStatus != 'success' ||
+        initAmount <= 0 ||
+        initCurrency.isEmpty ||
+        initCustomer == null ||
+        initPublicKey.isEmpty) {
+      final backendError = _paymentInitBackendMessage(init);
+      if (kDebugMode) {
+        debugPrint(
+          'PAYMENT_INIT_FAIL rideId=$rideId '
+          'reason=invalid_init_payload status=$initStatus amount=$initAmount '
+          'currency=$initCurrency hasCustomer=${initCustomer != null} '
+          'hasPublicKey=${initPublicKey.isNotEmpty} response=$init',
+        );
+      }
+      _showSnackBar('Could not start payment: $backendError');
+      return const _FlutterwaveCheckoutResult(
+        paid: false,
+        checkoutOpened: false,
+      );
     }
     final url = _firstNonEmptyText(<dynamic>[
       init['authorization_url'],
@@ -1134,30 +1203,45 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final txRef = _firstNonEmptyText(<dynamic>[init['tx_ref'], init['txRef']]);
     if (url.isEmpty || txRef.isEmpty) {
       _showSnackBar('Payment link missing. Try again.');
-      return false;
+      return const _FlutterwaveCheckoutResult(
+        paid: false,
+        checkoutOpened: false,
+      );
     }
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) {
       _showSnackBar('Invalid payment link.');
-      return false;
+      return const _FlutterwaveCheckoutResult(
+        paid: false,
+        checkoutOpened: false,
+      );
     }
     final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!launched) {
       _showSnackBar('Could not open payment page.');
-      return false;
+      return const _FlutterwaveCheckoutResult(
+        paid: false,
+        checkoutOpened: false,
+      );
     }
     _showSnackBar(
       'Complete payment in your browser, then return here. We will match a driver once payment is verified.',
     );
     for (var i = 0; i < 90; i++) {
       if (_rideRequestUserAborted) {
-        return false;
+        return const _FlutterwaveCheckoutResult(
+          paid: false,
+          checkoutOpened: true,
+        );
       }
       await Future<void>.delayed(const Duration(seconds: 2));
       final snap = await _rideRequestsRef.child(rideId).get();
       final row = _asStringDynamicMap(snap.value);
       if (row != null && _ridePaymentVerified(row)) {
-        return true;
+        return const _FlutterwaveCheckoutResult(
+          paid: true,
+          checkoutOpened: true,
+        );
       }
       if (i % 3 == 2) {
         try {
@@ -1170,7 +1254,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         }
       }
     }
-    return false;
+    return const _FlutterwaveCheckoutResult(
+      paid: false,
+      checkoutOpened: true,
+    );
   }
 
   Future<bool> _pollRidePaymentVerified(
@@ -6467,19 +6554,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             }),
           );
         } else {
-          final paidOk = await _runFlutterwaveHostedCheckoutFlow(
+          final checkoutResult = await _runFlutterwaveHostedCheckoutFlow(
             rideId: rideId,
             rideSnapshot: committedRideData,
           );
-          if (!paidOk) {
+          if (!checkoutResult.paid) {
             _logRideFlow('RIDER_PAYMENT_ABORT rideId=$rideId');
-            try {
-              await _rideCloud.cancelRideRequest(
-                rideId: rideId,
-                cancelReason: 'payment_failed',
+            if (checkoutResult.checkoutOpened) {
+              try {
+                await _rideCloud.cancelRideRequest(
+                  rideId: rideId,
+                  cancelReason: 'payment_failed',
+                );
+              } catch (e) {
+                _logRideFlow('cancel after payment fail error=$e');
+              }
+            } else {
+              _logRideFlow(
+                'skip auto-cancel before checkout open rideId=$rideId',
               );
-            } catch (e) {
-              _logRideFlow('cancel after payment fail error=$e');
             }
             _clearRideSearchTimeout(reason: 'payment_failed');
             _pendingRideRequestSubmissionId = null;

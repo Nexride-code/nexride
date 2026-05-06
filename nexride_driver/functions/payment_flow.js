@@ -9,6 +9,7 @@ const {
   verifyFlutterwavePaymentStrict,
   createHostedPaymentLink,
 } = require("./flutterwave_api");
+const { flutterwavePublicKey } = require("./params");
 const { fanOutDriverOffersIfEligible } = require("./ride_callables");
 const { fanOutDeliveryOffersIfEligible } = require("./delivery_callables");
 const { syncRideTrackPublic } = require("./track_public");
@@ -140,10 +141,21 @@ async function initiateFlutterwavePayment(data, context, db) {
       return { success: false, reason: "forbidden" };
     }
   }
+  console.log(
+    "PAYMENT_INIT_START",
+    `rider=${riderId}`,
+    `rideId=${rideId || ""}`,
+    `deliveryId=${deliveryId || ""}`,
+    `amount=${amount}`,
+    `currency=${currency}`,
+  );
   const txRefKey = db.ref("payment_transactions").push().key;
-  const tx_ref = deliveryId
-    ? `nexride_del_${deliveryId}_${txRefKey}`
-    : `nexride_${rideId}_${txRefKey}`;
+  const baseTxRef = `nexride_${nowMs()}`;
+  const tx_ref = txRefKey ? `${baseTxRef}_${txRefKey}` : baseTxRef;
+  if (!tx_ref.trim()) {
+    console.log("PAYMENT_INIT_FAIL", "tx_ref_generation_failed");
+    return { success: false, reason: "tx_ref_generation_failed" };
+  }
   const redirectUrl = String(
     data?.redirect_url ?? data?.redirectUrl ?? "https://nexride.app/pay/return",
   ).trim();
@@ -164,6 +176,12 @@ async function initiateFlutterwavePayment(data, context, db) {
   };
   const r = await createHostedPaymentLink(body);
   if (!r.ok) {
+    console.log(
+      "PAYMENT_INIT_FAIL",
+      `reason=${r.reason || "initiate_failed"}`,
+      `tx_ref=${tx_ref}`,
+      `provider=${JSON.stringify(r.payload || {})}`,
+    );
     return {
       success: false,
       reason: r.reason || "payment_init_failed",
@@ -200,12 +218,19 @@ async function initiateFlutterwavePayment(data, context, db) {
       updated_at: now,
     });
   }
-  return {
+  const response = {
     success: true,
+    status: "success",
     tx_ref,
+    amount,
+    currency,
+    customer: body.customer,
+    public_key: String(flutterwavePublicKey.value() || "").trim(),
     authorization_url: r.link,
     reason: "initiated",
   };
+  console.log("PAYMENT_INIT_RESPONSE", JSON.stringify(response));
+  return response;
 }
 
 /**

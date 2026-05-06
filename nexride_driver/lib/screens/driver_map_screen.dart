@@ -338,6 +338,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   /// Serializes discovery attach/cancel so two callers cannot overlap native query setup.
   Future<void> _rideDiscoveryAttachChain = Future<void>.value();
   StreamSubscription<rtdb.DatabaseEvent>? _driverActiveRideSubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _serverTimeOffsetSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _activeRideSubscription;
   final List<StreamSubscription<rtdb.DatabaseEvent>> _driverChatSubscriptions =
       <StreamSubscription<rtdb.DatabaseEvent>>[];
@@ -440,6 +441,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   bool _rideDiscoveryListenerHealthy = false;
   bool _showDriverDebugOverlay = true;
   bool _discoveryPermissionDeniedNoticeVisible = false;
+  int _serverTimeOffsetMs = 0;
   String? _activePopupRideId;
   String? _acceptingPopupRideId;
   String? _popupDismissedRideId;
@@ -652,6 +654,13 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _driverLocation = _selectedLaunchCityCenter;
+    _serverTimeOffsetSubscription = rtdb.FirebaseDatabase.instance
+        .ref('.info/serverTimeOffset')
+        .onValue
+        .listen((event) {
+      final raw = event.snapshot.value;
+      _serverTimeOffsetMs = raw is num ? raw.toInt() : 0;
+    });
     _startRideDiscoveryFallbackPolling();
     print('DRIVER_MAP_INIT');
     _log(
@@ -2255,6 +2264,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _isDisposing = true;
     WidgetsBinding.instance.removeObserver(this);
     _positionStream?.cancel();
+    _serverTimeOffsetSubscription?.cancel();
     _rideRequestListenerToken += 1;
     _rideRequestSubscription?.cancel();
     _driverOfferQueueChildRemovedSubscription?.cancel();
@@ -5796,6 +5806,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   int _rideExpiryTimestamp(Map<String, dynamic> rideData) =>
       _rideExpiryInfo(rideData).value;
 
+  int _serverNowMs() => DateTime.now().millisecondsSinceEpoch + _serverTimeOffsetMs;
+
   /// Server [expires_at] plus grace so a just-written queue offer is not dropped.
   bool _rideExpiredWithOfferGrace(Map<String, dynamic> rideData) {
     const graceMs = 10000;
@@ -5803,7 +5815,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (expiresAt <= 0) {
       return false;
     }
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final now = _serverNowMs();
     return now > expiresAt + graceMs;
   }
 
@@ -5827,7 +5839,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
   bool _assignmentHasExpired(Map<String, dynamic>? rideData) {
     final expiresAt = _assignmentExpiryTimestamp(rideData);
-    return expiresAt > 0 && DateTime.now().millisecondsSinceEpoch >= expiresAt;
+    return expiresAt > 0 && _serverNowMs() >= expiresAt;
   }
 
   String _cancelledSettlementStatus(Map<String, dynamic> rideData) {
@@ -9680,6 +9692,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     );
     if (isRealtimeDatabasePermissionDenied(error)) {
       print('RIDE_DISCOVERY_PERMISSION_DENIED');
+      _logRideReq(
+        'DRIVER_DISCOVERY_PERMISSION_DENIED path=driver_offer_queue/$discoveryUid '
+        'authUid=$streamUid market=$driverCity error=$error',
+      );
       debugPrint(
         'DRIVER_OFFER_LISTENER_PERMISSION_DENIED path=driver_offer_queue/$discoveryUid uid=$discoveryUid',
       );
@@ -10047,6 +10063,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     driverCity = DriverServiceAreaConfig.marketForCity(driverCity).city;
+    if (driverCity != 'lagos') {
+      _logRideReq(
+        '[DRIVER_DISCOVERY_TRACE] overriding market to lagos from=$driverCity for production consistency',
+      );
+      driverCity = 'lagos';
+    }
     final presenceOk = await _ensureDiscoveryPresenceMatchesServer(
       driverRef: driverRef,
       driverCity: driverCity,
@@ -10176,6 +10198,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
             'created_at=${_parseCreatedAt(rideData[RtdbRideRequestFields.createdAt])} '
             'expires_at=${_rideExpiryTimestamp(rideData)}',
           );
+          _logRideReq(
+            'DRIVER_MATCH_CANDIDATE rideId=$rideId '
+            'market=${_rideMarketFromData(rideData) ?? 'missing'}',
+          );
         }
         final skipReason = rideData == null
             ? 'payload_not_map'
@@ -10211,7 +10237,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
               : _valueAsText(rideData['request_expires_at']);
           final rawExpires =
               rideData == null ? '' : _valueAsText(rideData['expires_at']);
-          final nowMs = DateTime.now().millisecondsSinceEpoch;
+          final nowMs = _serverNowMs();
           final expiryInfo = rideData == null
               ? (value: 0, field: 'none')
               : _rideExpiryInfo(rideData);
@@ -10679,7 +10705,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _rideRequestsListenerBoundCity = driverCity;
 
     try {
-      final discoveryUid = _effectiveDriverId.trim();
+      final discoveryUid = uid.trim();
       if (discoveryUid.isEmpty) {
         _rideRequestsListenerBoundCity = null;
         _driverOfferQueueBoundUid = null;
@@ -10744,10 +10770,22 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         final probe = await driverOfferQueueRef.limitToFirst(8).get();
         final probeMap = _asStringDynamicMap(probe.value);
         _logRideReq(
+          'DRIVER_DISCOVERY_PERMISSION_OK path=driver_offer_queue/$discoveryUid '
+          'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
+          'market=$driverCity children=${probeMap?.length ?? 0}',
+        );
+        _logRideReq(
           '[DRIVER_DISCOVERY_TRACE] driver_offer_queue probe exists=${probe.exists} sample_count=${probeMap?.length ?? 0}',
         );
       } catch (probeError) {
         final denied = isRealtimeDatabasePermissionDenied(probeError);
+        if (denied) {
+          _logRideReq(
+            'DRIVER_DISCOVERY_PERMISSION_DENIED path=driver_offer_queue/$discoveryUid '
+            'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
+            'market=$driverCity error=$probeError',
+          );
+        }
         _logRideReq(
           '[DRIVER_DISCOVERY_TRACE] driver_offer_queue probe_fail permissionDenied=$denied error=$probeError',
         );
@@ -10898,6 +10936,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _logRideReq(
         '[MATCH_DEBUG][DRIVER_LISTENER_ATTACH_OK] market=$driverCity token=$listenerToken',
       );
+      _logRideReq(
+        'DRIVER_DISCOVERY_STREAM_CONNECTED path=driver_offer_queue/$discoveryUid '
+        'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} market=$driverCity',
+      );
       _logRtdb(
         'offer_queue onChildAdded+onChildRemoved active city=$driverCity',
       );
@@ -10921,6 +10963,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     } catch (error) {
       if (isRealtimeDatabasePermissionDenied(error)) {
         print('RIDE_DISCOVERY_PERMISSION_DENIED');
+        _logRideReq(
+          'DRIVER_DISCOVERY_PERMISSION_DENIED path=driver_offer_queue/${_driverOfferQueueBoundUid ?? 'none'} '
+          'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
+          'market=$driverCity error=$error',
+        );
         debugPrint(
           'RTDB_PERMISSION_ERROR_FULL '
           'error=$error path=driver_offer_queue/${_driverOfferQueueBoundUid ?? 'none'}',

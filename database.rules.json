@@ -27,6 +27,24 @@
         ".write": "auth != null && auth.uid === $uid"
       }
     },
+    "driver_presence": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "dispatch": {
+      "$market": {
+        ".read": "auth != null",
+        ".write": false
+      }
+    },
+    "ride_dispatch": {
+      "$rideId": {
+        ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || root.child('drivers/' + auth.uid).exists())",
+        ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || root.child('drivers/' + auth.uid).exists())"
+      }
+    },
     "driver_offer_queue": {
       "$driverId": {
         ".read": "auth != null && auth.uid === $driverId",

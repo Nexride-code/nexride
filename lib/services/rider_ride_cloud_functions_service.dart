@@ -33,7 +33,7 @@ class RiderRideCloudFunctionsService {
     if (kDebugMode) {
       debugPrint(
         '[RIDER_CALLABLE] start name=$name region=us-central1 '
-        'project=${_functions.app.options.projectId ?? ''} payload=$payload',
+        'project=${_functions.app.options.projectId} payload=$payload',
       );
     }
     dynamic result;
