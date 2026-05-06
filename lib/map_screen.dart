@@ -75,6 +75,13 @@ class _RiderRideStatusDecision {
   final String? reason;
 }
 
+enum _ActiveTripPrecheckOutcome {
+  noPointer,
+  staleCleared,
+  resumed,
+  permissionDenied,
+}
+
 class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final rtdb.DatabaseReference _rideRequestsRef = rtdb.FirebaseDatabase.instance
       .ref('ride_requests');
@@ -168,7 +175,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool _safetyMonitoringActive = false;
   bool _safetyPopupVisible = false;
 
-  /// Backend-owned pointer `rider_active_ride/{uid}` → `{ ride_id, phase }`.
+  /// Backend-owned pointer `rider_active_trip/{uid}` → `{ ride_id, phase }`.
   StreamSubscription<rtdb.DatabaseEvent>? _riderActiveRidePointerSubscription;
 
   int _countdown = 300;
@@ -1625,8 +1632,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'ride_request_create denied raw=$error',
         );
       }
-      return 'We could not send your ride request. Please sign in again, then retry. '
-          'If this keeps happening, contact support.';
+      return 'We could not start your ride. Please try again.';
     }
     if (error is TimeoutException) {
       return 'We could not confirm your ride request in time. Please try again.';
@@ -2195,7 +2201,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (uid.isEmpty) {
       return;
     }
-    final ref = rtdb.FirebaseDatabase.instance.ref('rider_active_ride/$uid');
+    final ref = rtdb.FirebaseDatabase.instance.ref('rider_active_trip/$uid');
     _riderActiveRidePointerSubscription = ref.onValue.listen((event) {
       unawaited(_handleRiderActiveRidePointerEvent(event));
     });
@@ -2251,10 +2257,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
       Map<String, dynamic>? rides = _asStringDynamicMap(snapshot?.value);
       final ptrSnap = await runOptionalStartupRead<rtdb.DataSnapshot>(
-        source: 'map_screen.rider_active_ride_pointer',
-        path: 'rider_active_ride/$riderUid',
+        source: 'map_screen.rider_active_trip_pointer',
+        path: 'rider_active_trip/$riderUid',
         action: () => rtdb.FirebaseDatabase.instance
-            .ref('rider_active_ride/$riderUid')
+            .ref('rider_active_trip/$riderUid')
             .get(),
       );
       final ptrMap = _asStringDynamicMap(ptrSnap?.value);
@@ -2269,7 +2275,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           rides ??= <String, dynamic>{};
           rides[pointerRideId] = directData;
           _logRideFlow(
-            'active ride restore merged rider_active_ride pointer rideId=$pointerRideId',
+          'active ride restore merged rider_active_trip pointer rideId=$pointerRideId',
           );
         }
       }
@@ -5812,6 +5818,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'REQUEST RIDE validation passed city=$city routeReady=$_hasRoutePreviewReady fare=$_fare distanceKm=$_distanceKm durationMin=$_estimatedDurationMin',
       );
       _logRideFlow('request validation passed city=$city');
+
+      // Safety: if an active trip pointer exists, resume or clear stale pointer before creating a new ride.
+      final precheck = await _precheckRiderActiveTripPointerBeforeCreate();
+      if (precheck == _ActiveTripPrecheckOutcome.resumed) {
+        _logRideFlow('REQUEST RIDE precheck outcome=resumed_active_trip');
+        return;
+      }
+      if (precheck == _ActiveTripPrecheckOutcome.permissionDenied) {
+        _logRideFlow('REQUEST RIDE precheck outcome=permission_denied');
+        return;
+      }
+
       // Canonical slug must match driver `orderByChild('market_pool').equalTo(...)` byte-for-byte.
       final dispatchMarket =
           RiderServiceAreaConfig.marketForCity(city).city.trim().toLowerCase();
@@ -6099,37 +6117,70 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           createRes['ride_id'],
         ]);
         debugPrint('RIDER_CREATE_CALLABLE_FAIL reason=$reason');
-        if (reason == 'rider_active_trip' && recoveredRideId.isNotEmpty) {
-          final recoveredSnap = await _rideRequestsRef.child(recoveredRideId).get();
-          final recoveredData = _asStringDynamicMap(recoveredSnap.value);
-          final recoveredCanonical = TripStateMachine.canonicalStateFromSnapshot(
-            recoveredData,
-          );
-          final recoveredRiderId = _valueAsText(recoveredData?['rider_id']);
-          final recoveredStillOpen =
-              recoveredData != null &&
-              recoveredRiderId == user.uid &&
-              !TripStateMachine.isTerminal(recoveredCanonical);
-          if (recoveredStillOpen) {
-            _logRideFlow(
-              '[RIDER_REQ] create_recover_existing_ride '
-              'reason=$reason rideId=$recoveredRideId',
-            );
-            rideId = recoveredRideId;
-            resumedExistingActiveTrip = true;
-            _showSnackBar('You already have an active ride. Resuming it now.');
+        if (reason == 'rider_active_trip') {
+          // Never crash the rider app on missing/invalid pointers.
+          // If server returned a rideId, validate and resume it. Otherwise consult the RTDB pointer and resume/clear as needed.
+          final effectiveRideId = recoveredRideId.isNotEmpty
+              ? recoveredRideId
+              : await _resolveRideIdFromRiderActiveTripPointer();
+          if (effectiveRideId.isNotEmpty) {
+            final recoveredSnap =
+                await _rideRequestsRef.child(effectiveRideId).get();
+            final recoveredData = _asStringDynamicMap(recoveredSnap.value);
+            final recoveredCanonical =
+                TripStateMachine.canonicalStateFromSnapshot(recoveredData);
+            final recoveredRiderId = _valueAsText(recoveredData?['rider_id']);
+            final recoveredStillOpen = recoveredData != null &&
+                recoveredRiderId == user.uid &&
+                !TripStateMachine.isTerminal(recoveredCanonical);
+            if (recoveredStillOpen) {
+              _logRideFlow(
+                '[RIDER_REQ] create_recover_existing_ride '
+                'reason=$reason rideId=$effectiveRideId',
+              );
+              rideId = effectiveRideId;
+              resumedExistingActiveTrip = true;
+              _showSnackBar('You already have an active ride. Resuming it now.');
+            } else {
+              _logRideFlow(
+                '[RIDER_REQ] create_recover_existing_ride skipped '
+                'reason=stale_or_terminal recoveredRideId=$effectiveRideId canonical=$recoveredCanonical',
+              );
+              await _clearRiderActiveTripPointerBestEffort();
+              _showSnackBar('Refreshing trip session, please wait...');
+              createRes = await _rideCloud
+                  .createRideRequest(createPayload)
+                  .timeout(const Duration(seconds: 45));
+              if (!riderRideCallableSucceeded(createRes)) {
+                // Do not throw "Bad state: rider_active_trip" to production users.
+                final retryReason = riderRideCallableReason(createRes);
+                _logRideFlow(
+                  '[RIDER_REQ] create_retry_failed reason=$retryReason',
+                );
+                _showSnackBar(
+                  retryReason == 'permission_denied' ||
+                          isPermissionDeniedError(retryReason)
+                      ? 'We could not start your ride. Please try again.'
+                      : 'Unable to request a ride right now. Please try again.',
+                );
+                return;
+              }
+              rideId = _firstNonEmptyText(<dynamic>[
+                createRes['rideId'],
+                createRes['ride_id'],
+              ]);
+            }
           } else {
-            _logRideFlow(
-              '[RIDER_REQ] create_recover_existing_ride skipped '
-              'reason=stale_pointer recoveredRideId=$recoveredRideId canonical=$recoveredCanonical',
-            );
-            _showSnackBar('Refreshing trip session, please wait...');
+            // Pointer missing: treat as no active trip; retry once.
+            await _clearRiderActiveTripPointerBestEffort();
             createRes = await _rideCloud
                 .createRideRequest(createPayload)
                 .timeout(const Duration(seconds: 45));
-            reason = riderRideCallableReason(createRes);
             if (!riderRideCallableSucceeded(createRes)) {
-              throw StateError(reason);
+              final retryReason = riderRideCallableReason(createRes);
+              _logRideFlow('[RIDER_REQ] create_retry_failed reason=$retryReason');
+              _showSnackBar(_rideRequestErrorMessage(StateError(retryReason)));
+              return;
             }
             rideId = _firstNonEmptyText(<dynamic>[
               createRes['rideId'],
@@ -6429,6 +6480,108 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       } else {
         _isCreatingRide = false;
       }
+    }
+  }
+
+  static const String _riderActiveTripPointerPath = 'rider_active_trip';
+
+  Future<String> _resolveRideIdFromRiderActiveTripPointer() async {
+    final uid = _currentRiderUid?.trim() ?? '';
+    if (uid.isEmpty) {
+      return '';
+    }
+    try {
+      final snap = await rtdb.FirebaseDatabase.instance
+          .ref('$_riderActiveTripPointerPath/$uid')
+          .get();
+      final m = _asStringDynamicMap(snap.value);
+      return _firstNonEmptyText(<dynamic>[m?['ride_id'], m?['rideId']]);
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint(
+          '[RIDER_ACTIVE_TRIP_POINTER] resolve_failed uid=$uid error=$error',
+        );
+      }
+      return '';
+    }
+  }
+
+  Future<void> _clearRiderActiveTripPointerBestEffort() async {
+    final uid = _currentRiderUid?.trim() ?? '';
+    if (uid.isEmpty) {
+      return;
+    }
+    try {
+      await rtdb.FirebaseDatabase.instance
+          .ref('$_riderActiveTripPointerPath/$uid')
+          .remove();
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint(
+          '[RIDER_ACTIVE_TRIP_POINTER] clear_failed uid=$uid error=$error',
+        );
+      }
+    }
+  }
+
+  Future<_ActiveTripPrecheckOutcome> _precheckRiderActiveTripPointerBeforeCreate() async {
+    final uid = _currentRiderUid?.trim() ?? '';
+    if (uid.isEmpty) {
+      return _ActiveTripPrecheckOutcome.noPointer;
+    }
+    try {
+      final snap = await rtdb.FirebaseDatabase.instance
+          .ref('$_riderActiveTripPointerPath/$uid')
+          .get();
+      if (!snap.exists || snap.value == null) {
+        return _ActiveTripPrecheckOutcome.noPointer;
+      }
+      final ptr = _asStringDynamicMap(snap.value);
+      final rideId = _firstNonEmptyText(<dynamic>[ptr?['ride_id'], ptr?['rideId']]);
+      if (rideId.isEmpty) {
+        await _clearRiderActiveTripPointerBestEffort();
+        return _ActiveTripPrecheckOutcome.staleCleared;
+      }
+      final rideSnap = await _rideRequestsRef.child(rideId).get();
+      final rideData = _asStringDynamicMap(rideSnap.value);
+      if (rideData == null) {
+        await _clearRiderActiveTripPointerBestEffort();
+        return _ActiveTripPrecheckOutcome.staleCleared;
+      }
+      final riderId = _valueAsText(rideData['rider_id']);
+      final canonical = TripStateMachine.canonicalStateFromSnapshot(rideData);
+      final isActive = riderId == uid && !TripStateMachine.isTerminal(canonical);
+      if (!isActive) {
+        await _clearRiderActiveTripPointerBestEffort();
+        return _ActiveTripPrecheckOutcome.staleCleared;
+      }
+      _logRideFlow('[RIDER_ACTIVE_TRIP_PRECHECK] resume rideId=$rideId canonical=$canonical');
+      _showSnackBar('You already have an active ride. Resuming it now.');
+      listenToRide(rideId);
+      unawaited(
+        _activeTripSessionService.attachToRide(
+          rideId,
+          seedData: Map<String, dynamic>.from(rideData),
+          source: 'precheck:pointer',
+        ),
+      );
+      return _ActiveTripPrecheckOutcome.resumed;
+    } catch (error) {
+      if (isPermissionDeniedError(error)) {
+        // Production: show friendly message only.
+        _showSnackBar('We could not start your ride. Please try again.');
+        if (kDebugMode) {
+          debugPrint(
+            '[RIDER_ACTIVE_TRIP_PRECHECK] permission_denied uid=$uid error=$error',
+          );
+        }
+        return _ActiveTripPrecheckOutcome.permissionDenied;
+      }
+      if (kDebugMode) {
+        debugPrint('[RIDER_ACTIVE_TRIP_PRECHECK] failed uid=$uid error=$error');
+      }
+      // Fail open: allow creating a new request if precheck fails for non-permission reasons.
+      return _ActiveTripPrecheckOutcome.noPointer;
     }
   }
 

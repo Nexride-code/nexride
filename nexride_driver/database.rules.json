@@ -53,10 +53,10 @@
         ".write": false
       }
     },
-    "rider_active_ride": {
+    "rider_active_trip": {
       "$riderId": {
         ".read": "auth != null && auth.uid === $riderId",
-        ".write": false
+        ".write": "auth != null && auth.uid === $riderId"
       }
     },
     "user_active_delivery": {

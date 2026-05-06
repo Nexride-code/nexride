@@ -125,10 +125,10 @@
         ".write": "auth != null && auth.uid === $uid"
       }
     },
-    "rider_active_ride": {
+    "rider_active_trip": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": false
+        ".write": "auth != null && auth.uid === $uid"
       }
     },
     "user_active_delivery": {

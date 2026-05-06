@@ -751,21 +751,21 @@ async function supersedePriorOpenRideForRider(db, riderId) {
   if (!r) {
     return { ok: true };
   }
-  const ptrSnap = await db.ref(`rider_active_ride/${r}`).get();
+  const ptrSnap = await db.ref(`rider_active_trip/${r}`).get();
   if (!ptrSnap.exists()) {
     return { ok: true };
   }
   const ptr = ptrSnap.val() || {};
   const prevId = normUid(ptr.ride_id ?? ptr.rideId);
   if (!prevId) {
-    await db.ref(`rider_active_ride/${r}`).remove();
+    await db.ref(`rider_active_trip/${r}`).remove();
     return { ok: true };
   }
   const prevRef = db.ref(`ride_requests/${prevId}`);
   const prevSnap = await prevRef.get();
   const prev = prevSnap.val();
   if (!prev || typeof prev !== "object" || normUid(prev.rider_id) !== r) {
-    await db.ref(`rider_active_ride/${r}`).remove();
+    await db.ref(`rider_active_trip/${r}`).remove();
     return { ok: true };
   }
   const assignedRaw = prev.driver_id;
@@ -780,13 +780,13 @@ async function supersedePriorOpenRideForRider(db, riderId) {
     ts === "trip_completed" ||
     ts === "trip_cancelled"
   ) {
-    await db.ref(`rider_active_ride/${r}`).remove();
+    await db.ref(`rider_active_trip/${r}`).remove();
     return { ok: true };
   }
   if (!isOpenPoolRide(prev)) {
     // Stale pointer to a non-open ride (e.g. already cancelled/closed by server flow).
     // Clear it and allow creating a fresh request instead of surfacing rider_active_trip.
-    await db.ref(`rider_active_ride/${r}`).remove();
+    await db.ref(`rider_active_trip/${r}`).remove();
     return { ok: true };
   }
   let supersedeFail = "";
@@ -834,13 +834,13 @@ async function supersedePriorOpenRideForRider(db, riderId) {
       return { ok: true };
     }
     if (supersedeFail === "not_open") {
-      await db.ref(`rider_active_ride/${r}`).remove();
+      await db.ref(`rider_active_trip/${r}`).remove();
       return { ok: true };
     }
     return { ok: false, reason: "rider_active_trip", rideId: prevId };
   }
   await clearFanoutAndOffers(db, prevId);
-  await db.ref(`rider_active_ride/${r}`).remove();
+  await db.ref(`rider_active_trip/${r}`).remove();
   await writeAudit(db, {
     type: "ride_supersede",
     ride_id: prevId,
@@ -881,7 +881,7 @@ async function setActiveTripPointers(db, rideId, riderId, driverId, rideSummary)
       payment_method: rideSummary?.payment_method ?? null,
       pickup,
     },
-    [`rider_active_ride/${r}`]: {
+    [`rider_active_trip/${r}`]: {
       ride_id: rid,
       phase: "accepted",
       updated_at: now,
@@ -889,7 +889,7 @@ async function setActiveTripPointers(db, rideId, riderId, driverId, rideSummary)
     [`driver_active_ride/${d}`]: { ride_id: rid, updated_at: now },
   });
   console.log("ACTIVE_TRIP_CREATED", rid, "rider=", r, "driver=", d);
-  console.log("RIDER_ACTIVE_RIDE_UPDATED", r, "ride_id=", rid);
+  console.log("RIDER_ACTIVE_TRIP_UPDATED", r, "ride_id=", rid);
   console.log("DRIVER_ACTIVE_RIDE_UPDATED", d, "ride_id=", rid);
 }
 
@@ -899,7 +899,7 @@ async function clearActiveTripPointers(db, rideId, riderId, driverId) {
   const d = normUid(driverId);
   const u = {};
   if (rid) u[`active_trips/${rid}`] = null;
-  if (r) u[`rider_active_ride/${r}`] = null;
+  if (r) u[`rider_active_trip/${r}`] = null;
   if (d) u[`driver_active_ride/${d}`] = null;
   if (Object.keys(u).length) {
     await db.ref().update(u);
@@ -1146,7 +1146,7 @@ async function createRideRequest(data, context, db) {
   }
 
   await rideRef.set(payload);
-  await db.ref(`rider_active_ride/${riderId}`).set({
+  await db.ref(`rider_active_trip/${riderId}`).set({
     ride_id: rideId,
     phase: "searching",
     updated_at: ts,
@@ -1786,7 +1786,7 @@ async function completeTrip(data, context, db) {
   const riderId = normUid(ride?.rider_id);
   await clearActiveTripPointers(db, rideId, riderId, driverId);
   if (riderId) {
-    await db.ref(`rider_active_ride/${riderId}`).remove();
+    await db.ref(`rider_active_trip/${riderId}`).remove();
   }
   const hookRef = db.ref(`trip_settlement_hooks/${rideId}`);
   await hookRef.update({
@@ -1912,7 +1912,7 @@ async function cancelRideRequest(data, context, db) {
     await clearActiveTripPointers(db, rideId, rider, drv);
   }
   if (rider) {
-    await db.ref(`rider_active_ride/${rider}`).remove();
+    await db.ref(`rider_active_trip/${rider}`).remove();
   }
   await writeAudit(db, {
     type: "ride_cancel",
@@ -1966,7 +1966,7 @@ async function expireRideRequest(data, context, db) {
   }
   await clearFanoutAndOffers(db, rideId);
   if (uid) {
-    await db.ref(`rider_active_ride/${uid}`).remove();
+    await db.ref(`rider_active_trip/${uid}`).remove();
   }
   await writeAudit(db, { type: "ride_expire", ride_id: rideId, actor_uid: uid });
   await syncRideTrackPublic(db, rideId);
