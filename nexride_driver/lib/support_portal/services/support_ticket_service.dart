@@ -39,9 +39,9 @@ class SupportTicketService {
       if (!_isPermissionDenied(error)) {
         rethrow;
       }
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'supportListTickets',
-      );
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable('supportListTickets');
       final result = await callable.call(<String, dynamic>{});
       final data = _map(result.data);
       final rows = data['tickets'];

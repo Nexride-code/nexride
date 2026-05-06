@@ -206,9 +206,57 @@ exports.cancelRide = onCall(rideCallOpts, async (request) =>
 /** @deprecated Prefer cancelRide */
 exports.cancelRideRequest = exports.cancelRide;
 
+/** Alternate client-safe name (deployed parity with Flutter callables). */
+exports.requestRide = exports.createRideRequest;
+
 exports.expireRideRequest = onCall(rideCallOpts, async (request) =>
   ride.expireRideRequest(request.data, callableContext(request), db),
 );
+
+/**
+ * Clear rider-owned active-trip pointers only (does not mutate ride_requests).
+ * Used when stale local/RTDB state blocks a fresh request.
+ */
+exports.cleanupActiveRide = onCall(rideCallOpts, async (request) => {
+  const ctx = callableContext(request);
+  if (!ctx.auth?.uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const riderId = String(ctx.auth.uid || "").trim();
+  try {
+    const ptrSnap = await db.ref(`rider_active_trip/${riderId}`).get();
+    const val = ptrSnap.val();
+    let rideHint = "";
+    if (typeof val === "string") {
+      rideHint = String(val || "").trim();
+    } else if (val && typeof val === "object") {
+      rideHint = String(
+        val.ride_id || val.rideId || "",
+      ).trim();
+    }
+    const updates = {
+      [`rider_active_trip/${riderId}`]: null,
+      [`active_trips/${riderId}`]: null,
+    };
+    if (rideHint) {
+      updates[`active_trips/${rideHint}`] = null;
+    }
+    await db.ref().update(updates);
+    console.log(
+      "cleanupActiveRide",
+      riderId,
+      rideHint ? `hint=${rideHint}` : "no_ride_hint",
+    );
+    return {
+      success: true,
+      reason: "cleaned",
+      cleared_ride_id_hint: rideHint || null,
+    };
+  } catch (e) {
+    console.log("cleanupActiveRide_FAIL", riderId, e?.message ?? e);
+    return { success: false, reason: "cleanup_failed" };
+  }
+});
 
 exports.patchRideRequestMetadata = onCall(rideCallOpts, async (request) =>
   ride.patchRideRequestMetadata(request.data, callableContext(request), db),
@@ -358,6 +406,9 @@ exports.initiateFlutterwavePayment = onCall(
       db,
     ),
 );
+
+/** Alternate name for hosted-card initialization (Flutter client alias). */
+exports.initiatePayment = exports.initiateFlutterwavePayment;
 
 exports.verifyFlutterwavePayment = onCall(
   { region: REGION, secrets: [flutterwaveSecretKey] },

@@ -1190,21 +1190,35 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
     }
     final user = FirebaseAuth.instance.currentUser;
-    if (kDebugMode) {
+    debugPrint(
+      'PAYMENT_INIT_START rideId=$rideId uid=${user?.uid ?? ''} amount=$fare currency=NGN',
+    );
+    final Map<String, dynamic> init;
+    try {
+      init = await _rideCloud.initiateFlutterwavePayment(
+        rideId: rideId,
+        amount: fare,
+        currency: 'NGN',
+        customerName: user?.displayName,
+        email: user?.email,
+      );
+    } on FirebaseFunctionsException catch (error) {
+      final code = error.code.trim().toLowerCase();
       debugPrint(
-        'PAYMENT_INIT_START rideId=$rideId uid=${user?.uid ?? ''} amount=$fare currency=NGN',
+        'PAYMENT_INIT_FAIL rideId=$rideId code=${error.code} message=${error.message} details=${error.details}',
+      );
+      if (code == 'not-found') {
+        debugPrint('PAYMENT_INIT_NOT_FOUND rideId=$rideId');
+      }
+      _showSnackBar(
+        'We could not connect to NexRide services. Please try again.',
+      );
+      return const _FlutterwaveCheckoutResult(
+        paid: false,
+        checkoutOpened: false,
       );
     }
-    final init = await _rideCloud.initiateFlutterwavePayment(
-      rideId: rideId,
-      amount: fare,
-      currency: 'NGN',
-      customerName: user?.displayName,
-      email: user?.email,
-    );
-    if (kDebugMode) {
-      debugPrint('PAYMENT_INIT_RESPONSE rideId=$rideId response=$init');
-    }
+    debugPrint('PAYMENT_INIT_RESPONSE rideId=$rideId response=$init');
     if (init['success'] != true) {
       final backendError = _paymentInitBackendMessage(init);
       if (kDebugMode) {
@@ -1242,11 +1256,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         checkoutOpened: false,
       );
     }
-    if (kDebugMode) {
-      debugPrint(
-        'PAYMENT_INIT_OK rideId=$rideId tx_ref=${_firstNonEmptyText(<dynamic>[init['tx_ref'], init['txRef']])}',
-      );
-    }
+    debugPrint(
+      'PAYMENT_INIT_SUCCESS rideId=$rideId tx_ref=${_firstNonEmptyText(<dynamic>[init['tx_ref'], init['txRef']])}',
+    );
     final url = _firstNonEmptyText(<dynamic>[
       init['authorization_url'],
       init['authorizationUrl'],
@@ -1297,13 +1309,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       if (i % 3 == 2) {
         try {
           debugPrint('PAYMENT_VERIFY_START rideId=$rideId tx_ref=$txRef');
-          await _rideCloud.verifyFlutterwavePayment(
+          final verifyRes = await _rideCloud.verifyFlutterwavePayment(
             rideId: rideId,
             reference: txRef,
           );
-          debugPrint('PAYMENT_VERIFY_OK rideId=$rideId tx_ref=$txRef');
-        } catch (_) {
-          debugPrint('PAYMENT_VERIFY_FAIL rideId=$rideId tx_ref=$txRef');
+          if (verifyRes['success'] == true) {
+            debugPrint('PAYMENT_VERIFY_SUCCESS rideId=$rideId tx_ref=$txRef');
+          } else {
+            debugPrint(
+              'PAYMENT_VERIFY_FAILED rideId=$rideId tx_ref=$txRef reason=${riderRideCallableReason(verifyRes)}',
+            );
+          }
+        } catch (error) {
+          debugPrint(
+            'PAYMENT_VERIFY_FAILED rideId=$rideId tx_ref=$txRef error=$error',
+          );
           /* network — keep polling */
         }
       }
@@ -1765,15 +1785,26 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         error.details,
         rawCode,
       ]);
+      final combinedTech = '$rawCode ${error.message} ${error.details}'
+          .toLowerCase();
+      debugPrint(
+        '[RIDER_CALLABLE_TECH] code=${error.code} message=${error.message} details=${error.details}',
+      );
+      final looksMissingFunction = rawCode == 'not-found' ||
+          combinedTech.contains('not found') ||
+          combinedTech.contains('not_found');
+      if (looksMissingFunction) {
+        return 'We could not connect to NexRide services. Please try again.';
+      }
       if (rawCode == 'unavailable' ||
           rawCode == 'deadline-exceeded' ||
           rawCode == 'internal') {
-        return 'NexRide backend is temporarily unreachable. Please try again.';
+        return 'We could not connect to NexRide services. Please try again.';
       }
       if (backendMessage.isNotEmpty && backendMessage.length <= 180) {
         return backendMessage;
       }
-      return 'Ride request failed ($rawCode). Please try again.';
+      return 'We could not connect to NexRide services. Please try again.';
     }
     if (isPermissionDeniedError(error)) {
       if (kDebugMode) {
@@ -1796,8 +1827,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         .replaceFirst('Exception: ', '')
         .replaceFirst('FirebaseException: ', '')
         .trim();
-    if (rawMessage.isEmpty || rawMessage.length > 160) {
-      return 'Unable to connect to NexRide services right now.';
+    final lower = rawMessage.toLowerCase();
+    if (rawMessage.isEmpty ||
+        rawMessage.length > 160 ||
+        lower.contains('not-found') ||
+        lower.contains('not_found')) {
+      return 'We could not connect to NexRide services. Please try again.';
     }
     return rawMessage;
   }

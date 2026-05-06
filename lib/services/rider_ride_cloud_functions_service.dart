@@ -59,6 +59,11 @@ class RiderRideCloudFunctionsService {
       } on FirebaseFunctionsException catch (error) {
         lastError = error;
         final code = error.code.trim().toLowerCase();
+        if (code == 'not-found') {
+          debugPrint(
+            'CALLABLE_NOT_FOUND name=$name project=${_functions.app.options.projectId} region=us-central1',
+          );
+        }
         final isUnreachable =
             code == 'unavailable' ||
             code == 'deadline-exceeded' ||

@@ -235,6 +235,12 @@ async function initiateFlutterwavePayment(data, context, db) {
     `deliveryId=${deliveryId || ""}`,
     `tx_ref=${tx_ref}`,
   );
+  console.log(
+    "PAYMENT_INIT_SUCCESS",
+    `rideId=${rideId || ""}`,
+    `deliveryId=${deliveryId || ""}`,
+    `tx_ref=${tx_ref}`,
+  );
   console.log("PAYMENT_INIT_RESPONSE", JSON.stringify(response));
   return response;
 }
