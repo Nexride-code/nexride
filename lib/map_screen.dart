@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -1649,6 +1650,92 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return 'Unable to connect to NexRide services right now.';
     }
     return rawMessage;
+  }
+
+  Future<void> _ensureRiderProfileExistsBeforeRequest(String uid) async {
+    final riderUid = uid.trim();
+    if (riderUid.isEmpty) {
+      return;
+    }
+    try {
+      final currentUser = FirebaseAuth.instance.currentUser;
+      final email = currentUser?.email?.trim() ?? '';
+      final displayName = _firstNonEmptyText(
+        <dynamic>[
+          currentUser?.displayName,
+          email.isNotEmpty ? email.split('@').first : '',
+        ],
+        fallback: 'Rider',
+      );
+      await _usersRef.child(riderUid).update(<String, dynamic>{
+        'uid': riderUid,
+        'role': 'rider',
+        'displayName': displayName,
+        if (email.isNotEmpty) 'email': email,
+        'updated_at': rtdb.ServerValue.timestamp,
+      });
+      if (kDebugMode) {
+        debugPrint(
+          '[RIDER_PROFILE_ENSURE] ok path=users/$riderUid displayName=$displayName',
+        );
+      }
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('[RIDER_PROFILE_ENSURE] fail path=users/$riderUid error=$error');
+      }
+    }
+  }
+
+  Future<void> _logCreateRideFailureDiagnostics({
+    required Object error,
+    required StackTrace stackTrace,
+    required Map<String, dynamic>? payload,
+  }) async {
+    if (!kDebugMode) {
+      return;
+    }
+    final uid = FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
+    final paymentMethod = _riderTripPaymentMethod.trim();
+    Map<String, dynamic>? activeTripPointer;
+    try {
+      if (uid.isNotEmpty) {
+        final ptrSnap = await rtdb.FirebaseDatabase.instance
+            .ref('$_riderActiveTripPointerPath/$uid')
+            .get();
+        activeTripPointer = _asStringDynamicMap(ptrSnap.value);
+      }
+    } catch (pointerError) {
+      debugPrint(
+        '[RIDER_CREATE_DEBUG] pointer_read_fail '
+        'path=$_riderActiveTripPointerPath/$uid error=$pointerError',
+      );
+    }
+    debugPrint(
+      '[RIDER_CREATE_DEBUG] failure '
+      'uid=$uid payment_method=$paymentMethod '
+      'error_type=${error.runtimeType} error=$error',
+    );
+    debugPrint('[RIDER_CREATE_DEBUG] failure_stack=$stackTrace');
+    debugPrint(
+      '[RIDER_CREATE_DEBUG] failure_payload '
+      'path=functions:createRideRequest payload=${payload ?? <String, dynamic>{}}',
+    );
+    debugPrint(
+      '[RIDER_CREATE_DEBUG] active_trip_pointer '
+      'path=$_riderActiveTripPointerPath/$uid value=${activeTripPointer ?? <String, dynamic>{}}',
+    );
+    if (error is FirebaseFunctionsException) {
+      debugPrint(
+        '[RIDER_CREATE_DEBUG] firebase_functions_exception '
+        'code=${error.code} message=${error.message} details=${error.details}',
+      );
+    }
+    if (error is FirebaseException) {
+      debugPrint(
+        '[RIDER_CREATE_DEBUG] firebase_exception '
+        'plugin=${error.plugin} code=${error.code} message=${error.message}',
+      );
+    }
   }
 
   Future<Map<String, dynamic>?> _loadPendingRideRequestSnapshot(
@@ -5823,9 +5910,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     });
 
     String? rideId;
+    Map<String, dynamic>? debugCreatePayload;
     var resumedExistingActiveTrip = false;
     try {
       _rideRequestUserAborted = false;
+      await _ensureRiderProfileExistsBeforeRequest(user.uid);
       _logRideFlow(
         'REQUEST RIDE validation passed city=$city routeReady=$_hasRoutePreviewReady fare=$_fare distanceKm=$_distanceKm durationMin=$_estimatedDurationMin',
       );
@@ -6141,6 +6230,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'created_at': DateTime.now().millisecondsSinceEpoch,
         'ride_metadata': rideMetadataSubset(searchingPayload),
       };
+      debugCreatePayload = Map<String, dynamic>.from(createPayload);
       if (kDebugMode) {
         debugPrint(
           '[RIDER_CREATE_DEBUG] callable_payload '
@@ -6520,12 +6610,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRideFlow(
         '[RIDER_CREATE_FAIL] rideId=${rideId ?? 'unknown'} error=$error',
       );
-      if (kDebugMode) {
-        debugPrint(
-          '[RIDER_CREATE_DEBUG] exception_type=${error.runtimeType} '
-          'exception=$error path=ride_requests/<server-assigned>',
-        );
-      }
+      await _logCreateRideFailureDiagnostics(
+        error: error,
+        stackTrace: stackTrace,
+        payload: debugCreatePayload,
+      );
       debugPrintStack(
         label: '[RiderRTDB] REQUEST RIDE exception stack',
         stackTrace: stackTrace,

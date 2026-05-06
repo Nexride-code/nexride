@@ -1,5 +1,6 @@
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 
 /// HTTPS callables — Realtime Database `ride_requests` writes are server-side only.
 class RiderRideCloudFunctionsService {
@@ -29,7 +30,29 @@ class RiderRideCloudFunctionsService {
       await user.getIdToken(true);
     }
     final callable = _functions.httpsCallable(name);
-    final result = await callable.call(payload);
+    if (kDebugMode) {
+      debugPrint(
+        '[RIDER_CALLABLE] start name=$name region=us-central1 '
+        'project=${_functions.app.options.projectId ?? ''} payload=$payload',
+      );
+    }
+    dynamic result;
+    try {
+      result = await callable.call(payload);
+    } on FirebaseFunctionsException catch (error) {
+      if (kDebugMode) {
+        debugPrint(
+          '[RIDER_CALLABLE] fail name=$name code=${error.code} '
+          'message=${error.message} details=${error.details}',
+        );
+      }
+      rethrow;
+    } catch (error) {
+      if (kDebugMode) {
+        debugPrint('[RIDER_CALLABLE] fail name=$name error=$error');
+      }
+      rethrow;
+    }
     final data = result.data;
     if (data is Map) {
       return Map<String, dynamic>.from(data);

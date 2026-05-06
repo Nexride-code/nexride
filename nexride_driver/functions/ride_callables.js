@@ -1040,7 +1040,9 @@ async function createRideRequest(data, context, db) {
     paymentNormalized = "flutterwave";
   }
 
-  const paymentStatus = "pending";
+  const paymentStatus = paymentNormalized === "bank_transfer"
+    ? "pending_review"
+    : "pending";
 
   const distanceKm = Number(data?.distance_km ?? data?.distanceKm ?? 0) || 0;
   const etaMin = Number(data?.eta_min ?? data?.etaMin ?? 0) || 0;
