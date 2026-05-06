@@ -1081,7 +1081,7 @@ async function createRideRequest(data, context, db) {
     ride_id: rideId,
     rider_id: riderId,
     rider_name: riderName,
-    driver_id: null,
+    driver_id: "waiting",
     track_token: trackToken,
     market,
     market_pool: market,

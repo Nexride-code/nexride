@@ -316,6 +316,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   GoogleMapController? _mapController;
   StreamSubscription<Position>? _positionStream;
   StreamSubscription<rtdb.DatabaseEvent>? _rideRequestSubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _rideRequestsMarketFallbackSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _driverOfferQueueChildRemovedSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _deliveryOfferQueueChildAddedSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _deliveryOfferQueueChildRemovedSubscription;
@@ -477,6 +478,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   _PendingRouteRequest? _pendingRouteRequest;
   Timer? _rideDiscoveryReattachTimer;
   Timer? _rideDiscoveryPollingTimer;
+  Timer? _rideRequestsFallbackTimer;
   DateTime? _lastRideStreamEventAt;
   final Set<String> _localWalletCreditedRideIds = <String>{};
   final LocalBackendSimulationService _backendSimulation =
@@ -2267,9 +2269,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _serverTimeOffsetSubscription?.cancel();
     _rideRequestListenerToken += 1;
     _rideRequestSubscription?.cancel();
+    _rideRequestsMarketFallbackSubscription?.cancel();
     _driverOfferQueueChildRemovedSubscription?.cancel();
     _rideDiscoveryReattachTimer?.cancel();
     _rideDiscoveryPollingTimer?.cancel();
+    _rideRequestsFallbackTimer?.cancel();
     _rideRequestsListenerBoundCity = null;
     _driverActiveRideSubscription?.cancel();
     _activeRideSubscription?.cancel();
@@ -7589,6 +7593,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     required String reason,
   }) async {
     final hadListener = _rideRequestSubscription != null ||
+        _rideRequestsMarketFallbackSubscription != null ||
         _driverOfferQueueChildRemovedSubscription != null ||
         _deliveryOfferQueueChildAddedSubscription != null ||
         _deliveryOfferQueueChildRemovedSubscription != null;
@@ -7604,10 +7609,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       );
     }
     final subscription = _rideRequestSubscription;
+    final fallbackSub = _rideRequestsMarketFallbackSubscription;
     final removedSub = _driverOfferQueueChildRemovedSubscription;
     final deliveryAddedSub = _deliveryOfferQueueChildAddedSubscription;
     final deliveryRemovedSub = _deliveryOfferQueueChildRemovedSubscription;
     _rideRequestSubscription = null;
+    _rideRequestsMarketFallbackSubscription = null;
     _driverOfferQueueChildRemovedSubscription = null;
     _deliveryOfferQueueChildAddedSubscription = null;
     _deliveryOfferQueueChildRemovedSubscription = null;
@@ -7615,9 +7622,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _rideDiscoveryListenerHealthy = false;
     _socketStatus = 'disconnected';
     _setApiStatus('idle');
+    _rideRequestsFallbackTimer?.cancel();
+    _rideRequestsFallbackTimer = null;
     _rideRequestsListenerBoundCity = null;
     _driverOfferQueueBoundUid = null;
     await subscription?.cancel();
+    await fallbackSub?.cancel();
     await removedSub?.cancel();
     await deliveryAddedSub?.cancel();
     await deliveryRemovedSub?.cancel();
@@ -10271,6 +10281,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         );
         if (qualifies) {
           _loggedDriverOfferReceivedRideIds.add(rideId);
+          _logRideReq(
+            'DRIVER_RECEIVED_REQUEST rideId=$rideId '
+            'market=${_rideMarketFromData(rideData) ?? 'missing'}',
+          );
           activeOpenRideMap[rideId] = rideData;
         }
       }
@@ -10642,6 +10656,93 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       await rideMapProcessingChain;
     }
 
+    Future<void> stopRideRequestsFallback({
+      required String fallbackReason,
+    }) async {
+      _rideRequestsFallbackTimer?.cancel();
+      _rideRequestsFallbackTimer = null;
+      final fallbackSub = _rideRequestsMarketFallbackSubscription;
+      _rideRequestsMarketFallbackSubscription = null;
+      if (fallbackSub != null) {
+        await fallbackSub.cancel();
+      }
+      _logRideReq('[DRIVER_DISCOVERY_FALLBACK_STOP] reason=$fallbackReason');
+    }
+
+    Map<String, dynamic> rideRequestsAsOfferMap(Map<String, dynamic> rawMap) {
+      final out = <String, dynamic>{};
+      for (final entry in rawMap.entries) {
+        final rideId = entry.key;
+        final ride = _asStringDynamicMap(entry.value);
+        if (ride == null) {
+          continue;
+        }
+        final market = _valueAsText(ride['market_pool']).isEmpty
+            ? _valueAsText(ride['market'])
+            : _valueAsText(ride['market_pool']);
+        out[rideId] = <String, dynamic>{
+          'status': _valueAsText(ride['status']),
+          'market': market,
+          'pickup': ride['pickup'],
+          'dropoff': ride['dropoff'],
+          'pickup_address': ride['pickup_address'],
+          'dropoff_address': ride['dropoff_address'],
+          'rider_id': _valueAsText(ride['rider_id']).isEmpty
+              ? _valueAsText(ride['riderId'])
+              : _valueAsText(ride['rider_id']),
+          'service_type': ride['service_type'],
+          'payment_method': ride['payment_method'],
+          'payment_status': ride['payment_status'],
+          'expires_at': ride['expires_at'],
+          'created_at': ride['created_at'],
+          'fare': ride['fare'],
+          'distance_km': ride['distance_km'],
+          'eta_minutes': ride['eta_minutes'],
+        };
+      }
+      return out;
+    }
+
+    Future<void> startRideRequestsFallback({
+      required String fallbackReason,
+      required int listenerToken,
+    }) async {
+      if (listenerToken != _rideRequestListenerToken) {
+        return;
+      }
+      if (_rideRequestsMarketFallbackSubscription != null) {
+        return;
+      }
+      final fallbackMarket = driverCity;
+      final fallbackQuery = _rideRequestsRef
+          .orderByChild('market_pool')
+          .equalTo(fallbackMarket);
+      _logRideReq(
+        '[DRIVER_DISCOVERY_FALLBACK_START] reason=$fallbackReason '
+        'path=ride_requests?orderByChild=market_pool&equalTo=$fallbackMarket',
+      );
+      _rideRequestsMarketFallbackSubscription = fallbackQuery.onValue.listen(
+        (event) async {
+          if (listenerToken != _rideRequestListenerToken) {
+            return;
+          }
+          final snapshotMap = _asStringDynamicMap(event.snapshot.value) ??
+              <String, dynamic>{};
+          final synthesized = rideRequestsAsOfferMap(snapshotMap);
+          await queueRideMapProcessing(
+            synthesized,
+            source: 'market_query_fallback',
+            listenerToken: listenerToken,
+          );
+        },
+        onError: (Object error) {
+          _logRideReq(
+            '[DRIVER_DISCOVERY_FALLBACK_ERROR] market=$fallbackMarket error=$error',
+          );
+        },
+      );
+    }
+
     final forceRebindOfferListener =
         reason == 'goOnline' || reason == 'goOnline_retry';
       if (!forceRebindOfferListener &&
@@ -10809,9 +10910,26 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         _socketStatus = 'offer_queue_connected';
         _setApiStatus('listening');
         _lastRideStreamEventAt = DateTime.now();
+        _rideRequestsFallbackTimer?.cancel();
+        _rideRequestsFallbackTimer = null;
+        if (_driverOfferQueueReplica.isNotEmpty) {
+          unawaited(
+            stopRideRequestsFallback(
+              fallbackReason: 'offer_queue_has_data',
+            ),
+          );
+        }
       }
 
       void onOfferQueueChildError(Object error) {
+        if (isRealtimeDatabasePermissionDenied(error)) {
+          unawaited(
+            startRideRequestsFallback(
+              fallbackReason: 'offer_queue_permission_denied_stream',
+              listenerToken: listenerToken,
+            ),
+          );
+        }
         unawaited(
           _handleOfferQueueChildStreamError(
             error: error,
@@ -10856,6 +10974,18 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         },
         onError: onOfferQueueChildError,
       );
+      _rideRequestsFallbackTimer?.cancel();
+      _rideRequestsFallbackTimer = Timer(const Duration(seconds: 4), () {
+        if (_driverOfferQueueReplica.isNotEmpty) {
+          return;
+        }
+        unawaited(
+          startRideRequestsFallback(
+            fallbackReason: 'offer_queue_no_offers_timeout',
+            listenerToken: listenerToken,
+          ),
+        );
+      });
       _driverOfferQueueChildRemovedSubscription =
           driverOfferQueueRef.onChildRemoved.listen(
         (event) async {
@@ -10940,6 +11070,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         'DRIVER_DISCOVERY_STREAM_CONNECTED path=driver_offer_queue/$discoveryUid '
         'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} market=$driverCity',
       );
+      _logRideReq(
+        'DRIVER_DISCOVERY_CONNECTED path=driver_offer_queue/$discoveryUid '
+        'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} market=$driverCity',
+      );
       _logRtdb(
         'offer_queue onChildAdded+onChildRemoved active city=$driverCity',
       );
@@ -10967,6 +11101,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           'DRIVER_DISCOVERY_PERMISSION_DENIED path=driver_offer_queue/${_driverOfferQueueBoundUid ?? 'none'} '
           'authUid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
           'market=$driverCity error=$error',
+        );
+        await startRideRequestsFallback(
+          fallbackReason: 'offer_queue_permission_denied_attach',
+          listenerToken: listenerToken,
         );
         debugPrint(
           'RTDB_PERMISSION_ERROR_FULL '

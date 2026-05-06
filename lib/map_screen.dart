@@ -472,10 +472,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     for (final key in <String>['request_expires_at', 'expires_at']) {
       final value = _asInt(rideData[key]);
       if (value != null && value > 0) {
+        final createdAt = _asInt(rideData['created_at']) ?? 0;
+        final maxSearchWindow = createdAt > 0
+            ? createdAt + const Duration(minutes: 5).inMilliseconds
+            : 0;
+        if (maxSearchWindow > 0 && value > maxSearchWindow) {
+          return maxSearchWindow;
+        }
         return value;
       }
     }
 
+    final createdAt = _asInt(rideData['created_at']) ?? 0;
+    if (createdAt > 0) {
+      return createdAt + const Duration(minutes: 5).inMilliseconds;
+    }
     return 0;
   }
 
@@ -666,6 +677,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
     _logRideFlow(
       'ride search timed out ts=${DateTime.now().toIso8601String()} rideId=$rideId status=cancelled driverId=$driverId',
+    );
+    await _clearStaleActiveTripArtifacts(
+      rideId: rideId,
+      reason: 'search_timeout_auto_expire',
     );
   }
 
@@ -1129,6 +1144,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return backendMessage.isEmpty ? reason : backendMessage;
   }
 
+  String _paymentInitUserMessage(Map<String, dynamic> init) {
+    if (kDebugMode) {
+      final backend = _paymentInitBackendMessage(init).trim();
+      if (backend.isNotEmpty) {
+        return 'Could not start payment: $backend';
+      }
+    }
+    return 'Could not start payment right now. Please try again.';
+  }
+
   /// Opens Flutterwave hosted checkout; polls RTDB and calls verify until paid or timeout.
   Future<_FlutterwaveCheckoutResult> _runFlutterwaveHostedCheckoutFlow({
     required String rideId,
@@ -1165,7 +1190,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'PAYMENT_INIT_FAIL rideId=$rideId reason=$backendError response=$init',
         );
       }
-      _showSnackBar('Could not start payment: $backendError');
+      _showSnackBar(_paymentInitUserMessage(init));
       return const _FlutterwaveCheckoutResult(
         paid: false,
         checkoutOpened: false,
@@ -1181,7 +1206,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         initCurrency.isEmpty ||
         initCustomer == null ||
         initPublicKey.isEmpty) {
-      final backendError = _paymentInitBackendMessage(init);
       if (kDebugMode) {
         debugPrint(
           'PAYMENT_INIT_FAIL rideId=$rideId '
@@ -1190,10 +1214,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'hasPublicKey=${initPublicKey.isNotEmpty} response=$init',
         );
       }
-      _showSnackBar('Could not start payment: $backendError');
+      _showSnackBar(_paymentInitUserMessage(init));
       return const _FlutterwaveCheckoutResult(
         paid: false,
         checkoutOpened: false,
+      );
+    }
+    if (kDebugMode) {
+      debugPrint(
+        'PAYMENT_INIT_OK rideId=$rideId tx_ref=${_firstNonEmptyText(<dynamic>[init['tx_ref'], init['txRef']])}',
       );
     }
     final url = _firstNonEmptyText(<dynamic>[
@@ -2187,6 +2216,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       '[MATCH_DEBUG][RIDER_CANCEL_WRITE] rideId=$rideId '
       'next_status=cancelled next_trip_state=${TripLifecycleState.tripCancelled}',
     );
+    await _clearStaleActiveTripArtifacts(
+      rideId: rideId,
+      reason: 'rider_cancel',
+    );
   }
 
   void _setSubmittingRideRequest(bool value) {
@@ -2503,6 +2536,38 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           );
         }
       }
+      if (pointerRideId.isNotEmpty) {
+        final pointerRideMap = _asStringDynamicMap(rides?[pointerRideId]);
+        if (pointerRideMap == null) {
+          _logRideFlow(
+            'ACTIVE_TRIP_STALE source=startup rideId=$pointerRideId reason=pointer_missing_ride_map',
+          );
+          await _clearStaleActiveTripArtifacts(
+            rideId: pointerRideId,
+            reason: 'startup_pointer_missing_ride_map',
+          );
+        } else {
+          final pointerStatus =
+              TripStateMachine.uiStatusFromSnapshot(pointerRideMap);
+          _logRideFlow(
+            'ACTIVE_TRIP_FOUND source=startup rideId=$pointerRideId status=$pointerStatus',
+          );
+          if (!_isStatusBlockingRideCreation(pointerStatus)) {
+            _logRideFlow(
+              'ACTIVE_TRIP_STALE source=startup rideId=$pointerRideId status=$pointerStatus reason=non_blocking_pointer_status',
+            );
+            await _clearStaleActiveTripArtifacts(
+              rideId: pointerRideId,
+              reason: 'startup_pointer_non_blocking_status_$pointerStatus',
+            );
+            rides?.remove(pointerRideId);
+          } else {
+            _logRideFlow(
+              'ACTIVE_TRIP_RECOVERED source=startup rideId=$pointerRideId status=$pointerStatus',
+            );
+          }
+        }
+      }
       if (rides == null) {
         _logRideFlow('active ride restore found no rides riderId=$riderUid');
         if (_rideStatus != 'idle' ||
@@ -2529,6 +2594,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           rideData,
         );
         final status = TripStateMachine.uiStatusFromSnapshot(rideData);
+        if (!_isStatusBlockingRideCreation(status)) {
+          unawaited(
+            _clearStaleActiveTripArtifacts(
+              rideId: rideId,
+              reason: 'startup_recovery_non_blocking_$status',
+            ),
+          );
+          return;
+        }
         if (!_restorableRideStatuses.contains(status) ||
             !TripStateMachine.isRestorable(canonicalState)) {
           return;
@@ -6534,25 +6608,51 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             .toLowerCase()
             .replaceAll(RegExp(r'[\s-]+'), '_');
         if (pmNorm == 'bank_transfer') {
+          final bankOk = await _registerBankTransferAndPoll(rideId);
+          if (!bankOk) {
+            await _clearStaleActiveTripArtifacts(
+              rideId: rideId,
+              reason: 'bank_transfer_abandoned',
+            );
+            _clearRideSearchTimeout(reason: 'bank_transfer_registration_failed');
+            _pendingRideRequestSubmissionId = null;
+            await _resetRideState(clearDestination: true);
+            return;
+          }
+          final postBankSnap = await _rideRequestsRef.child(rideId).get().timeout(
+                const Duration(seconds: 18),
+              );
+          final postBankParsed = _asStringDynamicMap(postBankSnap.value);
+          if (postBankParsed != null) {
+            committedRideData = postBankParsed;
+          }
+          final bankPaymentStatus = _valueAsText(
+            committedRideData['payment_status'],
+          ).toLowerCase();
+          if (bankPaymentStatus != 'pending_review') {
+            _logRideFlow(
+              'RIDER_BANK_TRANSFER_INVALID_PAYMENT_STATUS rideId=$rideId payment_status=$bankPaymentStatus',
+            );
+            await _clearStaleActiveTripArtifacts(
+              rideId: rideId,
+              reason: 'bank_transfer_invalid_payment_status',
+            );
+            _clearRideSearchTimeout(
+              reason: 'bank_transfer_invalid_payment_status',
+            );
+            _pendingRideRequestSubmissionId = null;
+            await _resetRideState(clearDestination: true);
+            _showSnackBar(
+              'Unable to confirm bank transfer reference right now. Please try again.',
+            );
+            return;
+          }
           _enterSearchingStateAfterCreate(
             rideId: rideId,
             rideData: committedRideData,
           );
           movedToSearching = true;
           _showSnackBar(RiderTripStatusMessages.searchingForDriver);
-          unawaited(
-            _registerBankTransferAndPoll(rideId).then((bool bankOk) {
-              if (!bankOk) {
-                _logRideFlow(
-                  'RIDER_BANK_REFERENCE_REGISTRATION_FAILED_NON_BLOCKING rideId=$rideId',
-                );
-              }
-            }).catchError((Object error) {
-              _logRideFlow(
-                'RIDER_BANK_REFERENCE_REGISTRATION_ERROR_NON_BLOCKING rideId=$rideId error=$error',
-              );
-            }),
-          );
         } else {
           final checkoutResult = await _runFlutterwaveHostedCheckoutFlow(
             rideId: rideId,
@@ -6574,6 +6674,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 'skip auto-cancel before checkout open rideId=$rideId',
               );
             }
+            await _clearStaleActiveTripArtifacts(
+              rideId: rideId,
+              reason: checkoutResult.checkoutOpened
+                  ? 'payment_failed'
+                  : 'flutterwave_checkout_closed',
+            );
             _clearRideSearchTimeout(reason: 'payment_failed');
             _pendingRideRequestSubmissionId = null;
             _showSnackBar('Payment was not completed. Trip request cancelled.');
@@ -6743,6 +6849,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   static const String _riderActiveTripPointerPath = 'rider_active_trip';
+  static const Set<String> _activeBlockingStatuses = <String>{
+    'searching',
+    'matched',
+    'accepted',
+    'arrived',
+    'in_progress',
+  };
+
+  bool _isStatusBlockingRideCreation(String status) =>
+      _activeBlockingStatuses.contains(status.trim().toLowerCase());
 
   Future<String> _resolveRideIdFromRiderActiveTripPointer() async {
     final uid = _currentRiderUid?.trim() ?? '';
@@ -6765,22 +6881,63 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _clearRiderActiveTripPointerBestEffort() async {
+  Future<void> _clearStaleActiveTripArtifacts({
+    required String rideId,
+    required String reason,
+    bool clearRideRequestNode = true,
+  }) async {
     final uid = _currentRiderUid?.trim() ?? '';
-    if (uid.isEmpty) {
-      return;
-    }
-    try {
-      await rtdb.FirebaseDatabase.instance
-          .ref('$_riderActiveTripPointerPath/$uid')
-          .remove();
-    } catch (error) {
-      if (kDebugMode) {
-        debugPrint(
-          '[RIDER_ACTIVE_TRIP_POINTER] clear_failed uid=$uid error=$error',
+    final normalizedRideId = rideId.trim();
+    _logRideFlow(
+      'ACTIVE_TRIP_CLEARED reason=$reason uid=${uid.isEmpty ? 'none' : uid} rideId=${normalizedRideId.isEmpty ? 'none' : normalizedRideId} '
+      'clearRideRequestNode=$clearRideRequestNode',
+    );
+    if (uid.isNotEmpty) {
+      try {
+        await rtdb.FirebaseDatabase.instance
+            .ref('$_riderActiveTripPointerPath/$uid')
+            .remove();
+      } catch (error) {
+        _logRideFlow(
+          'ACTIVE_TRIP_CLEARED pointer_clear_failed uid=$uid error=$error',
+        );
+      }
+      try {
+        await rtdb.FirebaseDatabase.instance.ref('active_trips/$uid').remove();
+      } catch (error) {
+        _logRideFlow(
+          'ACTIVE_TRIP_CLEARED active_trips_uid_clear_failed uid=$uid error=$error',
         );
       }
     }
+    if (normalizedRideId.isNotEmpty) {
+      try {
+        await rtdb.FirebaseDatabase.instance
+            .ref('active_trips/$normalizedRideId')
+            .remove();
+      } catch (error) {
+        _logRideFlow(
+          'ACTIVE_TRIP_CLEARED active_trips_ride_clear_failed rideId=$normalizedRideId error=$error',
+        );
+      }
+      if (clearRideRequestNode) {
+        try {
+          await _rideRequestsRef.child(normalizedRideId).remove();
+        } catch (error) {
+          _logRideFlow(
+            'ACTIVE_TRIP_CLEARED ride_request_clear_failed rideId=$normalizedRideId error=$error',
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _clearRiderActiveTripPointerBestEffort() async {
+    await _clearStaleActiveTripArtifacts(
+      rideId: '',
+      reason: 'pointer_only_best_effort',
+      clearRideRequestNode: false,
+    );
   }
 
   Future<_ActiveTripPrecheckOutcome> _precheckRiderActiveTripPointerBeforeCreate() async {
@@ -6797,24 +6954,46 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
       final ptr = _asStringDynamicMap(snap.value);
       final rideId = _firstNonEmptyText(<dynamic>[ptr?['ride_id'], ptr?['rideId']]);
+      _logRideFlow(
+        'ACTIVE_TRIP_FOUND source=precheck uid=$uid rideId=${rideId.isEmpty ? 'missing' : rideId}',
+      );
       if (rideId.isEmpty) {
-        await _clearRiderActiveTripPointerBestEffort();
+        _logRideFlow('ACTIVE_TRIP_STALE source=precheck reason=missing_ride_id');
+        await _clearStaleActiveTripArtifacts(
+          rideId: '',
+          reason: 'precheck_missing_ride_id',
+          clearRideRequestNode: false,
+        );
         return _ActiveTripPrecheckOutcome.staleCleared;
       }
       final rideSnap = await _rideRequestsRef.child(rideId).get();
       final rideData = _asStringDynamicMap(rideSnap.value);
       if (rideData == null) {
-        await _clearRiderActiveTripPointerBestEffort();
+        _logRideFlow(
+          'ACTIVE_TRIP_STALE source=precheck rideId=$rideId reason=missing_ride_node',
+        );
+        await _clearStaleActiveTripArtifacts(
+          rideId: rideId,
+          reason: 'precheck_missing_ride_node',
+        );
         return _ActiveTripPrecheckOutcome.staleCleared;
       }
       final riderId = _valueAsText(rideData['rider_id']);
-      final canonical = TripStateMachine.canonicalStateFromSnapshot(rideData);
-      final isActive = riderId == uid && !TripStateMachine.isTerminal(canonical);
+      final status = TripStateMachine.uiStatusFromSnapshot(rideData);
+      final isActive = riderId == uid && _isStatusBlockingRideCreation(status);
       if (!isActive) {
-        await _clearRiderActiveTripPointerBestEffort();
+        _logRideFlow(
+          'ACTIVE_TRIP_STALE source=precheck rideId=$rideId reason=status_not_blocking status=$status',
+        );
+        await _clearStaleActiveTripArtifacts(
+          rideId: rideId,
+          reason: 'precheck_terminal_or_invalid_status_$status',
+        );
         return _ActiveTripPrecheckOutcome.staleCleared;
       }
-      _logRideFlow('[RIDER_ACTIVE_TRIP_PRECHECK] resume rideId=$rideId canonical=$canonical');
+      _logRideFlow(
+        'ACTIVE_TRIP_RECOVERED source=precheck rideId=$rideId status=$status',
+      );
       _showSnackBar('You already have an active ride. Resuming it now.');
       listenToRide(rideId);
       unawaited(
@@ -7081,6 +7260,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           _logRideFlow('ride completed rideId=$rideId');
           await _endCallForRideLifecycle(rideId: rideId);
           await _saveRiderTrip(rideId, data);
+          await _clearStaleActiveTripArtifacts(
+            rideId: rideId,
+            reason: 'ride_completed',
+          );
           if (_currentRiderUid?.isNotEmpty ?? false) {
             unawaited(
               _trustRulesService.recordTripCompletion(
@@ -7117,6 +7300,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           _activeTripSessionService.clearSession(
             reason: 'cancelled',
             source: 'map_listener',
+          );
+          await _clearStaleActiveTripArtifacts(
+            rideId: rideId,
+            reason: 'ride_terminal_$status',
           );
           await _resetRideState(clearDestination: true);
           final cancelReason = _valueAsText(data['cancel_reason']);
