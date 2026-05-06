@@ -6590,7 +6590,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   '[RIDER_REQ] create_retry_failed reason=$retryReason',
                 );
                 _showSnackBar(
-                  'Unable to connect to NexRide services right now.',
+                  'We could not connect to NexRide services. Please try again.',
                 );
                 return;
               }
