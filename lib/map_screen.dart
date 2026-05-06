@@ -79,7 +79,6 @@ enum _ActiveTripPrecheckOutcome {
   noPointer,
   staleCleared,
   resumed,
-  permissionDenied,
 }
 
 class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
@@ -1632,7 +1631,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'ride_request_create denied raw=$error',
         );
       }
-      return 'We could not start your ride. Please try again.';
+      return 'Unable to connect to NexRide services right now.';
     }
     if (error is TimeoutException) {
       return 'We could not confirm your ride request in time. Please try again.';
@@ -1647,7 +1646,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         .replaceFirst('FirebaseException: ', '')
         .trim();
     if (rawMessage.isEmpty || rawMessage.length > 160) {
-      return 'Unable to request a ride right now. Please try again.';
+      return 'Unable to connect to NexRide services right now.';
     }
     return rawMessage;
   }
@@ -1998,6 +1997,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (riderId == null || riderId.isEmpty) {
       return;
     }
+    if (kDebugMode) {
+      debugPrint(
+        '[RIDER_PROFILE_LOAD] start riderId=$riderId persist=$persist path=users/$riderId',
+      );
+    }
 
     try {
       final userSnapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
@@ -2008,6 +2012,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final existingUser = userSnapshot?.value is Map
           ? Map<String, dynamic>.from(userSnapshot!.value as Map)
           : <String, dynamic>{};
+      if (kDebugMode) {
+        debugPrint(
+          '[RIDER_PROFILE_LOAD] snapshot_exists=${existingUser.isNotEmpty} riderId=$riderId',
+        );
+      }
       final storedLaunchCity = _normalizeServiceCity(
         existingUser['launch_market_city'] ??
             existingUser['launchMarket'] ??
@@ -2074,6 +2083,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _trustRulesConfig = rules;
       });
     } catch (error, stackTrace) {
+      if (kDebugMode) {
+        debugPrint('[RIDER_PROFILE_LOAD] fail riderId=$riderId error=$error');
+      }
       _logRideFlow('trust refresh failed riderId=$riderId error=$error');
       debugPrintStack(
         label: '[RiderTrust] refresh stack',
@@ -5825,17 +5837,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _logRideFlow('REQUEST RIDE precheck outcome=resumed_active_trip');
         return;
       }
-      if (precheck == _ActiveTripPrecheckOutcome.permissionDenied) {
-        _logRideFlow('REQUEST RIDE precheck outcome=permission_denied');
-        return;
-      }
-
       // Canonical slug must match driver `orderByChild('market_pool').equalTo(...)` byte-for-byte.
-      final dispatchMarket =
+      var dispatchMarket =
           RiderServiceAreaConfig.marketForCity(city).city.trim().toLowerCase();
+      if (dispatchMarket.isEmpty) {
+        dispatchMarket = 'lagos';
+      }
       if (dispatchMarket != city) {
         _logRideFlow(
           'REQUEST RIDE market canonicalized for RTDB from=$city to=$dispatchMarket',
+        );
+      }
+      final normalizedPaymentMethod = _riderTripPaymentMethod.trim().isEmpty
+          ? 'flutterwave'
+          : _riderTripPaymentMethod.trim().toLowerCase();
+      if (normalizedPaymentMethod != _riderTripPaymentMethod.trim().toLowerCase() &&
+          kDebugMode) {
+        debugPrint(
+          '[RIDER_CREATE_DEBUG] payment method defaulted '
+          'from=${_riderTripPaymentMethod.trim()} to=$normalizedPaymentMethod',
         );
       }
       if (_routePreviewError != null ||
@@ -5954,7 +5974,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'duration_min': fareBreakdown.durationMin,
         RtdbRideRequestFields.etaMin: fareBreakdown.durationMin,
         'dropoff': destinationPayload,
-        'payment_method': _riderTripPaymentMethod,
+        'payment_method': normalizedPaymentMethod,
         RtdbRideRequestFields.paymentStatus: 'pending',
         'settlement_status': 'pending',
         'support_status': 'normal',
@@ -6000,8 +6020,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'requested_at': rtdb.ServerValue.timestamp,
         'updated_at': rtdb.ServerValue.timestamp,
         'payment_context': <String, dynamic>{
-          'method': _riderTripPaymentMethod,
-          'channel': _riderTripPaymentMethod == 'bank_transfer'
+          'method': normalizedPaymentMethod,
+          'channel': normalizedPaymentMethod == 'bank_transfer'
               ? 'bank_transfer'
               : 'card',
         },
@@ -6095,6 +6115,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       final createPayload = <String, dynamic>{
         'market': dispatchMarket,
+        'market_pool': dispatchMarket,
+        'rider_id': user.uid,
+        'rider_name': _firstNonEmptyText(
+          <dynamic>[
+            _trustSummary['displayName'],
+            _trustSummary['name'],
+            FirebaseAuth.instance.currentUser?.displayName,
+            FirebaseAuth.instance.currentUser?.email?.split('@').first,
+          ],
+          fallback: 'Rider',
+        ),
         'pickup': pickupPayload,
         'dropoff': destinationPayload,
         'fare': fareBreakdown.totalFare,
@@ -6102,14 +6133,38 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'distance_km': fareBreakdown.distanceKm,
         'eta_min': fareBreakdown.durationMin,
         'eta_minutes': fareBreakdown.durationMin,
-        'payment_method': searchingPayload['payment_method'],
+        'payment_method': normalizedPaymentMethod,
+        'status': 'requesting',
+        'trip_state': 'requesting',
         'expires_at': searchTimeoutAt,
         'service_type': RiderServiceType.ride.key,
+        'created_at': DateTime.now().millisecondsSinceEpoch,
         'ride_metadata': rideMetadataSubset(searchingPayload),
       };
-      var createRes = await _rideCloud
-          .createRideRequest(createPayload)
-          .timeout(const Duration(seconds: 45));
+      if (kDebugMode) {
+        debugPrint(
+          '[RIDER_CREATE_DEBUG] callable_payload '
+          'path=createRideRequest market=$dispatchMarket market_pool=$dispatchMarket '
+          'payment=$normalizedPaymentMethod rider_id=${user.uid}',
+        );
+      }
+      Map<String, dynamic> createRes;
+      try {
+        createRes = await _rideCloud
+            .createRideRequest(createPayload)
+            .timeout(const Duration(seconds: 45));
+      } catch (error) {
+        if (kDebugMode) {
+          debugPrint(
+            '[RIDER_CREATE_DEBUG] callable_exception '
+            'type=${error.runtimeType} error=$error payload=$createPayload',
+          );
+        }
+        rethrow;
+      }
+      if (kDebugMode) {
+        debugPrint('[RIDER_CREATE_DEBUG] callable_response=$createRes');
+      }
       if (!riderRideCallableSucceeded(createRes)) {
         var reason = riderRideCallableReason(createRes);
         final recoveredRideId = _firstNonEmptyText(<dynamic>[
@@ -6148,9 +6203,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               );
               await _clearRiderActiveTripPointerBestEffort();
               _showSnackBar('Refreshing trip session, please wait...');
-              createRes = await _rideCloud
-                  .createRideRequest(createPayload)
-                  .timeout(const Duration(seconds: 45));
+              try {
+                createRes = await _rideCloud
+                    .createRideRequest(createPayload)
+                    .timeout(const Duration(seconds: 45));
+              } catch (error) {
+                if (kDebugMode) {
+                  debugPrint(
+                    '[RIDER_CREATE_DEBUG] callable_retry_exception '
+                    'type=${error.runtimeType} error=$error payload=$createPayload',
+                  );
+                }
+                rethrow;
+              }
               if (!riderRideCallableSucceeded(createRes)) {
                 // Do not throw "Bad state: rider_active_trip" to production users.
                 final retryReason = riderRideCallableReason(createRes);
@@ -6158,10 +6223,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   '[RIDER_REQ] create_retry_failed reason=$retryReason',
                 );
                 _showSnackBar(
-                  retryReason == 'permission_denied' ||
-                          isPermissionDeniedError(retryReason)
-                      ? 'We could not start your ride. Please try again.'
-                      : 'Unable to request a ride right now. Please try again.',
+                  'Unable to connect to NexRide services right now.',
                 );
                 return;
               }
@@ -6173,9 +6235,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           } else {
             // Pointer missing: treat as no active trip; retry once.
             await _clearRiderActiveTripPointerBestEffort();
-            createRes = await _rideCloud
-                .createRideRequest(createPayload)
-                .timeout(const Duration(seconds: 45));
+            try {
+              createRes = await _rideCloud
+                  .createRideRequest(createPayload)
+                  .timeout(const Duration(seconds: 45));
+            } catch (error) {
+              if (kDebugMode) {
+                debugPrint(
+                  '[RIDER_CREATE_DEBUG] callable_retry_no_pointer_exception '
+                  'type=${error.runtimeType} error=$error payload=$createPayload',
+                );
+              }
+              rethrow;
+            }
             if (!riderRideCallableSucceeded(createRes)) {
               final retryReason = riderRideCallableReason(createRes);
               _logRideFlow('[RIDER_REQ] create_retry_failed reason=$retryReason');
@@ -6448,6 +6520,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRideFlow(
         '[RIDER_CREATE_FAIL] rideId=${rideId ?? 'unknown'} error=$error',
       );
+      if (kDebugMode) {
+        debugPrint(
+          '[RIDER_CREATE_DEBUG] exception_type=${error.runtimeType} '
+          'exception=$error path=ride_requests/<server-assigned>',
+        );
+      }
       debugPrintStack(
         label: '[RiderRTDB] REQUEST RIDE exception stack',
         stackTrace: stackTrace,
@@ -6568,14 +6646,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return _ActiveTripPrecheckOutcome.resumed;
     } catch (error) {
       if (isPermissionDeniedError(error)) {
-        // Production: show friendly message only.
-        _showSnackBar('We could not start your ride. Please try again.');
         if (kDebugMode) {
           debugPrint(
-            '[RIDER_ACTIVE_TRIP_PRECHECK] permission_denied uid=$uid error=$error',
+            '[RIDER_ACTIVE_TRIP_PRECHECK] permission_denied uid=$uid error=$error '
+            'action=fail_open_continue_create',
           );
         }
-        return _ActiveTripPrecheckOutcome.permissionDenied;
+        return _ActiveTripPrecheckOutcome.noPointer;
       }
       if (kDebugMode) {
         debugPrint('[RIDER_ACTIVE_TRIP_PRECHECK] failed uid=$uid error=$error');

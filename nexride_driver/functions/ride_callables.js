@@ -367,10 +367,10 @@ function coordsInNgBox(lat, lng) {
  * @param {{ token?: Record<string, unknown> }} [authLike]
  */
 async function riderProfileRequirementOk(db, riderId, gates, authLike) {
-  if (!gates.require_riders_users_node) {
-    return true;
-  }
   const uid = normUid(riderId);
+  if (!uid) {
+    return false;
+  }
   const ref = db.ref(`users/${uid}`);
   const snap = await ref.get();
   if (snap.exists()) {
@@ -378,7 +378,10 @@ async function riderProfileRequirementOk(db, riderId, gates, authLike) {
   }
   const token = authLike?.token;
   if (!token || typeof token !== "object") {
-    return false;
+    if (gates.require_riders_users_node) {
+      return false;
+    }
+    return true;
   }
   try {
     const email = String(token.email ?? "").trim();
@@ -957,6 +960,12 @@ async function createRideRequest(data, context, db) {
   const riderId = normUid(context.auth.uid);
   console.log("RIDER_CREATE_START", riderId);
   const riderGates = await loadRiderCreateGates(db);
+  console.log(
+    "RIDER_CREATE_INPUT",
+    `rider=${riderId}`,
+    `market=${String(data?.market ?? data?.city ?? "").trim() || "(empty)"}`,
+    `payment=${String(data?.payment_method ?? data?.paymentMethod ?? "").trim() || "(empty)"}`,
+  );
 
   const bodyRider = normUid(data?.rider_id ?? data?.riderId);
   if (bodyRider && bodyRider !== riderId) {
@@ -970,11 +979,7 @@ async function createRideRequest(data, context, db) {
   }
 
   const marketRaw = data?.market ?? data?.city ?? "";
-  const market = canonicalDispatchMarket(marketRaw);
-  if (!market) {
-    console.log("RIDER_CREATE_FAIL", riderId, "invalid_market");
-    return { success: false, reason: "invalid_market" };
-  }
+  const market = canonicalDispatchMarket(marketRaw) || "lagos";
 
   const supersede = await supersedePriorOpenRideForRider(db, riderId);
   if (!supersede.ok) {
@@ -1029,10 +1034,10 @@ async function createRideRequest(data, context, db) {
   const paymentMethod = String(data?.payment_method ?? data?.paymentMethod ?? "flutterwave")
     .trim()
     .toLowerCase();
-  const paymentNormalized = paymentMethod.replace(/[\s-]+/g, "_");
+  let paymentNormalized = paymentMethod.replace(/[\s-]+/g, "_");
   if (!PAYMENT_METHODS_ALLOWED.has(paymentNormalized)) {
-    console.log("RIDER_CREATE_FAIL", riderId, "unsupported_payment_method", paymentNormalized);
-    return { success: false, reason: "unsupported_payment_method" };
+    console.log("RIDER_CREATE_WARN", riderId, "unsupported_payment_method_fallback", paymentNormalized);
+    paymentNormalized = "flutterwave";
   }
 
   const paymentStatus = "pending";
@@ -1063,16 +1068,25 @@ async function createRideRequest(data, context, db) {
   }
 
   const ts = nowMs();
+  const riderNameFromBody = String(data?.rider_name ?? data?.riderName ?? "").trim();
+  const riderNameFromToken = String(context.auth?.token?.name ?? "").trim();
+  const riderEmail = String(context.auth?.token?.email ?? "").trim();
+  const riderName = riderNameFromBody ||
+    riderNameFromToken ||
+    (riderEmail ? riderEmail.split("@")[0] : "") ||
+    "Rider";
   const payload = {
     ride_id: rideId,
     rider_id: riderId,
+    rider_name: riderName,
     driver_id: null,
     track_token: trackToken,
     market,
     market_pool: market,
-    status: "searching",
-    trip_state: TRIP_STATE.searching,
+    status: "requesting",
+    trip_state: "requesting",
     pickup,
+    destination: dropoff && typeof dropoff === "object" ? dropoff : null,
     dropoff: dropoff && typeof dropoff === "object" ? dropoff : null,
     fare,
     currency,
@@ -1145,12 +1159,23 @@ async function createRideRequest(data, context, db) {
     }
   }
 
-  await rideRef.set(payload);
-  await db.ref(`rider_active_trip/${riderId}`).set({
-    ride_id: rideId,
-    phase: "searching",
-    updated_at: ts,
-  });
+  try {
+    await rideRef.set(payload);
+  } catch (e) {
+    console.log("RIDER_CREATE_WRITE_FAIL", `path=ride_requests/${rideId}`, e?.message ?? e);
+    console.log("RIDER_CREATE_WRITE_PAYLOAD", JSON.stringify(payload));
+    return { success: false, reason: "ride_write_failed" };
+  }
+  try {
+    await db.ref(`rider_active_trip/${riderId}`).set({
+      ride_id: rideId,
+      phase: "requesting",
+      updated_at: ts,
+    });
+  } catch (e) {
+    console.log("RIDER_ACTIVE_TRIP_POINTER_FAIL", `path=rider_active_trip/${riderId}`, e?.message ?? e);
+    // Keep ride creation successful even if pointer write fails.
+  }
   console.log("RIDER_CREATE_SUCCESS", rideId, market);
   await fanOutDriverOffersIfEligible(db, rideId, payload);
   await writeAudit(db, {
