@@ -1192,7 +1192,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return false;
   }
 
-  /// Registers bank transfer metadata; polls for verification — does **not** fail the ride on timeout.
+  /// Registers bank transfer metadata and shows one reference snackbar.
+  /// This is non-blocking for rider matching; creation should continue immediately.
   Future<bool> _registerBankTransferAndPoll(String rideId) async {
     final reg = await _rideCloud.registerBankTransferPayment(rideId: rideId);
     if (reg['success'] != true) {
@@ -1209,16 +1210,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _showSnackBar(
       'Bank reference: $txRef — include it exactly in your transfer narration.',
     );
-    final verified = await _pollRidePaymentVerified(
-      rideId,
-      maxAttempts: 120,
-      interval: const Duration(seconds: 3),
-    );
-    if (!verified) {
-      _showSnackBar(
-        'Awaiting transfer confirmation. Driver matching starts after NexRide verifies payment.',
-      );
-    }
     return true;
   }
 
@@ -1734,6 +1725,53 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       debugPrint(
         '[RIDER_CREATE_DEBUG] firebase_exception '
         'plugin=${error.plugin} code=${error.code} message=${error.message}',
+      );
+    }
+  }
+
+  void _enterSearchingStateAfterCreate({
+    required String rideId,
+    required Map<String, dynamic> rideData,
+  }) {
+    if (mounted) {
+      setState(() {
+        _currentRideId = rideId;
+        _pendingRideRequestSubmissionId = null;
+        _currentRideSnapshot = Map<String, dynamic>.from(rideData);
+        _rideStatus = 'searching';
+        _searchingDriver = true;
+        _riderUnreadChatCount = 0;
+        _isRiderChatOpen = false;
+      });
+    } else {
+      _currentRideId = rideId;
+      _pendingRideRequestSubmissionId = null;
+      _currentRideSnapshot = Map<String, dynamic>.from(rideData);
+      _rideStatus = 'searching';
+      _searchingDriver = true;
+      _riderUnreadChatCount = 0;
+      _isRiderChatOpen = false;
+    }
+    _logRideFlow(
+      'REQUEST RIDE state transition after request rideId=$rideId status=$_rideStatus',
+    );
+    _logRideFlow('rider moved to searching rideId=$rideId');
+    try {
+      _startRiderChatListener(rideId);
+      _startCallListener(rideId);
+      _scheduleRideSearchTimeout(
+        rideId: rideId,
+        rideData: rideData,
+      );
+      listenToRide(rideId);
+      _logRideFlow('[RIDER_LISTENER_ATTACHED] rideId=$rideId');
+    } catch (error, stackTrace) {
+      _logRideFlow(
+        'REQUEST RIDE local attach failed rideId=$rideId error=$error',
+      );
+      debugPrintStack(
+        label: '[RiderRTDB] REQUEST RIDE local attach stack',
+        stackTrace: stackTrace,
       );
     }
   }
@@ -6363,6 +6401,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         throw StateError('missing_ride_id_in_create_response');
       }
       _pendingRideRequestSubmissionId = rideId;
+      var movedToSearching = false;
       Map<String, dynamic> committedRideData;
       if (resumedExistingActiveTrip) {
         committedRideData = await _awaitRideSnapshotForActiveTripResume(rideId);
@@ -6408,23 +6447,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             .toLowerCase()
             .replaceAll(RegExp(r'[\s-]+'), '_');
         if (pmNorm == 'bank_transfer') {
-          final bankOk = await _registerBankTransferAndPoll(rideId);
-          if (!bankOk) {
-            _logRideFlow('RIDER_BANK_REGISTRATION_ABORT rideId=$rideId');
-            try {
-              await _rideCloud.cancelRideRequest(
-                rideId: rideId,
-                cancelReason: 'bank_transfer_registration_failed',
+          _enterSearchingStateAfterCreate(
+            rideId: rideId,
+            rideData: committedRideData,
+          );
+          movedToSearching = true;
+          _showSnackBar(RiderTripStatusMessages.searchingForDriver);
+          unawaited(
+            _registerBankTransferAndPoll(rideId).then((bool bankOk) {
+              if (!bankOk) {
+                _logRideFlow(
+                  'RIDER_BANK_REFERENCE_REGISTRATION_FAILED_NON_BLOCKING rideId=$rideId',
+                );
+              }
+            }).catchError((Object error) {
+              _logRideFlow(
+                'RIDER_BANK_REFERENCE_REGISTRATION_ERROR_NON_BLOCKING rideId=$rideId error=$error',
               );
-            } catch (e) {
-              _logRideFlow('cancel after bank registration fail error=$e');
-            }
-            _clearRideSearchTimeout(reason: 'payment_failed');
-            _pendingRideRequestSubmissionId = null;
-            _showSnackBar('Could not set up bank transfer. Trip request cancelled.');
-            await _resetRideState(clearDestination: true);
-            return;
-          }
+            }),
+          );
         } else {
           final paidOk = await _runFlutterwaveHostedCheckoutFlow(
             rideId: rideId,
@@ -6446,22 +6487,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             await _resetRideState(clearDestination: true);
             return;
           }
+          final postPaySnap = await _rideRequestsRef.child(rideId).get().timeout(
+                const Duration(seconds: 18),
+              );
+          final postParsed = _asStringDynamicMap(postPaySnap.value);
+          if (postParsed != null) {
+            committedRideData = postParsed;
+          }
+          await _syncRideOperationalViews(
+            rideId: rideId,
+            rideData: Map<String, dynamic>.from(committedRideData),
+            lastEvent: 'rider_payment_verified',
+          );
         }
-        final postPaySnap = await _rideRequestsRef.child(rideId).get().timeout(
-              const Duration(seconds: 18),
-            );
-        final postParsed = _asStringDynamicMap(postPaySnap.value);
-        if (postParsed != null) {
-          committedRideData = postParsed;
-        }
-        await _syncRideOperationalViews(
-          rideId: rideId,
-          rideData: Map<String, dynamic>.from(committedRideData),
-          lastEvent:
-              pmNorm == 'bank_transfer'
-                  ? 'rider_bank_transfer_registered'
-                  : 'rider_payment_verified',
-        );
       }
       if (_rideRequestUserAborted) {
         _logRideFlow(
@@ -6539,52 +6577,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         );
       }
 
-      if (mounted) {
-        setState(() {
-          _currentRideId = rideId;
-          _pendingRideRequestSubmissionId = null;
-          _currentRideSnapshot = Map<String, dynamic>.from(
-            committedRideData,
-          );
-          _rideStatus = 'searching';
-          _searchingDriver = true;
-          _riderUnreadChatCount = 0;
-          _isRiderChatOpen = false;
-        });
-      } else {
-        _currentRideId = rideId;
-        _pendingRideRequestSubmissionId = null;
-        _currentRideSnapshot = Map<String, dynamic>.from(
-          committedRideData,
-        );
-        _rideStatus = 'searching';
-        _searchingDriver = true;
-        _riderUnreadChatCount = 0;
-        _isRiderChatOpen = false;
-      }
-      _logRideFlow(
-        'REQUEST RIDE state transition after request rideId=$rideId status=$_rideStatus',
-      );
-      _logRideFlow('rider moved to searching rideId=$rideId');
-
-      try {
-        _startRiderChatListener(rideId);
-        _startCallListener(rideId);
-        _scheduleRideSearchTimeout(
+      if (!movedToSearching) {
+        _enterSearchingStateAfterCreate(
           rideId: rideId,
           rideData: committedRideData,
         );
-        listenToRide(rideId);
-      } catch (error, stackTrace) {
-        _logRideFlow(
-          'REQUEST RIDE local attach failed rideId=$rideId error=$error',
-        );
-        debugPrintStack(
-          label: '[RiderRTDB] REQUEST RIDE local attach stack',
-          stackTrace: stackTrace,
-        );
+        _showSnackBar(RiderTripStatusMessages.searchingForDriver);
       }
-      _showSnackBar(RiderTripStatusMessages.searchingForDriver);
     } catch (error, stackTrace) {
       if (_rideRequestUserAborted) {
         _logRideFlow(
@@ -6762,6 +6761,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _activeRideListenerRideId = rideId;
 
     _logRideFlow('ride listener attached rideId=$rideId');
+    _logRideFlow('[RIDER_LISTENER_ATTACHED] rideId=$rideId');
 
     final rideRef = _rideRequestsRef.child(rideId);
     _rideListener = rideRef.onValue.listen(
