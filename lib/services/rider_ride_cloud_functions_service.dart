@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
@@ -20,6 +22,8 @@ class RiderRideCloudFunctionsService {
   }
 
   final FirebaseFunctions _functions;
+  static const Duration _kCallableTimeout = Duration(seconds: 15);
+  static const int _kMaxAttempts = 2;
 
   Future<Map<String, dynamic>> _call(
     String name,
@@ -29,31 +33,60 @@ class RiderRideCloudFunctionsService {
     if (user != null) {
       await user.getIdToken(true);
     }
-    final callable = _functions.httpsCallable(name);
-    if (kDebugMode) {
-      debugPrint(
-        '[RIDER_CALLABLE] start name=$name region=us-central1 '
-        'project=${_functions.app.options.projectId} payload=$payload',
-      );
-    }
+    final callable = _functions.httpsCallable(
+      name,
+      options: HttpsCallableOptions(timeout: _kCallableTimeout),
+    );
+    debugPrint(
+      'API_REQUEST_START name=$name region=us-central1 '
+      'project=${_functions.app.options.projectId} timeout_ms=${_kCallableTimeout.inMilliseconds}',
+    );
     dynamic result;
-    try {
-      result = await callable.call(payload);
-    } on FirebaseFunctionsException catch (error) {
-      if (kDebugMode) {
-        debugPrint(
-          '[RIDER_CALLABLE] fail name=$name code=${error.code} '
-          'message=${error.message} details=${error.details}',
+    Object? lastError;
+    for (var attempt = 1; attempt <= _kMaxAttempts; attempt++) {
+      try {
+        result = await callable.call(payload).timeout(_kCallableTimeout);
+        break;
+      } on TimeoutException catch (error) {
+        lastError = TimeoutException(
+          'Request timed out while contacting backend.',
+          _kCallableTimeout,
         );
+        debugPrint(
+          'API_TIMEOUT name=$name region=us-central1 timeout_ms=${_kCallableTimeout.inMilliseconds} '
+          'attempt=$attempt error=$error',
+        );
+      } on FirebaseFunctionsException catch (error) {
+        lastError = error;
+        final code = error.code.trim().toLowerCase();
+        final isUnreachable =
+            code == 'unavailable' ||
+            code == 'deadline-exceeded' ||
+            code == 'internal';
+        if (isUnreachable) {
+          debugPrint(
+            'FUNCTION_UNREACHABLE name=$name code=${error.code} message=${error.message}',
+          );
+        }
+        debugPrint(
+          'API_REQUEST_FAIL name=$name code=${error.code} message=${error.message} details=${error.details} attempt=$attempt',
+        );
+        if (!isUnreachable) {
+          rethrow;
+        }
+      } catch (error) {
+        lastError = error;
+        debugPrint('API_REQUEST_FAIL name=$name error=$error attempt=$attempt');
       }
-      rethrow;
-    } catch (error) {
-      if (kDebugMode) {
-        debugPrint('[RIDER_CALLABLE] fail name=$name error=$error');
+      if (attempt < _kMaxAttempts) {
+        await Future<void>.delayed(const Duration(milliseconds: 450));
       }
-      rethrow;
+    }
+    if (result == null && lastError != null) {
+      throw lastError;
     }
     final data = result.data;
+    debugPrint('API_REQUEST_SUCCESS name=$name');
     if (data is Map) {
       return Map<String, dynamic>.from(data);
     }

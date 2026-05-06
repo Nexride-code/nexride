@@ -421,6 +421,28 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     safeShowSnackBar(context, message);
   }
 
+  void _showRideRequestRetrySnackBar(String message) {
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) {
+      return;
+    }
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: SnackBarAction(
+          label: 'RETRY',
+          onPressed: () {
+            unawaited(handlePrimaryRideAction());
+          },
+        ),
+      ),
+    );
+  }
+
   void _setStateSafely(VoidCallback apply) {
     if (!mounted) {
       return;
@@ -1274,11 +1296,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
       if (i % 3 == 2) {
         try {
+          debugPrint('PAYMENT_VERIFY_START rideId=$rideId tx_ref=$txRef');
           await _rideCloud.verifyFlutterwavePayment(
             rideId: rideId,
             reference: txRef,
           );
+          debugPrint('PAYMENT_VERIFY_OK rideId=$rideId tx_ref=$txRef');
         } catch (_) {
+          debugPrint('PAYMENT_VERIFY_FAIL rideId=$rideId tx_ref=$txRef');
           /* network — keep polling */
         }
       }
@@ -1732,6 +1757,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   String _rideRequestErrorMessage(Object error) {
+    if (error is FirebaseFunctionsException) {
+      final rawCode = error.code.trim().toLowerCase();
+      final backendMessage = _firstNonEmptyText(<dynamic>[
+        error.message,
+        error.details is Map ? (error.details as Map)['message'] : null,
+        error.details,
+        rawCode,
+      ]);
+      if (rawCode == 'unavailable' ||
+          rawCode == 'deadline-exceeded' ||
+          rawCode == 'internal') {
+        return 'NexRide backend is temporarily unreachable. Please try again.';
+      }
+      if (backendMessage.isNotEmpty && backendMessage.length <= 180) {
+        return backendMessage;
+      }
+      return 'Ride request failed ($rawCode). Please try again.';
+    }
     if (isPermissionDeniedError(error)) {
       if (kDebugMode) {
         rtdbFlowLog(
@@ -6819,7 +6862,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       _clearRideSearchTimeout(reason: 'create_request_failed');
       _pendingRideRequestSubmissionId = null;
-      _showSnackBar(_rideRequestErrorMessage(error));
+      _showRideRequestRetrySnackBar(_rideRequestErrorMessage(error));
       if (mounted) {
         setState(() {
           _rideStatus = 'idle';
@@ -6891,6 +6934,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _logRideFlow(
       'ACTIVE_TRIP_CLEARED reason=$reason uid=${uid.isEmpty ? 'none' : uid} rideId=${normalizedRideId.isEmpty ? 'none' : normalizedRideId} '
       'clearRideRequestNode=$clearRideRequestNode',
+    );
+    _logRideFlow(
+      'ACTIVE_TRIP_CLEANED reason=$reason uid=${uid.isEmpty ? 'none' : uid} rideId=${normalizedRideId.isEmpty ? 'none' : normalizedRideId}',
     );
     if (uid.isNotEmpty) {
       try {

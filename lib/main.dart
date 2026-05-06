@@ -23,8 +23,10 @@ void main() async {
     database.setPersistenceCacheSizeBytes(10000000);
     startupState = const AppStartupState(firebaseReady: true);
     debugPrint('FIREBASE_INIT_OK');
+    debugPrint('SPLASH_INIT_OK');
   } catch (error) {
     debugPrint('FIREBASE_INIT_FAIL error=$error');
+    debugPrint('SPLASH_INIT_FAIL error=$error');
     startupState = const AppStartupState(
       firebaseReady: false,
       safeErrorMessage:

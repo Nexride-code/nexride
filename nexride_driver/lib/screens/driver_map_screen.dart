@@ -10264,6 +10264,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           );
         } else {
           _logRideReq('[DRIVER_DISCOVERY_ACCEPT] rideId=$rideId');
+          _logRideReq('DRIVER_DISCOVERY_FOUND rideId=$rideId');
           debugPrint(
             '[DRIVER_REQUEST_RECEIVED] rideId=$rideId '
             'market=${_rideMarketFromData(rideData) ?? ''}',
