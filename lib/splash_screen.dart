@@ -164,31 +164,39 @@ class _SplashScreenState extends State<SplashScreen> {
         action: () => _fetchExistingUserProfile(signedInUser),
       );
       existingUser = profileResult.value;
-      _logStartup('PROFILE_LOAD_OK riderId=${signedInUser.uid}');
-
       if (!profileResult.succeeded) {
-        nextScreen = const RiderLogin();
-        _setStartupState(
-          message: 'Unable to load your profile right now. Please sign in again.',
-        );
-        _logStartup('ROUTE_DECISION target=login reason=profile_load_failed');
         _logStartup(
-          'profile fetch fallback enabled riderId=${signedInUser.uid}',
+          'PROFILE_FETCH_SOFT_FAIL riderId=${signedInUser.uid} — continuing home',
         );
-        return;
+      } else {
+        _logStartup('PROFILE_LOAD_OK riderId=${signedInUser.uid}');
       }
 
-      _logStartup('ROUTE_DECISION target=home reason=authenticated_profile_ok');
+      _logStartup('ROUTE_DECISION target=home reason=authenticated_signed_in');
       shouldStartBackgroundBootstrap = true;
       _logStartup('bootstrap deferred to background riderId=${signedInUser.uid}');
-    } catch (error) {
+    } catch (error, stackTrace) {
       _logStartup('startup route failed error=$error');
-      nextScreen = const RiderLogin();
-      _setStartupState(
-        message: 'Unable to start NexRide right now. Please sign in again.',
+      debugPrintStack(
+        label: '[Splash] startup route failure',
+        stackTrace: stackTrace,
       );
-      _logStartup('ROUTE_DECISION target=login reason=startup_exception');
-      shouldStartBackgroundBootstrap = false;
+      final recoveredUser = authenticatedUser ?? _lastKnownUser;
+      if (recoveredUser != null) {
+        authenticatedUser ??= recoveredUser;
+        nextScreen = const RideTypeScreen();
+        shouldStartBackgroundBootstrap = true;
+        _logStartup(
+          'ROUTE_DECISION target=home reason=startup_exception_signed_in_soft',
+        );
+      } else {
+        nextScreen = const RiderLogin();
+        _setStartupState(
+          message: 'Unable to start NexRide right now. Please sign in again.',
+        );
+        _logStartup('ROUTE_DECISION target=login reason=startup_exception');
+        shouldStartBackgroundBootstrap = false;
+      }
     } finally {
       _startupInProgress = false;
 

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'config/rider_app_config.dart';
 import 'rider_verification_submission_screen.dart';
 import 'services/rider_trust_bootstrap_service.dart';
+import 'support/friendly_firebase_errors.dart';
 import 'support/rider_trust_support.dart';
 import 'support/startup_rtdb_support.dart';
 
@@ -111,6 +112,7 @@ class _RiderVerificationScreenState extends State<RiderVerificationScreen> {
       setState(() {
         _loading = false;
       });
+      _showMessage(friendlyFirebaseError(error));
     }
   }
 

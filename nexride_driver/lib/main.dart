@@ -103,6 +103,7 @@ void _configureGlobalErrorHandling({
   required Uri startupUri,
 }) {
   FlutterError.onError = (FlutterErrorDetails details) {
+    debugPrint('[FLUTTER_ERROR] ${details.exception}\n${details.stack}');
     FlutterError.presentError(details);
     _logStartup('FlutterError caught: ${details.exception}');
     if (details.stack != null) {
@@ -119,6 +120,7 @@ void _configureGlobalErrorHandling({
   };
 
   PlatformDispatcher.instance.onError = (Object error, StackTrace stackTrace) {
+    debugPrint('[PLATFORM_ERROR] $error\n$stackTrace');
     _logStartup('PlatformDispatcher caught: $error');
     debugPrintStack(
       label: '[Startup] PlatformDispatcher stack',

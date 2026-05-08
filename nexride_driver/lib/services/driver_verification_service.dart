@@ -1,6 +1,7 @@
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 
 import '../support/driver_profile_support.dart';
+import '../support/driver_kyc_gate_support.dart';
 import '../support/realtime_database_error_support.dart';
 import 'driver_verification_upload_service.dart';
 import 'verification_provider_adapters.dart';
@@ -63,6 +64,12 @@ class DriverVerificationWorkflowService {
       'drivers/$driverId/updated_at': rtdb.ServerValue.timestamp,
       'driver_documents/$driverId/${document.key}': bundle.driverDocumentRecord,
       'driver_verifications/$driverId': bundle.aggregateVerificationRecord,
+      ...driverKycStatusPatchForUserNode(
+        driverId: driverId,
+        normalizedVerification: normalizedDriverVerification(
+          bundle.profileVerification,
+        ),
+      ),
     };
 
     final adminMirrorUpdates = <String, dynamic>{};

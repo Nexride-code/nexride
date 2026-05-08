@@ -1,0 +1,17 @@
+2026-05-07T08:14:02.029926Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141641788_-Os0V2kvlUFPNc4Xbwld reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}
+
+2026-05-07T08:15:39.785424Z I initiateflutterwavecardlinkintent: 
+2026-05-07T08:15:39.798744Z D initiateflutterwavecardlinkintent: {"message":"Callable request verification passed","verifications":{"app":"MISSING","auth":"VALID"}}
+2026-05-07T08:15:39.957001Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141739799_-Os0VQgG2WE4VZsWsbSM reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}
+
+2026-05-07T08:16:16.312553Z I initiateflutterwavecardlinkintent: 
+2026-05-07T08:16:16.320739Z D initiateflutterwavecardlinkintent: {"message":"Callable request verification passed","verifications":{"auth":"VALID","app":"MISSING"}}
+2026-05-07T08:16:16.483980Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141776321_-Os0VZavcgAEg2oKvoUR reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}
+
+2026-05-07T08:15:39.957001Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141739799_-Os0VQgG2WE4VZsWsbSM reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}
+
+2026-05-07T08:16:16.312553Z I initiateflutterwavecardlinkintent: 
+2026-05-07T08:16:16.320739Z D initiateflutterwavecardlinkintent: {"message":"Callable request verification passed","verifications":{"auth":"VALID","app":"MISSING"}}
+2026-05-07T08:16:16.483980Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141776321_-Os0VZavcgAEg2oKvoUR reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}
+
+2026-05-07T08:16:16.483980Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141776321_-Os0VZavcgAEg2oKvoUR reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}

@@ -7,6 +7,7 @@ import 'map_screen.dart';
 import 'payment_method_entry_screen.dart';
 import 'services/rider_active_trip_session_service.dart';
 import 'services/payment_methods_service.dart';
+import 'support/friendly_firebase_errors.dart';
 import 'support/payment_method_support.dart';
 
 class PaymentMethodsScreen extends StatefulWidget {
@@ -67,7 +68,14 @@ class _PaymentMethodsScreenState extends State<PaymentMethodsScreen> {
         _loading = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not load payment methods: $error')),
+        SnackBar(
+          content: Text(
+            friendlyFirebaseError(
+              error,
+              debugLabel: 'paymentMethods.load',
+            ),
+          ),
+        ),
       );
     }
   }

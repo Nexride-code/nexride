@@ -25,5 +25,22 @@ service firebase.storage {
       allow write: if isSignedIn() && isImageUpload();
       allow read: if isSignedIn();
     }
+
+    match /driver_documents/{uid}/{fileName} {
+      allow write: if isSignedIn()
+        && request.auth.uid == uid
+        && isImageUpload();
+      allow read: if isSignedIn();
+    }
+
+    // Bank transfer receipts: rider uploads under their uid; admin may read via token URL or client with admin claim.
+    match /receipts/{uid}/{rideId}/{fileName} {
+      allow write: if isSignedIn()
+        && request.auth.uid == uid
+        && fileName == 'bank_transfer_receipt.jpg'
+        && isImageUpload();
+      allow read: if isSignedIn()
+        && (request.auth.uid == uid || request.auth.token.admin == true);
+    }
   }
 }

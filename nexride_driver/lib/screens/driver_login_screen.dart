@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../support/driver_profile_bootstrap_support.dart';
 import '../support/driver_profile_support.dart';
+import '../support/friendly_firebase_errors.dart';
 import '../support/production_user_messages.dart';
 import '../support/realtime_database_error_support.dart';
 import '../trip_sync/trip_state_machine.dart';
@@ -226,7 +227,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
           showMessage('Invalid email');
           break;
         default:
-          showMessage(error.message ?? 'Login error');
+          showMessage(friendlyFirebaseAuthError(error));
       }
     } catch (error, stackTrace) {
       debugPrint('[DriverLogin] unexpected error $error');

@@ -64,7 +64,15 @@
     ],
     "rewrites": [
       {
+        "source": "/pay/card-link-complete",
+        "destination": "/pay/card-link-complete.html"
+      },
+      {
         "source": "/admin",
+        "destination": "/admin/index.html"
+      },
+      {
+        "source": "/admin/",
         "destination": "/admin/index.html"
       },
       {
@@ -82,6 +90,44 @@
       {
         "source": "/ride",
         "destination": "/track.html"
+      }
+    ],
+    "headers": [
+      {
+        "source": "/admin/index.html",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/admin/flutter_bootstrap.js",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/admin/flutter.js",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/admin/flutter_service_worker.js",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, max-age=0, must-revalidate"
+          }
+        ]
       }
     ]
   },

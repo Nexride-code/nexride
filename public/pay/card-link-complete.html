@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NexRide — Card Setup</title>
+  <style>
+    body { font-family: sans-serif; background: #fff8f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: white; border-radius: 16px; padding: 40px 32px; max-width: 360px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .icon { font-size: 48px; margin-bottom: 16px; }
+    h1 { color: #b8860b; font-size: 22px; margin-bottom: 12px; }
+    p { color: #555; font-size: 15px; line-height: 1.5; margin-bottom: 24px; }
+    .btn { background: #b8860b; color: white; border: none; border-radius: 12px; padding: 14px 32px; font-size: 16px; font-weight: bold; cursor: pointer; text-decoration: none; display: inline-block; }
+  </style>
+</head>
+<body>
+  <div class='card'>
+    <div class='icon'>✅</div>
+    <h1 id='title'>Card Setup Complete</h1>
+    <p id='message'>Your card has been securely saved. Return to the NexRide app to continue.</p>
+    <a class='btn' id='return-btn' href='nexride://card-link-complete'>Return to App</a>
+    <p style='font-size:13px;color:#aaa;margin-top:16px;'>You can close this tab if the app doesn't open automatically.</p>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const txRef = params.get('tx_ref') || '';
+    const transactionId = params.get('transaction_id') || '';
+    const status = (params.get('status') || '').toLowerCase();
+    const deepLink = new URL('nexride://card-link-complete');
+    if (txRef) deepLink.searchParams.set('tx_ref', txRef);
+    if (transactionId) deepLink.searchParams.set('transaction_id', transactionId);
+    const returnBtn = document.getElementById('return-btn');
+    const title = document.getElementById('title');
+    const message = document.getElementById('message');
+    if (status === 'successful') {
+      title.textContent = 'Card Setup Complete';
+      message.textContent = 'Your card has been securely saved. Return to the NexRide app to continue.';
+    } else {
+      title.textContent = 'Card Verification Pending';
+      message.textContent = 'We are still checking your card setup status. Return to NexRide to finish.';
+    }
+    returnBtn.setAttribute('href', deepLink.toString());
+    setTimeout(() => { window.location.href = deepLink.toString(); }, 1000);
+  </script>
+</body>
+</html>

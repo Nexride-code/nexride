@@ -4,6 +4,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'ride_type_screen.dart';
 import 'rider_signup.dart';
 import 'services/rider_trust_bootstrap_service.dart';
+import 'support/friendly_firebase_errors.dart';
 import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
 
@@ -152,7 +153,7 @@ class _RiderLoginState extends State<RiderLogin> {
       } else if (e.code == 'wrong-password') {
         showMessage('Incorrect password.');
       } else {
-        showMessage(e.message ?? 'Sign-in failed. Try again.');
+        showMessage(friendlyFirebaseAuthError(e));
       }
     } catch (e, stackTrace) {
       debugPrint('[RiderLogin] GENERAL ERROR: $e');

@@ -75,6 +75,18 @@ const List<DriverRequiredDocument> kDriverRequiredDocuments =
     numberLabel: 'NIN',
   ),
   DriverRequiredDocument(
+    key: 'bvn',
+    label: 'BVN',
+    description:
+        'Bank Verification Number — used for Nigerian compliance review and future automated checks.',
+    icon: Icons.account_balance_outlined,
+    referenceHint: 'BVN acknowledgment or supporting document',
+    providerHint: 'Identity review',
+    checkTypes: <String>['bvn_verification'],
+    requiredForServices: kDriverServiceTypes,
+    numberLabel: 'BVN',
+  ),
+  DriverRequiredDocument(
     key: 'vehicle_documents',
     label: 'Vehicle Documents',
     description:

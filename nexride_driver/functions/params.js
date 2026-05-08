@@ -12,6 +12,8 @@ const { defineSecret, defineString } = require("firebase-functions/params");
 const flutterwaveSecretKey = defineSecret("FLUTTERWAVE_SECRET_KEY");
 /** Must match Flutterwave dashboard webhook secret (`verif-hash` header). */
 const flutterwaveWebhookSecret = defineSecret("FLUTTERWAVE_WEBHOOK_SECRET");
+const agoraAppIdSecret = defineSecret("AGORA_APP_ID");
+const agoraAppCertificateSecret = defineSecret("AGORA_APP_CERTIFICATE");
 
 const nexridePlatformFeeNgn = defineString("NEXRIDE_PLATFORM_FEE_NGN", {
   default: "30",
@@ -36,6 +38,8 @@ function platformFeeNgn() {
 module.exports = {
   flutterwaveSecretKey,
   flutterwaveWebhookSecret,
+  agoraAppIdSecret,
+  agoraAppCertificateSecret,
   nexridePlatformFeeNgn,
   flutterwavePublicKey,
   REGION,

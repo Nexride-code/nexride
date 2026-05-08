@@ -21,6 +21,7 @@ import 'services/rider_trust_rules_service.dart';
 import 'services/trip_safety_service.dart';
 import 'service_type.dart';
 import 'support/rider_fare_support.dart';
+import 'support/friendly_firebase_errors.dart';
 import 'support/rtdb_flow_debug_log.dart';
 import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
@@ -446,8 +447,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       email: user?.email,
     );
     if (init['success'] != true) {
+      debugPrint(
+        '[DispatchPayment] init failed raw=${riderDeliveryCallableReason(init)}',
+      );
       _showMessage(
-        'Could not start payment: ${riderDeliveryCallableReason(init)}',
+        friendlyCallableReason(
+          init,
+          fallback: 'Could not start payment. Please try again.',
+        ),
       );
       return null;
     }
@@ -565,6 +572,8 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         return 'The delivery fare could not be calculated. Try again.';
       case 'unsupported_payment_method':
         return 'This payment method is not available for delivery yet.';
+      case 'payment_failed':
+        return 'Payment was not completed. You can try sending your dispatch again.';
       default:
         return 'Unable to send your dispatch request right now.';
     }
@@ -1389,7 +1398,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       }
       final message = error is StateError
           ? _deliveryCreateUserMessage(error.message)
-          : 'Unable to send your dispatch request right now.';
+          : friendlyFirebaseError(error, debugLabel: 'dispatchSubmit');
       _showMessage(message);
     } finally {
       if (mounted) {

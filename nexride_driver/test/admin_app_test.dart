@@ -257,6 +257,42 @@ class _FakeAdminDataService extends AdminDataService {
     required String reviewedBy,
     String note = '',
   }) async {}
+
+  @override
+  Future<void> reviewSubscriptionRequest({
+    required AdminSubscriptionRecord subscription,
+    required bool approve,
+  }) async {}
+
+  @override
+  Future<String> fetchSubscriptionProofUrl({required String driverId}) async =>
+      'https://example.test/subscription-proof';
+
+  @override
+  Future<void> adminSuspendAccount({
+    required String uid,
+    required String role,
+    required String reason,
+  }) async {}
+
+  @override
+  Future<void> adminWarnAccount({
+    required String uid,
+    required String role,
+    required String reason,
+    String message = '',
+  }) async {}
+
+  @override
+  Future<void> adminDeleteAccount({
+    required String uid,
+    required String role,
+  }) async {}
+
+  @override
+  Future<void> adminApproveDriverVerification({
+    required String driverId,
+  }) async {}
 }
 
 final AdminPanelSnapshot _emptySnapshot = AdminPanelSnapshot(

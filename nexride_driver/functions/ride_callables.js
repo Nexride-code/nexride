@@ -17,12 +17,12 @@ const {
 } = require("./driver_dispatch_gates");
 const { ensureRideChatThread } = require("./ride_chat_admin");
 const { sendPushToUser } = require("./push_notifications");
-const { resolveDriverMonetization } = require("./driver_monetization");
+const { resolveDriverMonetization, resolveCommissionPolicy } = require("./driver_monetization");
 
 const TRIP_STATE = {
   searching: "searching",
-  /** Post-accept canonical (production backend-controlled match). */
-  accepted: "accepted",
+  /** Post-accept canonical — always "driver_assigned" so Dart TripStateMachine resolves correctly. */
+  accepted: "driver_assigned",
   driver_assigned: "driver_assigned",
   driver_arriving: "driver_arriving",
   arrived: "arrived",
@@ -200,17 +200,55 @@ async function applyDriverAcceptAdminMerge(rideRef, rideId, driverId, now) {
   if (expiresAt > 0 && now >= expiresAt) {
     return { ok: false, reason: "expired" };
   }
-  await rideRef.update({
-    driver_id: driverId,
-    matched_driver_id: driverId,
-    accepted_driver_id: driverId,
-    status: "accepted",
-    trip_state: TRIP_STATE.accepted,
-    accepted_at: ServerValue.TIMESTAMP,
-    updated_at: now,
+  // Use a transaction here too — not a plain update — so two drivers that both
+  // fall through to this path cannot both win the slot.
+  let mergeTxReason = "unknown";
+  const mergeTx = await rideRef.transaction((current) => {
+    if (!current || typeof current !== "object") {
+      mergeTxReason = "tx_empty_current";
+      return;
+    }
+    if (!paymentAllowsDispatch(current)) {
+      mergeTxReason = "payment_not_verified";
+      return;
+    }
+    const ts2 = String(current.trip_state ?? "").trim().toLowerCase();
+    const st2 = String(current.status ?? "").trim().toLowerCase();
+    const assigned2 = canonicalAssignedDriverId(current);
+    const alreadyMine2 =
+      assigned2 === driverId &&
+      (ts2 === TRIP_STATE.driver_assigned || ts2 === "driver_accepted" || st2 === "accepted");
+    if (alreadyMine2) {
+      return current;
+    }
+    if (assigned2 && assigned2 !== driverId) {
+      mergeTxReason = "driver_already_set";
+      return;
+    }
+    if (!isOpenPoolRide(current) && !ACCEPTABLE_OPEN_STATUS.has(st2)) {
+      mergeTxReason = "status_not_open";
+      return;
+    }
+    const exp2 = Number(current.expires_at ?? current.request_expires_at ?? 0) || 0;
+    if (exp2 > 0 && now >= exp2) {
+      mergeTxReason = "expired";
+      return;
+    }
+    return {
+      ...current,
+      driver_id: driverId,
+      matched_driver_id: driverId,
+      accepted_driver_id: driverId,
+      status: "accepted",
+      trip_state: TRIP_STATE.driver_assigned,
+      accepted_at: ServerValue.TIMESTAMP,
+      updated_at: now,
+    };
   });
-  const postSnap = await rideRef.get();
-  const post = rideDocFromSnapshot(postSnap) ?? cur;
+  if (!mergeTx.committed) {
+    return { ok: false, reason: mergeTxReason };
+  }
+  const post = rideDocFromSnapshot(mergeTx.snapshot) ?? cur;
   return { ok: true, finalRide: post, idempotent: false };
 }
 
@@ -293,31 +331,44 @@ function isOpenPoolRide(ride) {
 }
 
 /**
- * Driver matching / fanout / accept only after Flutterwave (or equivalent) charge is verified server-side.
- * Cash and unverified card are not permitted for dispatch.
+ * Driver discovery / fanout / accept eligibility.
+ * Card: prepaid `paid`, or webhook/callable `verified`, with Flutterwave txn id when applicable.
+ * Bank transfer: rider request is searchable while NexRide confirms the transfer offline.
  */
 function paymentAllowsDispatch(ride) {
   if (!ride || typeof ride !== "object") {
     return false;
   }
+  const pmRaw = ride.payment_method ?? ride.paymentMethod ?? "";
+  const pm = String(pmRaw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
   const ps = String(ride.payment_status ?? ride.paymentStatus ?? "")
     .trim()
     .toLowerCase();
-  if (ps !== "verified") {
-    return false;
+  if (pm === "bank_transfer") {
+    return (
+      ps === "pending_manual_confirmation" ||
+      ps === "pending_review" ||
+      ps === "pending"
+    );
   }
   const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
-  return Boolean(ptid);
+  if (!ptid) {
+    return false;
+  }
+  return ps === "verified" || ps === "paid";
 }
 
-/** True when ride has a recorded verified online payment (required before trip completion). */
+/** True when ride has settled online payment credentials (trip completion / wallet credit). */
 function rideHasVerifiedOnlinePayment(ride) {
   if (!ride || typeof ride !== "object") return false;
   const ps = String(ride.payment_status ?? ride.paymentStatus ?? "")
     .trim()
     .toLowerCase();
   const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
-  return ps === "verified" && Boolean(ptid);
+  return (ps === "verified" || ps === "paid") && Boolean(ptid);
 }
 
 const ACCEPTABLE_OPEN_STATUS = new Set([
@@ -873,7 +924,7 @@ async function setActiveTripPointers(db, rideId, riderId, driverId, rideSummary)
       driver_id: d,
       status: "active",
       updated_at: now,
-      trip_state: rideSummary?.trip_state ?? TRIP_STATE.accepted,
+      trip_state: rideSummary?.trip_state ?? TRIP_STATE.driver_assigned,
       market_pool: canonicalDispatchMarket(
         rideSummary?.market_pool ?? rideSummary?.market ?? "",
       ) || null,
@@ -886,7 +937,7 @@ async function setActiveTripPointers(db, rideId, riderId, driverId, rideSummary)
     },
     [`rider_active_trip/${r}`]: {
       ride_id: rid,
-      phase: "accepted",
+      phase: "driver_assigned",
       updated_at: now,
     },
     [`driver_active_ride/${d}`]: { ride_id: rid, updated_at: now },
@@ -978,9 +1029,6 @@ async function createRideRequest(data, context, db) {
     return { success: false, reason: "rider_profile_required" };
   }
 
-  const marketRaw = data?.market ?? data?.city ?? "";
-  const market = canonicalDispatchMarket(marketRaw) || "lagos";
-
   const supersede = await supersedePriorOpenRideForRider(db, riderId);
   if (!supersede.ok) {
     console.log("RIDER_CREATE_FAIL", riderId, supersede.reason || "rider_active_trip");
@@ -991,8 +1039,61 @@ async function createRideRequest(data, context, db) {
     };
   }
 
-  const pickup = data?.pickup;
-  const dropoff = data?.dropoff;
+  const prepaidFwRef = normUid(data?.prepaid_flutterwave_ref ?? data?.prepaidFlutterwaveRef ?? "");
+  let intentMerged = null;
+  /** @type {string} */
+  let prepaidTransactionId = "";
+  if (prepaidFwRef) {
+    const ptxSnap = await db.ref(`payment_transactions/${prepaidFwRef}`).get();
+    const ptx = ptxSnap.val();
+    if (!ptx || typeof ptx !== "object") {
+      console.log("RIDER_CREATE_FAIL", riderId, "prepaid_transaction_missing");
+      return { success: false, reason: "prepaid_transaction_missing" };
+    }
+    if (normUid(ptx.rider_id) !== riderId) {
+      console.log("RIDER_CREATE_FAIL", riderId, "prepaid_forbidden");
+      return { success: false, reason: "prepaid_forbidden" };
+    }
+    if (String(ptx.consumed_ride_id ?? "").trim()) {
+      console.log("RIDER_CREATE_FAIL", riderId, "prepaid_already_used");
+      return { success: false, reason: "prepaid_already_used" };
+    }
+    if (String(ptx.intent_abandoned_at ?? "").trim()) {
+      console.log("RIDER_CREATE_FAIL", riderId, "prepaid_intent_abandoned");
+      return { success: false, reason: "prepaid_intent_abandoned" };
+    }
+    if (!ptx.ride_intent || typeof ptx.ride_intent !== "object") {
+      console.log("RIDER_CREATE_FAIL", riderId, "prepaid_invalid_intent");
+      return { success: false, reason: "prepaid_invalid_intent" };
+    }
+    if (ptx.verified !== true) {
+      console.log("RIDER_CREATE_FAIL", riderId, "prepaid_not_verified");
+      return { success: false, reason: "prepaid_not_verified" };
+    }
+    prepaidTransactionId = String(ptx.transaction_id ?? ptx.flutterwave_transaction_id ?? "").trim();
+    if (!prepaidTransactionId) {
+      console.log("RIDER_CREATE_FAIL", riderId, "prepaid_missing_txn_id");
+      return { success: false, reason: "prepaid_missing_txn_id" };
+    }
+    intentMerged = ptx.ride_intent;
+  }
+
+  const marketRaw =
+    intentMerged?.market ?? intentMerged?.city ?? data?.market ?? data?.city ?? "";
+  const market = canonicalDispatchMarket(marketRaw) || "lagos";
+
+  const pickup =
+    intentMerged && intentMerged.pickup && typeof intentMerged.pickup === "object"
+      ? intentMerged.pickup
+      : data?.pickup;
+  const dropoff =
+    intentMerged && intentMerged.dropoff && typeof intentMerged.dropoff === "object"
+      ? intentMerged.dropoff
+      : intentMerged &&
+          intentMerged.destination &&
+          typeof intentMerged.destination === "object"
+        ? intentMerged.destination
+        : data?.dropoff;
   if (!pickup || typeof pickup !== "object") {
     console.log("RIDER_CREATE_FAIL", riderId, "invalid_pickup");
     return { success: false, reason: "invalid_pickup" };
@@ -1020,7 +1121,7 @@ async function createRideRequest(data, context, db) {
     }
   }
 
-  const fare = Number(data?.fare ?? 0);
+  const fare = Number(intentMerged?.fare ?? data?.fare ?? 0);
   if (!Number.isFinite(fare) || fare <= 0) {
     console.log("RIDER_CREATE_FAIL", riderId, "invalid_fare");
     return { success: false, reason: "invalid_fare" };
@@ -1030,7 +1131,8 @@ async function createRideRequest(data, context, db) {
     return { success: false, reason: "fare_above_limit" };
   }
 
-  const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
+  const currency =
+    String(intentMerged?.currency ?? data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
   const paymentMethod = String(data?.payment_method ?? data?.paymentMethod ?? "flutterwave")
     .trim()
     .toLowerCase();
@@ -1039,13 +1141,26 @@ async function createRideRequest(data, context, db) {
     console.log("RIDER_CREATE_WARN", riderId, "unsupported_payment_method_fallback", paymentNormalized);
     paymentNormalized = "flutterwave";
   }
+  if (prepaidFwRef) {
+    paymentNormalized = "flutterwave";
+  }
 
-  const paymentStatus = paymentNormalized === "bank_transfer"
-    ? "pending_review"
-    : "pending";
+  const paymentStatus = prepaidFwRef
+    ? "paid"
+    : paymentNormalized === "bank_transfer"
+      ? "pending_manual_confirmation"
+      : "pending";
 
-  const distanceKm = Number(data?.distance_km ?? data?.distanceKm ?? 0) || 0;
-  const etaMin = Number(data?.eta_min ?? data?.etaMin ?? 0) || 0;
+  const distanceKm =
+    Number(intentMerged?.distance_km ??
+      intentMerged?.distanceKm ??
+      data?.distance_km ??
+      data?.distanceKm ??
+      0) || 0;
+  const etaMin =
+    Number(
+      intentMerged?.eta_min ?? intentMerged?.etaMin ?? data?.eta_min ?? data?.etaMin ?? 0,
+    ) || 0;
   if (!Number.isFinite(distanceKm) || distanceKm < 0 || distanceKm > 3500) {
     console.log("RIDER_CREATE_FAIL", riderId, "invalid_distance");
     return { success: false, reason: "invalid_distance" };
@@ -1096,14 +1211,24 @@ async function createRideRequest(data, context, db) {
     eta_min: etaMin,
     payment_method: paymentNormalized,
     payment_status: paymentStatus,
-    payment_reference: String(data?.payment_reference ?? data?.paymentReference ?? "").trim() || null,
+    payment_transaction_id: prepaidFwRef ? prepaidTransactionId : null,
+    customer_transaction_reference: prepaidFwRef
+      ? prepaidFwRef
+      : String(data?.customer_transaction_reference ?? data?.customerTransactionReference ?? "")
+            .trim() || null,
+    payment_reference: prepaidFwRef
+      ? prepaidFwRef
+      : String(data?.payment_reference ?? data?.paymentReference ?? "").trim() || null,
+    payment_recipient: paymentNormalized === "bank_transfer" ? "nexride" : null,
     created_at: ts,
     updated_at: ts,
     expires_at: expiresAt,
     accepted_at: null,
     completed_at: null,
     cancelled_at: null,
-    service_type: String(data?.service_type ?? data?.serviceType ?? "ride").trim(),
+    service_type: String(
+      intentMerged?.service_type ?? data?.service_type ?? data?.serviceType ?? "ride",
+    ).trim(),
   };
 
   const RIDER_CREATE_METADATA_ALLOW = new Set([
@@ -1151,7 +1276,7 @@ async function createRideRequest(data, context, db) {
     "dispatch_details",
   ]);
 
-  const md = data?.ride_metadata ?? data?.rideMetadata;
+  const md = intentMerged?.ride_metadata ?? data?.ride_metadata ?? data?.rideMetadata;
   if (md && typeof md === "object") {
     for (const [k, v] of Object.entries(md)) {
       if (!RIDER_CREATE_METADATA_ALLOW.has(k)) {
@@ -1161,11 +1286,53 @@ async function createRideRequest(data, context, db) {
     }
   }
 
+  if (prepaidFwRef) {
+    const ptRef = db.ref(`payment_transactions/${prepaidFwRef}`);
+    const ptTxn = await ptRef.transaction((cur) => {
+      if (!cur || typeof cur !== "object") {
+        return undefined;
+      }
+      if (normUid(cur.rider_id) !== riderId) {
+        return undefined;
+      }
+      if (cur.verified !== true) {
+        return undefined;
+      }
+      if (String(cur.consumed_ride_id ?? "").trim()) {
+        return undefined;
+      }
+      if (String(cur.intent_abandoned_at ?? "").trim()) {
+        return undefined;
+      }
+      return {
+        ...cur,
+        consumed_ride_id: rideId,
+        ride_id: rideId,
+        updated_at: ts,
+      };
+    });
+    if (!ptTxn.committed) {
+      console.log("RIDER_CREATE_FAIL", riderId, "prepaid_consume_tx_abort");
+      return { success: false, reason: "prepaid_already_used" };
+    }
+  }
+
   try {
     await rideRef.set(payload);
   } catch (e) {
     console.log("RIDER_CREATE_WRITE_FAIL", `path=ride_requests/${rideId}`, e?.message ?? e);
     console.log("RIDER_CREATE_WRITE_PAYLOAD", JSON.stringify(payload));
+    if (prepaidFwRef) {
+      try {
+        await db.ref(`payment_transactions/${prepaidFwRef}`).update({
+          consumed_ride_id: null,
+          ride_id: null,
+          updated_at: nowMs(),
+        });
+      } catch (rollbackErr) {
+        console.log("PREPAID_ROLLBACK_FAIL", prepaidFwRef, rollbackErr?.message ?? rollbackErr);
+      }
+    }
     return { success: false, reason: "ride_write_failed" };
   }
   try {
@@ -1196,7 +1363,8 @@ async function acceptRideRequest(data, context, db) {
   console.log("DRIVER_ACCEPT_CALL_RECEIVED");
   console.log("DRIVER_ACCEPT_PAYLOAD", acceptPayloadLogString(data));
 
-  const rideId = normRideIdFromCallableData(data);
+  try {
+    const rideId = normRideIdFromCallableData(data);
   const authUid = normUid(context.auth?.uid);
   const driverId = normDriverIdFromCallableData(data, authUid);
 
@@ -1284,6 +1452,18 @@ async function acceptRideRequest(data, context, db) {
 
   const preTrip = String(pre?.trip_state ?? "").trim().toLowerCase();
   const preStatus = String(pre?.status ?? "").trim().toLowerCase();
+  const riderNamePresent = String(pre?.rider_name ?? "").trim().length > 0;
+  const paymentMethodPresent = String(pre?.payment_method ?? "").trim().length > 0;
+  const prepaidRefPresent =
+    String(pre?.prepaid_flutterwave_ref ?? "").trim().length > 0 ||
+    String(pre?.customer_transaction_reference ?? "").trim().startsWith("nexride_");
+  console.log(
+    "DRIVER_ACCEPT_REQUIRED_FIELDS",
+    `rideId=${rideId}`,
+    `rider_name=${riderNamePresent}`,
+    `payment_method=${paymentMethodPresent}`,
+    `prepaid_ref_or_tx_ref=${prepaidRefPresent}`,
+  );
   console.log(
     "DRIVER_ACCEPT_PRE",
     rideId,
@@ -1315,9 +1495,11 @@ async function acceptRideRequest(data, context, db) {
   const drvSnap = await db.ref(`drivers/${driverId}`).get();
   const drvProf = drvSnap.val();
   if (!drvProf || typeof drvProf !== "object") {
+    console.log("DRIVER_ACCEPT_DRIVER_PROFILE", `driverId=${driverId}`, "exists=false");
     console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "driver_profile_missing");
     return { success: false, reason: "driver_profile_missing" };
   }
+  console.log("DRIVER_ACCEPT_DRIVER_PROFILE", `driverId=${driverId}`, "exists=true");
   const el = evaluateDriverForOffer(drvProf, gates, pre || {});
   if (!el.ok) {
     console.log(
@@ -1594,6 +1776,17 @@ async function acceptRideRequest(data, context, db) {
   await setActiveTripPointers(db, rideId, riderId, driverId, finalRideVal);
 
   await ensureRideChatThread(db, rideId, riderId, driverId);
+  await sendPushToUser(db, riderId, {
+    notification: {
+      title: "Driver assigned",
+      body: "Your driver has accepted the ride and is heading your way.",
+    },
+    data: {
+      type: "ride_driver_assigned",
+      rideId,
+      status: "accepted",
+    },
+  });
 
   await writeAudit(db, {
     type: "ride_accept",
@@ -1609,6 +1802,14 @@ async function acceptRideRequest(data, context, db) {
     idempotent: false,
     reason: "accepted",
   };
+  } catch (error) {
+    console.error(
+      "DRIVER_ACCEPT_UNHANDLED_ERROR",
+      `message=${error?.message || error}`,
+      `stack=${error?.stack || "no_stack"}`,
+    );
+    throw error;
+  }
 }
 
 async function driverEnroute(data, context, db) {
@@ -1655,6 +1856,20 @@ async function driverEnroute(data, context, db) {
     return { success: false, reason };
   }
   await writeAudit(db, { type: "ride_enroute", ride_id: rideId, actor_uid: driverId });
+  const riderId = normUid(tx.snapshot.val()?.rider_id);
+  if (riderId) {
+    await sendPushToUser(db, riderId, {
+      notification: {
+        title: "Driver is en route",
+        body: "Your driver is on the way to your pickup location.",
+      },
+      data: {
+        type: "ride_driver_enroute",
+        rideId,
+        status: "driver_arriving",
+      },
+    });
+  }
   await syncRideTrackPublic(db, rideId);
   return { success: true, reason: "enroute" };
 }
@@ -1697,6 +1912,20 @@ async function driverArrived(data, context, db) {
     return { success: false, reason };
   }
   await writeAudit(db, { type: "ride_arrived_pickup", ride_id: rideId, actor_uid: driverId });
+  const riderId = normUid(tx.snapshot.val()?.rider_id);
+  if (riderId) {
+    await sendPushToUser(db, riderId, {
+      notification: {
+        title: "Driver arrived",
+        body: "Your driver has arrived at the pickup point.",
+      },
+      data: {
+        type: "ride_driver_arrived",
+        rideId,
+        status: "arrived",
+      },
+    });
+  }
   await syncRideTrackPublic(db, rideId);
   return { success: true, reason: "arrived" };
 }
@@ -1718,6 +1947,21 @@ async function startTrip(data, context, db) {
     if (normUid(cur.driver_id) !== driverId) {
       reason = "not_assigned_driver";
       return;
+    }
+    const pmRawStart = cur.payment_method ?? cur.paymentMethod ?? "";
+    const pmStart = String(pmRawStart ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+    const psStart = String(cur.payment_status ?? "").trim().toLowerCase();
+    const ptidStart = String(cur.payment_transaction_id ?? cur.flw_tx_id ?? "").trim();
+    if (pmStart === "bank_transfer") {
+      const bankSettled =
+        (psStart === "verified" || psStart === "paid") && Boolean(ptidStart);
+      if (!bankSettled) {
+        reason = "bank_transfer_pending_confirmation";
+        return;
+      }
     }
     const ts = String(cur.trip_state ?? "").trim().toLowerCase();
     if (ts === TRIP_STATE.in_progress || ts === "trip_started") {
@@ -1744,6 +1988,20 @@ async function startTrip(data, context, db) {
     return { success: false, reason };
   }
   await writeAudit(db, { type: "ride_start", ride_id: rideId, actor_uid: driverId });
+  const riderId = normUid(tx.snapshot.val()?.rider_id);
+  if (riderId) {
+    await sendPushToUser(db, riderId, {
+      notification: {
+        title: "Trip started",
+        body: "Your trip has started. Enjoy your ride.",
+      },
+      data: {
+        type: "ride_trip_started",
+        rideId,
+        status: "in_progress",
+      },
+    });
+  }
   await syncRideTrackPublic(db, rideId);
   return { success: true, reason: "started" };
 }
@@ -1754,6 +2012,43 @@ async function completeTrip(data, context, db) {
   if (!rideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
   }
+  const driverSnap = await db.ref(`drivers/${driverId}`).get();
+  const driverData =
+    driverSnap.val() && typeof driverSnap.val() === "object" ? driverSnap.val() : {};
+  const subExpiresAt = Number(driverData.subscription_expires_at ?? 0);
+  const isExpired = subExpiresAt > 0 && Date.now() > subExpiresAt;
+  if (
+    isExpired &&
+    (driverData.commission_exempt === true || driverData.commissionExempt === true)
+  ) {
+    const now = nowMs();
+    await db.ref(`drivers/${driverId}`).update({
+      commission_exempt: false,
+      commissionExempt: false,
+      subscription_status: "expired",
+      effectiveModel: "commission",
+      subscription_renewal_reminder_sent: false,
+      updated_at: now,
+      "businessModel/subscription/status": "expired",
+      "businessModel/commissionExempt": false,
+      "businessModel/commission_exempt": false,
+      "businessModel/effectiveModel": "commission",
+    });
+    console.log(
+      "SUBSCRIPTION_EXPIRED_COMPLETE_TRIP",
+      `driverId=${driverId}`,
+      `expiredAt=${subExpiresAt}`,
+    );
+  }
+  const monetization = await resolveDriverMonetization(db, driverId);
+  const commissionPolicy = await resolveCommissionPolicy(db, driverId);
+  const settlementFee = commissionPolicy.exempt ? 0 : platformFeeNgn();
+  console.log(
+    "COMMISSION_EXEMPT",
+    `driverId=${driverId}`,
+    `exempt=${commissionPolicy.exempt}`,
+    `reason=${commissionPolicy.reason}`,
+  );
   const rideRef = db.ref(`ride_requests/${rideId}`);
   let reason = "unknown";
   const tx = await rideRef.transaction((cur) => {
@@ -1915,15 +2210,18 @@ async function cancelRideRequest(data, context, db) {
       return;
     }
     const now = nowMs();
+    const effectiveCancelReason =
+      cancelReason ||
+      (isAdmin ? "admin_cancelled" : isRider ? "rider_cancelled" : "driver_cancelled");
+    const nextStatus =
+      isDriver && !isRider && !isAdmin ? "driver_cancelled" : "cancelled";
     return {
       ...cur,
       trip_state: TRIP_STATE.cancelled,
-      status: "cancelled",
+      status: nextStatus,
       cancelled_at: now,
       updated_at: now,
-      cancel_reason:
-        cancelReason ||
-        (isAdmin ? "admin_cancelled" : isRider ? "rider_cancelled" : "driver_cancelled"),
+      cancel_reason: effectiveCancelReason,
       cancel_actor: isAdmin ? "admin" : isRider ? "rider" : "driver",
       cancelled_by: isAdmin ? "admin" : isRider ? "rider" : "driver",
     };
@@ -2025,6 +2323,15 @@ const PATCHABLE_TOP_LEVEL = new Set([
   "route_log_last_event_status",
   "route_log_last_event_source",
   "has_route_logs",
+  "bank_transfer_receipt_url",
+  "receipt_uploaded",
+  "bank_transfer_receipt_uploaded_at",
+]);
+
+const RECEIPT_MIRROR_KEYS = new Set([
+  "bank_transfer_receipt_url",
+  "receipt_uploaded",
+  "bank_transfer_receipt_uploaded_at",
 ]);
 
 function isAllowedPatchKey(k) {
@@ -2057,6 +2364,27 @@ async function patchRideRequestMetadata(data, context, db) {
   if (uid !== rider && uid !== driver) {
     return { success: false, reason: "forbidden" };
   }
+
+  for (const k of Object.keys(patch)) {
+    if (!RECEIPT_MIRROR_KEYS.has(k)) {
+      continue;
+    }
+    if (uid !== rider) {
+      return { success: false, reason: "forbidden" };
+    }
+    const pm = String(ride.payment_method ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+    if (pm !== "bank_transfer") {
+      return { success: false, reason: "invalid_payment_method_for_receipt" };
+    }
+    const st = String(ride.status ?? "").trim().toLowerCase();
+    if (st !== "completed") {
+      return { success: false, reason: "ride_not_completed" };
+    }
+  }
+
   const updates = {};
   for (const [k, v] of Object.entries(patch)) {
     if (!isAllowedPatchKey(k)) {
@@ -2066,6 +2394,25 @@ async function patchRideRequestMetadata(data, context, db) {
   }
   updates.updated_at = nowMs();
   await db.ref(`ride_requests/${rideId}`).update(updates);
+
+  const mirrorActive = {};
+  if ("bank_transfer_receipt_url" in patch) {
+    mirrorActive.bank_transfer_receipt_url = updates.bank_transfer_receipt_url;
+  }
+  if ("receipt_uploaded" in patch) {
+    mirrorActive.receipt_uploaded = updates.receipt_uploaded;
+  }
+  if ("bank_transfer_receipt_uploaded_at" in patch) {
+    mirrorActive.bank_transfer_receipt_uploaded_at = updates.bank_transfer_receipt_uploaded_at;
+  }
+  if (Object.keys(mirrorActive).length) {
+    mirrorActive.updated_at = updates.updated_at;
+    const activeSnap = await db.ref(`active_trips/${rideId}`).get();
+    if (activeSnap.exists()) {
+      await db.ref(`active_trips/${rideId}`).update(mirrorActive);
+    }
+  }
+
   await writeAudit(db, {
     type: "ride_patch_metadata",
     ride_id: rideId,
@@ -2074,6 +2421,54 @@ async function patchRideRequestMetadata(data, context, db) {
   });
   await syncRideTrackPublic(db, rideId);
   return { success: true, reason: "patched" };
+}
+
+async function setDriverOnline(data, context, db) {
+  const driverId = normUid(context?.auth?.uid);
+  if (!driverId) {
+    return { success: false, reason: "unauthorized" };
+  }
+
+  const now = nowMs();
+  await db.ref(`drivers/${driverId}`).update({
+    online: true,
+    is_online: true,
+    isOnline: true,
+    isAvailable: true,
+    available: true,
+    status: "available",
+    dispatch_state: "available",
+    online_session_started_at: now,
+    updated_at: now,
+  });
+
+  const logger = console;
+  logger.info("DRIVER_ONLINE", { driverId });
+  return { success: true };
+}
+
+async function setDriverOffline(data, context, db) {
+  const driverId = normUid(context?.auth?.uid);
+  if (!driverId) {
+    return { success: false, reason: "unauthorized" };
+  }
+
+  const now = nowMs();
+  await db.ref(`drivers/${driverId}`).update({
+    online: false,
+    is_online: false,
+    isOnline: false,
+    isAvailable: false,
+    available: false,
+    status: "offline",
+    dispatch_state: "offline",
+    online_session_started_at: null,
+    updated_at: now,
+  });
+
+  const logger = console;
+  logger.info("DRIVER_OFFLINE", { driverId });
+  return { success: true };
 }
 
 module.exports = {
@@ -2088,9 +2483,13 @@ module.exports = {
   cancelRideRequest,
   expireRideRequest,
   patchRideRequestMetadata,
+  setDriverOnline,
+  setDriverOffline,
   canonicalDispatchMarket,
   loadRiderCreateGates,
   loadDispatchGates,
   evaluateDriverForOffer,
   riderProfileRequirementOk,
+  coordsFromPickup,
+  coordsInNgBox,
 };

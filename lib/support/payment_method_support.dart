@@ -72,6 +72,7 @@ class PaymentMethodRecord {
     Map<String, dynamic> value,
   ) {
     final type = paymentMethodTypeFromKey(value['type']?.toString() ?? 'card');
+    final brand = value['brand']?.toString().trim() ?? '';
     final provider = value['provider']?.toString().trim() ?? '';
     final tokenRef = value['token_ref']?.toString().trim() ??
         value['tokenRef']?.toString().trim() ??
@@ -91,6 +92,8 @@ class PaymentMethodRecord {
                         : '****$last4'));
     final title = value['displayTitle']?.toString().trim().isNotEmpty == true
         ? value['displayTitle'].toString().trim()
+        : brand.isNotEmpty
+        ? '$brand ${type == PaymentMethodType.card ? 'card' : ''}'.trim()
         : (type == PaymentMethodType.card ? 'Linked card' : 'Linked bank');
     final detailLabel =
         value['detailLabel']?.toString().trim().isNotEmpty == true
@@ -145,6 +148,7 @@ class PaymentMethodDraft {
   const PaymentMethodDraft({
     required this.riderId,
     required this.type,
+    required this.brand,
     required this.provider,
     required this.maskedDetails,
     required this.displayTitle,
@@ -158,6 +162,7 @@ class PaymentMethodDraft {
 
   final String riderId;
   final PaymentMethodType type;
+  final String brand;
   final String provider;
   final String maskedDetails;
   final String displayTitle;
@@ -172,10 +177,13 @@ class PaymentMethodDraft {
 String _extractLast4(dynamic masked) {
   final raw = masked?.toString() ?? '';
   final digitsOnly = raw.replaceAll(RegExp(r'[^0-9]'), '');
-  if (digitsOnly.length < 4) {
-    return '';
+  if (digitsOnly.length >= 4) {
+    return digitsOnly.substring(digitsOnly.length - 4);
   }
-  return digitsOnly.substring(digitsOnly.length - 4);
+  if (digitsOnly.length >= 3) {
+    return digitsOnly.substring(digitsOnly.length - 3);
+  }
+  return '';
 }
 
 int _intValue(dynamic value) {

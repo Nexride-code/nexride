@@ -167,7 +167,9 @@ class TripStateMachine {
         TripLifecycleState.completed,
       'cancelled' ||
       'canceled' ||
-      'trip_cancelled' =>
+      'trip_cancelled' ||
+      'driver_cancelled' ||
+      'rider_cancelled' =>
         TripLifecycleState.cancelled,
       'expired' => TripLifecycleState.expired,
       _ => TripLifecycleState.searching,

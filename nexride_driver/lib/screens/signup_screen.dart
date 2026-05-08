@@ -3,6 +3,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import '../services/auth_service.dart';
+import '../support/friendly_firebase_errors.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -78,11 +79,9 @@ class _SignupScreenState extends State<SignupScreen> {
       );
 
     } catch (e) {
-
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error: ${e.toString()}"))
+        SnackBar(content: Text(friendlyFirebaseError(e))),
       );
-
     } finally {
       setState(() {
         isLoading = false;

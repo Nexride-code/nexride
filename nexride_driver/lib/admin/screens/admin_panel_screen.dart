@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,6 +14,7 @@ import '../utils/admin_formatters.dart';
 import '../widgets/admin_charts.dart';
 import '../widgets/admin_components.dart';
 import '../widgets/admin_shell.dart';
+import '../support/proof_open.dart';
 import '../../support_portal/models/support_models.dart';
 import '../../support_portal/widgets/support_workspace_screen.dart';
 
@@ -55,6 +57,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   bool _isLoading = true;
   String? _errorMessage;
   bool _tokenRefreshedForDashboardLoad = false;
+  final List<StreamSubscription<rtdb.DatabaseEvent>> _badgeSubscriptions =
+      <StreamSubscription<rtdb.DatabaseEvent>>[];
+  Map<AdminSection, int> _sidebarBadgeCounts = <AdminSection, int>{};
+  List<_AdminPendingNotification> _pendingNotifications =
+      const <_AdminPendingNotification>[];
 
   String _riderCityFilter = 'All';
   String _riderStatusFilter = 'All';
@@ -78,10 +85,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       '[AdminPanel] init section=${_section.name} adminUid=${widget.session.uid} adminEmail=${widget.session.email} cachedSnapshot=${_snapshot != null}',
     );
     _loadSnapshot();
+    _startRealtimeBadgeListeners();
   }
 
   @override
   void dispose() {
+    for (final subscription in _badgeSubscriptions) {
+      subscription.cancel();
+    }
     _riderSearchController.dispose();
     _driverSearchController.dispose();
     _tripSearchController.dispose();
@@ -167,8 +178,196 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       onRefresh: _loadSnapshot,
       onLogout: _logout,
       liveDataSections: _snapshot?.liveDataSections ?? const <String, bool>{},
+      sidebarBadgeCounts: _sidebarBadgeCounts,
+      pendingNotifications: _pendingNotifications
+          .map(
+            (item) => AdminPendingNotification(
+              title: item.title,
+              subtitle: item.subtitle,
+              section: item.section,
+              updatedAt: item.updatedAt,
+            ),
+          )
+          .toList(growable: false),
+      onNotificationSelected: _handleSectionSelected,
       child: _buildBody(),
     );
+  }
+
+  void _startRealtimeBadgeListeners() {
+    final root = _dataService.database.ref();
+    _badgeSubscriptions.addAll(<StreamSubscription<rtdb.DatabaseEvent>>[
+      root.child('drivers').onValue.listen(_onDriversBadgeData),
+      root.child('users').onValue.listen(_onUsersBadgeData),
+      root.child('ride_requests').onValue.listen(_onTripsBadgeData),
+      root.child('support_tickets').onValue.listen(_onSupportBadgeData),
+    ]);
+  }
+
+  void _onDriversBadgeData(rtdb.DatabaseEvent event) {
+    final data = _asMap(event.snapshot.value);
+    var subscriptionPending = 0;
+    var verificationPending = 0;
+    final notifications = <_AdminPendingNotification>[];
+    for (final entry in data.entries) {
+      final row = _asMap(entry.value);
+      final verification = _asMap(row['verification']);
+      final verificationStatus = _asText(
+        verification['overallStatus'] ?? row['verification_status'],
+      ).toLowerCase();
+      final subStatus = _asText(row['subscription_status']).toLowerCase();
+      final hasSubscriptionProof =
+          '${row['subscription_proof_url'] ?? ''}'.trim().isNotEmpty;
+      final isSubscriptionPending = _boolish(row['subscription_pending']) ||
+          subStatus == 'pending' ||
+          subStatus == 'pending_review' ||
+          hasSubscriptionProof;
+      if (isSubscriptionPending) {
+        subscriptionPending += 1;
+        final name = _asText(row['name']);
+        notifications.add(
+          _AdminPendingNotification(
+            title: 'Subscription pending',
+            subtitle: name.isNotEmpty ? name : entry.key,
+            section: AdminSection.subscriptions,
+            updatedAt: _asInt(row['subscription_requested_at']),
+          ),
+        );
+      }
+      if (verificationStatus == 'pending' ||
+          verificationStatus == 'submitted' ||
+          verificationStatus == 'in_review') {
+        verificationPending += 1;
+      }
+    }
+    _setBadgeCount(AdminSection.subscriptions, subscriptionPending);
+    _setBadgeCount(AdminSection.verification, verificationPending);
+    _mergeNotifications(notifications, kind: AdminSection.subscriptions);
+  }
+
+  void _onUsersBadgeData(rtdb.DatabaseEvent event) {
+    final data = _asMap(event.snapshot.value);
+    var ridersPending = 0;
+    for (final rowValue in data.values) {
+      final row = _asMap(rowValue);
+      final role = _asText(row['role']).toLowerCase();
+      if (role == 'driver') {
+        continue;
+      }
+      final verification = _asMap(row['verification']);
+      final status = _asText(
+        verification['overallStatus'] ??
+            _asMap(row['trustSummary'])['verificationStatus'] ??
+            row['verification_status'],
+      ).toLowerCase();
+      if (status == 'pending' || status == 'submitted' || status == 'in_review') {
+        ridersPending += 1;
+      }
+    }
+    _setBadgeCount(AdminSection.riders, ridersPending);
+  }
+
+  void _onTripsBadgeData(rtdb.DatabaseEvent event) {
+    final data = _asMap(event.snapshot.value);
+    var tripsPending = 0;
+    final notifications = <_AdminPendingNotification>[];
+    for (final entry in data.entries) {
+      final row = _asMap(entry.value);
+      final paymentStatus = _asText(row['payment_status']).toLowerCase();
+      if (paymentStatus == 'pending_manual_confirmation') {
+        tripsPending += 1;
+        notifications.add(
+          _AdminPendingNotification(
+            title: 'Trip payment pending',
+            subtitle: entry.key,
+            section: AdminSection.trips,
+            updatedAt: _asInt(row['updated_at']),
+          ),
+        );
+      }
+    }
+    _setBadgeCount(AdminSection.trips, tripsPending);
+    _mergeNotifications(notifications, kind: AdminSection.trips);
+  }
+
+  void _onSupportBadgeData(rtdb.DatabaseEvent event) {
+    final data = _asMap(event.snapshot.value);
+    var openSupport = 0;
+    final notifications = <_AdminPendingNotification>[];
+    for (final entry in data.entries) {
+      final row = _asMap(entry.value);
+      final status = _asText(row['status']).toLowerCase();
+      if (status == 'open' || status == 'pending_user' || status == 'escalated') {
+        openSupport += 1;
+        notifications.add(
+          _AdminPendingNotification(
+            title: 'Support ticket',
+            subtitle: _asText(row['subject']).isNotEmpty
+                ? _asText(row['subject'])
+                : entry.key,
+            section: AdminSection.support,
+            updatedAt: _asInt(row['updatedAt'] ?? row['updated_at']),
+          ),
+        );
+      }
+    }
+    _setBadgeCount(AdminSection.support, openSupport);
+    _mergeNotifications(notifications, kind: AdminSection.support);
+  }
+
+  void _setBadgeCount(AdminSection section, int count) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _sidebarBadgeCounts = <AdminSection, int>{
+        ..._sidebarBadgeCounts,
+        section: count,
+      };
+    });
+  }
+
+  void _mergeNotifications(
+    List<_AdminPendingNotification> incoming, {
+    required AdminSection kind,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    final preserved = _pendingNotifications
+        .where((item) => item.section != kind)
+        .toList(growable: false);
+    final merged = <_AdminPendingNotification>[...incoming, ...preserved]
+      ..sort((a, b) => (b.updatedAt ?? 0).compareTo(a.updatedAt ?? 0));
+    setState(() {
+      _pendingNotifications = merged.take(12).toList(growable: false);
+    });
+  }
+
+  Map<String, dynamic> _asMap(dynamic value) {
+    if (value is Map) {
+      return value.map<String, dynamic>(
+        (dynamic key, dynamic entry) => MapEntry(key.toString(), entry),
+      );
+    }
+    return <String, dynamic>{};
+  }
+
+  String _asText(dynamic value) => value?.toString().trim() ?? '';
+
+  int? _asInt(dynamic value) {
+    if (value is num) {
+      return value.toInt();
+    }
+    return int.tryParse(_asText(value));
+  }
+
+  bool _boolish(dynamic value) {
+    if (value is bool) {
+      return value;
+    }
+    final normalized = _asText(value).toLowerCase();
+    return normalized == 'true' || normalized == '1' || normalized == 'yes';
   }
 
   void _handleSectionSelected(AdminSection next) {
@@ -233,8 +432,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               AdminSection.finance => _buildFinanceSection(_snapshot!),
               AdminSection.withdrawals => _buildWithdrawalsSection(_snapshot!),
               AdminSection.pricing => _buildPricingSection(_snapshot!),
-              AdminSection.subscriptions =>
-                _buildSubscriptionsSection(_snapshot!),
+              AdminSection.subscriptions => _buildSubscriptionsTab(_snapshot!),
               AdminSection.verification =>
                 _buildVerificationSection(_snapshot!),
               AdminSection.support => SupportWorkspaceScreen(
@@ -548,6 +746,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             DataColumn(label: Text('Trips')),
             DataColumn(label: Text('Wallet')),
             DataColumn(label: Text('Last active')),
+            DataColumn(label: Text('Actions')),
           ],
           rows: filtered.map((AdminRiderRecord rider) {
             return DataRow(
@@ -574,6 +773,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                 )),
                 DataCell(Text(formatAdminCurrency(rider.walletBalance))),
                 DataCell(Text(formatAdminDateTime(rider.lastActiveAt))),
+                DataCell(_riderAccountActions(rider)),
               ],
             );
           }).toList(),
@@ -817,6 +1017,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             DataColumn(label: Text('Earnings')),
             DataColumn(label: Text('Wallet')),
             DataColumn(label: Text('Model')),
+            DataColumn(label: Text('Actions')),
           ],
           rows: filtered.map((AdminDriverRecord driver) {
             return DataRow(
@@ -857,6 +1058,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                     ),
                   ),
                 ),
+                DataCell(_driverAccountActions(driver)),
               ],
             );
           }).toList(),
@@ -1151,6 +1353,38 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
   }
 
+  Widget _buildSubscriptionsTab(AdminPanelSnapshot snapshot) {
+    try {
+      return _buildSubscriptionsSection(snapshot);
+    } catch (error, stackTrace) {
+      debugPrint('[ADMIN_SUBSCRIPTIONS_ERROR] $error\n$stackTrace');
+      return Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              const Icon(Icons.error_outline, size: 48, color: Colors.amber),
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  'Could not load subscriptions: $error',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () => unawaited(_loadSnapshot()),
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+  }
+
   Widget _buildPricingSection(AdminPanelSnapshot snapshot) {
     return _PricingEditor(
       pricing: snapshot.pricingConfig,
@@ -1169,61 +1403,577 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   }
 
   Widget _buildSubscriptionsSection(AdminPanelSnapshot snapshot) {
-    if (snapshot.subscriptions.isEmpty) {
+    final pending = snapshot.subscriptions
+        .where((AdminSubscriptionRecord record) => record.pendingApproval)
+        .toList(growable: false);
+    if (pending.isEmpty) {
       return const AdminEmptyState(
-        title: 'No subscription records yet',
+        title: 'No pending subscription requests',
         message:
-            'Drivers can already choose commission or subscription monetization. As soon as subscription plan data is present in driver business models, it will appear here with status and payment visibility.',
+            'Approved and rejected subscription records are tracked automatically. New pending payment proofs will appear here for admin review.',
         icon: Icons.workspace_premium_outlined,
       );
     }
 
-    final conversionRate = snapshot.drivers.isEmpty
-        ? 0.0
-        : snapshot.subscriptions.length / snapshot.drivers.length;
-
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        AdminSummaryBanner(
-          title: 'Subscriptions management',
-          subtitle:
-              'Monitor weekly and monthly plan adoption, payment state, expiry windows, and manual plan status adjustments.',
-          kpis: <String, String>{
-            'Subscribed drivers': '${snapshot.subscriptions.length}',
-            'Conversion rate': '${(conversionRate * 100).toStringAsFixed(1)}%',
-            'Weekly plans':
-                '${snapshot.subscriptions.where((AdminSubscriptionRecord record) => record.planType == 'weekly').length}',
-            'Monthly plans':
-                '${snapshot.subscriptions.where((AdminSubscriptionRecord record) => record.planType != 'weekly').length}',
-          },
-        ),
-        const SizedBox(height: 20),
-        AdminDataTableCard(
-          columns: const <DataColumn>[
-            DataColumn(label: Text('Driver')),
-            DataColumn(label: Text('City')),
-            DataColumn(label: Text('Plan')),
-            DataColumn(label: Text('Status')),
-            DataColumn(label: Text('Payment')),
-            DataColumn(label: Text('Start')),
-            DataColumn(label: Text('End')),
-          ],
-          rows: snapshot.subscriptions.map((AdminSubscriptionRecord record) {
-            return DataRow(
-              onSelectChanged: (_) => _showSubscriptionDialog(record),
-              cells: <DataCell>[
-                DataCell(Text(record.driverName)),
-                DataCell(
-                    Text(record.city.isNotEmpty ? record.city : 'Not set')),
-                DataCell(AdminStatusChip(record.planType)),
-                DataCell(AdminStatusChip(record.status)),
-                DataCell(AdminStatusChip(record.paymentStatus)),
-                DataCell(Text(formatAdminDate(record.startDate))),
-                DataCell(Text(formatAdminDate(record.endDate))),
-              ],
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          AdminSummaryBanner(
+            title: 'Pending subscription approvals',
+            subtitle:
+                'Review proof uploads, confirm payment references, and approve or reject pending driver subscription requests.',
+            kpis: <String, String>{
+              'Pending requests': '${pending.length}',
+              'Weekly plans':
+                  '${pending.where((AdminSubscriptionRecord record) => record.planType == 'weekly').length}',
+              'Monthly plans':
+                  '${pending.where((AdminSubscriptionRecord record) => record.planType != 'weekly').length}',
+            },
+          ),
+          const SizedBox(height: 20),
+          ...pending.map((AdminSubscriptionRecord record) {
+            final planLabel =
+                '${sentenceCaseStatus(record.planType)} ${formatAdminCurrency(record.amountNgn.toDouble())}';
+            return Container(
+              margin: const EdgeInsets.only(bottom: 14),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.black12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    '${record.driverName} (${record.driverId})',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  AdminKeyValueWrap(
+                    items: <String, String>{
+                      'Plan': planLabel,
+                      'Requested': formatAdminDateTime(
+                          record.requestedAt ?? record.startDate),
+                      'Payment reference': record.paymentReference.isNotEmpty
+                          ? record.paymentReference
+                          : 'Not provided',
+                      'Payment proof':
+                          record.hasProof ? 'Available (open on demand)' : 'None',
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  if (!record.hasProof)
+                    const Text(
+                      'No proof uploaded',
+                      style: TextStyle(
+                        color: Colors.black54,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    )
+                  else
+                    TextButton(
+                      onPressed: () => unawaited(_viewSubscriptionProof(record)),
+                      child: const Text('View Proof'),
+                    ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF198754),
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () async {
+                            debugPrint(
+                              '[ADMIN_APPROVE] tapped for driverId=${record.driverId}',
+                            );
+                            try {
+                              await _dataService.reviewSubscriptionRequest(
+                                subscription: record,
+                                approve: true,
+                              );
+                              if (!mounted) {
+                                return;
+                              }
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'Subscription approved for ${record.driverName}',
+                                  ),
+                                ),
+                              );
+                              unawaited(_loadSnapshot());
+                            } catch (e) {
+                              if (!mounted) {
+                                return;
+                              }
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Approve failed: $e'),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                            }
+                          },
+                          child: const Text('Approve'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFFDC3545),
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () async {
+                            debugPrint(
+                              '[ADMIN_REJECT] tapped for driverId=${record.driverId}',
+                            );
+                            try {
+                              await _dataService.reviewSubscriptionRequest(
+                                subscription: record,
+                                approve: false,
+                              );
+                              if (!mounted) {
+                                return;
+                              }
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'Subscription rejected for ${record.driverName}',
+                                  ),
+                                ),
+                              );
+                              unawaited(_loadSnapshot());
+                            } catch (e) {
+                              if (!mounted) {
+                                return;
+                              }
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Reject failed: $e'),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                            }
+                          },
+                          child: const Text('Reject'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             );
-          }).toList(),
+          }),
+        ],
+      );
+  }
+
+  Future<void> _viewSubscriptionProof(AdminSubscriptionRecord record) async {
+    if (!record.hasProof) {
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return PopScope(
+          canPop: false,
+          child: AlertDialog(
+            content: Row(
+              children: <Widget>[
+                const SizedBox(
+                  height: 28,
+                  width: 28,
+                  child: CircularProgressIndicator(strokeWidth: 2.5),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Text(
+                    'Loading payment proof for ${record.driverName}…',
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    try {
+      final proofUrl = await _dataService.fetchSubscriptionProofUrl(
+        driverId: record.driverId,
+      );
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      await _openSubscriptionProofUrl(proofUrl);
+    } catch (error) {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not load proof: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _openSubscriptionProofUrl(String proofUrl) async {
+    final uri = Uri.tryParse(proofUrl.trim());
+    if (uri == null || !uri.hasScheme) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid proof link.')),
+      );
+      return;
+    }
+    try {
+      await adminOpenProofInBrowser(proofUrl);
+    } catch (error) {
+      debugPrint('[AdminPanel][Subscriptions] open proof URL failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open link: $error')),
+        );
+      }
+    }
+  }
+
+  Future<void> _adminActionSilenced(Future<void> Function() run) async {
+    try {
+      await run();
+      if (mounted) {
+        await _loadSnapshot();
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Action failed: $error')),
+        );
+      }
+    }
+  }
+
+  Future<String?> _promptAdminReason({
+    required String title,
+    required String fieldLabel,
+    int minLength = 8,
+  }) async {
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (BuildContext ctx) {
+          return AlertDialog(
+            title: Text(title),
+            content: Form(
+              key: formKey,
+              child: TextFormField(
+                controller: controller,
+                decoration: InputDecoration(labelText: fieldLabel),
+                minLines: 2,
+                maxLines: 5,
+                autofocus: true,
+                validator: (String? value) {
+                  final trimmed = (value ?? '').trim();
+                  if (trimmed.length < minLength) {
+                    return 'Enter at least $minLength characters.';
+                  }
+                  return null;
+                },
+              ),
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  if (formKey.currentState?.validate() ?? false) {
+                    Navigator.pop(ctx, controller.text.trim());
+                  }
+                },
+                child: const Text('Continue'),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  Future<_AdminWarnFields?> _promptAdminWarnDialog({
+    required String accountLabel,
+  }) async {
+    final reasonController = TextEditingController();
+    final messageController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    try {
+      return await showDialog<_AdminWarnFields>(
+        context: context,
+        builder: (BuildContext ctx) {
+          return AlertDialog(
+            title: Text('Warn $accountLabel'),
+            content: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  TextFormField(
+                    controller: reasonController,
+                    decoration: const InputDecoration(
+                      labelText: 'Reason (required)',
+                    ),
+                    minLines: 2,
+                    maxLines: 4,
+                    validator: (String? value) {
+                      final trimmed = (value ?? '').trim();
+                      if (trimmed.length < 4) {
+                        return 'Enter at least 4 characters.';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: messageController,
+                    decoration: const InputDecoration(
+                      labelText: 'Optional message',
+                    ),
+                    minLines: 1,
+                    maxLines: 3,
+                  ),
+                ],
+              ),
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  if (formKey.currentState?.validate() ?? false) {
+                    Navigator.pop(
+                      ctx,
+                      _AdminWarnFields(
+                        reason: reasonController.text.trim(),
+                        message: messageController.text.trim(),
+                      ),
+                    );
+                  }
+                },
+                child: const Text('Send warning'),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      reasonController.dispose();
+      messageController.dispose();
+    }
+  }
+
+  Future<void> _driverApproveVerification(AdminDriverRecord driver) async {
+    await _adminActionSilenced(() async {
+      await _dataService.adminApproveDriverVerification(driverId: driver.id);
+    });
+  }
+
+  Future<void> _driverSuspend(AdminDriverRecord driver) async {
+    final reason = await _promptAdminReason(
+      title: 'Suspend driver',
+      fieldLabel: 'Reason (shown internally)',
+      minLength: 8,
+    );
+    if (reason == null || !mounted) {
+      return;
+    }
+    await _adminActionSilenced(() async {
+      await _dataService.adminSuspendAccount(
+        uid: driver.id,
+        role: 'driver',
+        reason: reason,
+      );
+    });
+  }
+
+  Future<void> _driverWarn(AdminDriverRecord driver) async {
+    final fields = await _promptAdminWarnDialog(accountLabel: driver.name);
+    if (fields == null || !mounted) {
+      return;
+    }
+    await _adminActionSilenced(() async {
+      await _dataService.adminWarnAccount(
+        uid: driver.id,
+        role: 'driver',
+        reason: fields.reason,
+        message: fields.message,
+      );
+    });
+  }
+
+  Future<void> _driverDelete(AdminDriverRecord driver) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) {
+        return AlertDialog(
+          title: const Text('Delete driver account?'),
+          content: Text(
+            'This permanently deletes ${driver.name} (${driver.id}) from '
+            'Realtime Database and Firebase Auth. This cannot be undone.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.red.shade800),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    await _adminActionSilenced(() async {
+      await _dataService.adminDeleteAccount(
+        uid: driver.id,
+        role: 'driver',
+      );
+    });
+  }
+
+  Future<void> _riderWarn(AdminRiderRecord rider) async {
+    final fields = await _promptAdminWarnDialog(accountLabel: rider.name);
+    if (fields == null || !mounted) {
+      return;
+    }
+    await _adminActionSilenced(() async {
+      await _dataService.adminWarnAccount(
+        uid: rider.id,
+        role: 'rider',
+        reason: fields.reason,
+        message: fields.message,
+      );
+    });
+  }
+
+  Future<void> _riderSuspend(AdminRiderRecord rider) async {
+    final reason = await _promptAdminReason(
+      title: 'Suspend rider',
+      fieldLabel: 'Reason (shown internally)',
+      minLength: 8,
+    );
+    if (reason == null || !mounted) {
+      return;
+    }
+    await _adminActionSilenced(() async {
+      await _dataService.adminSuspendAccount(
+        uid: rider.id,
+        role: 'rider',
+        reason: reason,
+      );
+    });
+  }
+
+  Future<void> _riderDelete(AdminRiderRecord rider) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) {
+        return AlertDialog(
+          title: const Text('Delete rider account?'),
+          content: Text(
+            'This permanently deletes ${rider.name} (${rider.id}) from '
+            'Realtime Database and Firebase Auth. This cannot be undone.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.red.shade800),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    await _adminActionSilenced(() async {
+      await _dataService.adminDeleteAccount(
+        uid: rider.id,
+        role: 'rider',
+      );
+    });
+  }
+
+  Widget _driverAccountActions(AdminDriverRecord driver) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: <Widget>[
+        TextButton(
+          onPressed: () => unawaited(_driverApproveVerification(driver)),
+          child: const Text('Approve'),
+        ),
+        TextButton(
+          onPressed: () => unawaited(_driverSuspend(driver)),
+          child: const Text('Suspend'),
+        ),
+        TextButton(
+          onPressed: () => unawaited(_driverWarn(driver)),
+          child: const Text('Warn'),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: Colors.red.shade800),
+          onPressed: () => unawaited(_driverDelete(driver)),
+          child: const Text('Delete'),
+        ),
+      ],
+    );
+  }
+
+  Widget _riderAccountActions(AdminRiderRecord rider) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: <Widget>[
+        TextButton(
+          onPressed: () => unawaited(_riderWarn(rider)),
+          child: const Text('Warn'),
+        ),
+        TextButton(
+          onPressed: () => unawaited(_riderSuspend(rider)),
+          child: const Text('Suspend'),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: Colors.red.shade800),
+          onPressed: () => unawaited(_riderDelete(rider)),
+          child: const Text('Delete'),
         ),
       ],
     );
@@ -1739,13 +2489,32 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                     ? 'Reactivate rider'
                     : 'Suspend rider',
                 onPressed: () async {
-                  Navigator.of(context).pop();
-                  await _dataService.updateRiderStatus(
-                    riderId: rider.id,
-                    status:
-                        rider.status == 'suspended' ? 'active' : 'suspended',
+                  if (rider.status == 'suspended') {
+                    Navigator.of(context).pop();
+                    await _adminActionSilenced(() async {
+                      await _dataService.updateRiderStatus(
+                        riderId: rider.id,
+                        status: 'active',
+                      );
+                    });
+                    return;
+                  }
+                  final reason = await _promptAdminReason(
+                    title: 'Suspend rider',
+                    fieldLabel: 'Reason (shown internally)',
+                    minLength: 8,
                   );
-                  await _loadSnapshot();
+                  if (reason == null || !mounted) {
+                    return;
+                  }
+                  Navigator.of(context).pop();
+                  await _adminActionSilenced(() async {
+                    await _dataService.adminSuspendAccount(
+                      uid: rider.id,
+                      role: 'rider',
+                      reason: reason,
+                    );
+                  });
                 },
               ),
             ],
@@ -2399,6 +3168,20 @@ class _MetricCardEntry {
   final AdminMetricCardData data;
 }
 
+class _AdminPendingNotification {
+  const _AdminPendingNotification({
+    required this.title,
+    required this.subtitle,
+    required this.section,
+    this.updatedAt,
+  });
+
+  final String title;
+  final String subtitle;
+  final AdminSection section;
+  final int? updatedAt;
+}
+
 class _PricingEditor extends StatefulWidget {
   const _PricingEditor({
     required this.pricing,
@@ -2714,4 +3497,14 @@ class _CityPricingControllers {
     perMinute.dispose();
     minimumFare.dispose();
   }
+}
+
+class _AdminWarnFields {
+  const _AdminWarnFields({
+    required this.reason,
+    required this.message,
+  });
+
+  final String reason;
+  final String message;
 }

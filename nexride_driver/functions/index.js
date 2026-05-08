@@ -1,17 +1,22 @@
 require("./params");
 const { onCall, onRequest } = require("firebase-functions/v2/https");
+const { monitorSubscriptionExpiry } = require("./subscription_expiry_jobs");
 const admin = require("firebase-admin");
 const { verifyFlutterwavePaymentStrict } = require("./flutterwave_api");
 const { createWalletTransactionInternal } = require("./wallet_core");
 const {
   flutterwaveSecretKey,
   flutterwaveWebhookSecret,
+  agoraAppIdSecret,
+  agoraAppCertificateSecret,
   REGION,
   platformFeeNgn,
 } = require("./params");
 
 admin.initializeApp();
 const db = admin.database();
+
+exports.monitorSubscriptionExpiry = monitorSubscriptionExpiry;
 
 function callableContext(request) {
   return { auth: request.auth };
@@ -26,8 +31,8 @@ const trackPublic = require("./track_public");
 const adminCallables = require("./admin_callables");
 const supportCallables = require("./support_callables");
 const adminRoles = require("./admin_roles");
-const { getRideCallRtcToken } = require("./ride_call_rtc");
-const { resolveDriverMonetization } = require("./driver_monetization");
+const { getRideCallRtcToken, generateAgoraToken, clearStaleRideCall } = require("./ride_call_rtc");
+const { resolveDriverMonetization, resolveCommissionPolicy } = require("./driver_monetization");
 const pushNotifications = require("./push_notifications");
 const safetyEscalation = require("./safety_escalation");
 
@@ -180,8 +185,6 @@ exports.acceptRide = onCall(rideCallOpts, async (request) =>
   ride.acceptRideRequest(request.data, callableContext(request), db),
 );
 
-// Alias for older mobile builds — identical to [acceptRide] (one implementation).
-exports.acceptRideRequest = exports.acceptRide;
 
 exports.driverEnroute = onCall(rideCallOpts, async (request) =>
   ride.driverEnroute(request.data, callableContext(request), db),
@@ -195,6 +198,24 @@ exports.startTrip = onCall(rideCallOpts, async (request) =>
   ride.startTrip(request.data, callableContext(request), db),
 );
 
+exports.setDriverOnline = onCall(
+  {
+    ...rideCallOpts,
+    timeoutSeconds: 30,
+  },
+  async (request) =>
+    ride.setDriverOnline(request.data, callableContext(request), db),
+);
+
+exports.setDriverOffline = onCall(
+  {
+    ...rideCallOpts,
+    timeoutSeconds: 30,
+  },
+  async (request) =>
+    ride.setDriverOffline(request.data, callableContext(request), db),
+);
+
 exports.completeTrip = onCall(rideCallOpts, async (request) =>
   ride.completeTrip(request.data, callableContext(request), db),
 );
@@ -203,8 +224,6 @@ exports.cancelRide = onCall(rideCallOpts, async (request) =>
   ride.cancelRideRequest(request.data, callableContext(request), db),
 );
 
-/** @deprecated Prefer cancelRide */
-exports.cancelRideRequest = exports.cancelRide;
 
 /** Alternate client-safe name (deployed parity with Flutter callables). */
 exports.requestRide = exports.createRideRequest;
@@ -293,8 +312,28 @@ exports.createTripShareToken = onCall(rideCallOpts, async (request) =>
 );
 
 /** Agora RTC — server-signed token; requires AGORA_APP_ID + AGORA_APP_CERTIFICATE in env. */
-exports.getRideCallRtcToken = onCall(rideCallOpts, async (request) =>
+exports.getRideCallRtcToken = onCall(
+  {
+    ...rideCallOpts,
+    timeoutSeconds: 30,
+    secrets: [agoraAppIdSecret, agoraAppCertificateSecret],
+  },
+  async (request) =>
   getRideCallRtcToken(request.data, callableContext(request), db),
+);
+
+exports.generateAgoraToken = onCall(
+  {
+    ...rideCallOpts,
+    timeoutSeconds: 30,
+    secrets: [agoraAppIdSecret, agoraAppCertificateSecret],
+  },
+  async (request) =>
+    generateAgoraToken(request.data, callableContext(request), db),
+);
+
+exports.clearStaleRideCall = onCall(rideCallOpts, async (request) =>
+  clearStaleRideCall(request.data, callableContext(request), db),
 );
 
 exports.adminListLiveRides = onCall(rideCallOpts, async (request) =>
@@ -330,8 +369,29 @@ exports.adminListPayments = onCall(rideCallOpts, async (request) =>
 exports.adminListDrivers = onCall(rideCallOpts, async (request) =>
   adminCallables.adminListDrivers(request.data, callableContext(request), db),
 );
+exports.adminFetchDriversTree = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminFetchDriversTree(request.data, callableContext(request), db),
+);
 exports.adminListRiders = onCall(rideCallOpts, async (request) =>
   adminCallables.adminListRiders(request.data, callableContext(request), db),
+);
+exports.adminReviewSubscriptionRequest = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminReviewSubscriptionRequest(request.data, callableContext(request), db),
+);
+exports.adminFetchSubscriptionProofUrl = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminFetchSubscriptionProofUrl(request.data, callableContext(request), db),
+);
+exports.adminSuspendAccount = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminSuspendAccount(request.data, callableContext(request), db),
+);
+exports.adminWarnAccount = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminWarnAccount(request.data, callableContext(request), db),
+);
+exports.adminDeleteAccount = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminDeleteAccount(request.data, callableContext(request), db),
+);
+exports.adminApproveDriverVerification = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminApproveDriverVerification(request.data, callableContext(request), db),
 );
 
 exports.supportCreateTicket = onCall(rideCallOpts, async (request) =>
@@ -401,6 +461,36 @@ exports.initiateFlutterwavePayment = onCall(
   { region: REGION, secrets: [flutterwaveSecretKey] },
   async (request) =>
     paymentFlow.initiateFlutterwavePayment(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+
+exports.initiateFlutterwaveRideIntent = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    paymentFlow.initiateFlutterwaveRideIntent(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+
+exports.initiateFlutterwaveCardLinkIntent = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    paymentFlow.initiateFlutterwaveCardLinkIntent(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+
+exports.abandonFlutterwaveRideIntent = onCall(
+  { region: REGION },
+  async (request) =>
+    paymentFlow.abandonFlutterwaveRideIntent(
       request.data,
       callableContext(request),
       db,
@@ -513,7 +603,14 @@ exports.recordTripCompletion = onCall(
     }
 
     const monetization = await resolveDriverMonetization(db, driverId);
-    const feeNgn = monetization.isSubscription ? 0 : platformFeeNgn();
+    const commissionPolicy = await resolveCommissionPolicy(db, driverId);
+    const feeNgn = commissionPolicy.exempt ? 0 : platformFeeNgn();
+    console.log(
+      "COMMISSION_EXEMPT",
+      `driverId=${driverId}`,
+      `exempt=${commissionPolicy.exempt}`,
+      `reason=${commissionPolicy.reason}`,
+    );
     const totalDeliveryFee = Number(
       rideVal.total_delivery_fee_paid || rideVal.total_delivery_fee || verification.amount || 0
     );

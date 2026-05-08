@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NexRide — Subscription approvals</title>
+  <style>
+    :root {
+      --bg: #f6f1e8;
+      --card: #fff;
+      --ink: #1b1612;
+      --muted: #6b655b;
+      --gold: #b8892e;
+      --border: #e3d9cc;
+      --ok: #198754;
+      --bad: #dc3545;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.45;
+    }
+    h1 { font-size: 1.35rem; margin: 0 0 8px; }
+    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 20px; max-width: 56rem; }
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 20px;
+      max-width: 56rem;
+    }
+    label { display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 4px; }
+    input[type="email"], input[type="password"] {
+      width: 100%;
+      max-width: 320px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 12px;
+      font-size: 1rem;
+    }
+    button {
+      cursor: pointer;
+      font-weight: 700;
+      border-radius: 10px;
+      padding: 10px 16px;
+      border: none;
+      font-size: 0.9rem;
+    }
+    button.primary { background: var(--gold); color: #fff; }
+    button.secondary { background: #eae3d6; color: var(--ink); }
+    button.ok { background: var(--ok); color: #fff; }
+    button.bad { background: var(--bad); color: #fff; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .row-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .status { font-size: 0.85rem; margin-top: 12px; white-space: pre-wrap; }
+    .err { color: var(--bad); }
+    .okmsg { color: var(--ok); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    a.proof { color: #0d6efd; word-break: break-all; }
+    .empty { color: var(--muted); padding: 16px 0; }
+    code { font-size: 0.8em; background: #f0ebe2; padding: 2px 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Subscription approvals</h1>
+  <p class="sub">
+    Lightweight tool for pending driver subscriptions (Flutter-free). Sign in with your <strong>admin</strong> Firebase account
+    (<code>admins/{uid}</code> in RTDB or <code>admin</code> custom claim). Proof opens in a new tab — no inline images.
+  </p>
+
+  <div id="auth-panel" class="panel">
+    <div id="signed-out">
+      <label for="email">Email</label>
+      <input id="email" type="email" autocomplete="username" />
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" />
+      <button type="button" class="primary" id="btn-sign-in">Sign in</button>
+    </div>
+    <div id="signed-in" hidden>
+      <p>Signed in as <strong id="user-email"></strong></p>
+      <button type="button" class="secondary" id="btn-sign-out">Sign out</button>
+      <button type="button" class="primary" id="btn-refresh">Refresh list</button>
+    </div>
+    <div id="auth-status" class="status"></div>
+  </div>
+
+  <div id="data-panel" class="panel" hidden>
+    <p style="margin:0 0 12px; font-weight: 800;">Pending subscription requests</p>
+    <div id="table"></div>
+    <div id="data-status" class="status"></div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-functions-compat.js"></script>
+  <script>
+(function () {
+  var firebaseConfig = {
+    apiKey: "AIzaSyCy3eR2_3xjz25kWIdxyYcc514VMjhp5NQ",
+    authDomain: "nexride-8d5bc.firebaseapp.com",
+    databaseURL: "https://nexride-8d5bc-default-rtdb.firebaseio.com",
+    projectId: "nexride-8d5bc",
+    storageBucket: "nexride-8d5bc.firebasestorage.app",
+    messagingSenderId: "684231437366",
+    appId: "1:684231437366:web:6e1b737dee1c5457ec3c97"
+  };
+  var REGION = "us-central1";
+
+  firebase.initializeApp(firebaseConfig);
+  var auth = firebase.auth();
+  var db = firebase.database();
+  var functions = firebase.app().functions(REGION);
+
+  var authPanel = document.getElementById("auth-panel");
+  var dataPanel = document.getElementById("data-panel");
+  var authStatus = document.getElementById("auth-status");
+  var dataStatus = document.getElementById("data-status");
+  var tableEl = document.getElementById("table");
+
+  function setAuthStatus(msg, isErr) {
+    authStatus.textContent = msg || "";
+    authStatus.className = "status " + (isErr ? "err" : "");
+  }
+  function setDataStatus(msg, isErr) {
+    dataStatus.textContent = msg || "";
+    dataStatus.className = "status " + (isErr ? "err" : "");
+  }
+
+  function boolPending(v) {
+    if (v === true) return true;
+    if (v === false || v == null) return false;
+    var s = String(v).trim().toLowerCase();
+    return s === "true" || s === "1" || s === "yes";
+  }
+
+  function esc(s) {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function renderPendingDrivers(snapshot) {
+    var val = snapshot.val();
+    if (!val || typeof val !== "object") {
+      tableEl.innerHTML = '<p class="empty">No drivers data (empty or no permission).</p>';
+      return;
+    }
+
+    var rows = [];
+    Object.keys(val).forEach(function (uid) {
+      var d = val[uid];
+      if (!d || typeof d !== "object") return;
+      if (!boolPending(d.subscription_pending)) return;
+      rows.push({ uid: uid, d: d });
+    });
+
+    if (rows.length === 0) {
+      tableEl.innerHTML = '<p class="empty">No pending subscriptions (<code>subscription_pending</code> is not true for any driver).</p>';
+      return;
+    }
+
+    rows.sort(function (a, b) {
+      var ta = Number(a.d.subscription_requested_at) || 0;
+      var tb = Number(b.d.subscription_requested_at) || 0;
+      return tb - ta;
+    });
+
+    var html = "<table><thead><tr><th>Driver</th><th>UID</th><th>Plan</th><th>Amount (₦)</th><th>Reference</th><th>Proof</th><th></th></tr></thead><tbody>";
+    rows.forEach(function (r) {
+      var d = r.d;
+      var name = d.name || d.driverName || "—";
+      var plan = d.subscription_type || (d.businessModel && d.businessModel.subscription && d.businessModel.subscription.planType) || "—";
+      var amount = d.subscription_amount != null ? String(d.subscription_amount) : "—";
+      var refTxt = d.subscription_payment_reference || "—";
+      var proof = d.subscription_proof_url || "";
+
+      var proofCell = proof
+        ? '<a class="proof" href="' + esc(proof) + '" target="_blank" rel="noopener noreferrer">Open proof</a>'
+        : '<span class="empty">—</span>';
+
+      html += "<tr>";
+      html += "<td>" + esc(name) + "</td>";
+      html += "<td><code>" + esc(r.uid) + "</code></td>";
+      html += "<td>" + esc(plan) + "</td>";
+      html += "<td>" + esc(amount) + "</td>";
+      html += "<td>" + esc(refTxt) + "</td>";
+      html += "<td>" + proofCell + "</td>";
+      html += '<td><div class="row-actions">';
+      html += '<button type="button" class="ok btn-approve" data-uid="' + esc(r.uid) + '">Approve</button>';
+      html += '<button type="button" class="bad btn-reject" data-uid="' + esc(r.uid) + '">Reject</button>';
+      html += "</div></td>";
+      html += "</tr>";
+    });
+    html += "</tbody></table>";
+    tableEl.innerHTML = html;
+
+    tableEl.querySelectorAll(".btn-approve").forEach(function (btn) {
+      btn.addEventListener("click", function () { review(btn.dataset.uid, "approve", btn); });
+    });
+    tableEl.querySelectorAll(".btn-reject").forEach(function (btn) {
+      btn.addEventListener("click", function () { review(btn.dataset.uid, "reject", btn); });
+    });
+  }
+
+  function loadDrivers() {
+    setDataStatus("Loading drivers…");
+    db.ref("drivers")
+      .once("value")
+      .then(function (snap) {
+        setDataStatus("");
+        renderPendingDrivers(snap);
+      })
+      .catch(function (e) {
+        setDataStatus("Failed to read drivers/: " + (e.message || String(e)), true);
+        tableEl.innerHTML = "";
+      });
+  }
+
+  function review(driverId, action, btn) {
+    if (!driverId) return;
+    var reviewFn = functions.httpsCallable("adminReviewSubscriptionRequest");
+    var rowButtons = btn.parentElement.querySelectorAll("button");
+    rowButtons.forEach(function (b) { b.disabled = true; });
+    setDataStatus("Calling " + action + " for " + driverId + "…");
+    reviewFn({ driverId: driverId, action: action })
+      .then(function (res) {
+        var data = res.data;
+        if (data && data.success === true) {
+          setDataStatus(action + " succeeded for " + driverId + ".", false);
+          loadDrivers();
+        } else {
+          setDataStatus("Callable returned: " + JSON.stringify(data), true);
+          rowButtons.forEach(function (b) { b.disabled = false; });
+        }
+      })
+      .catch(function (e) {
+        var msg = e.code ? e.code + ": " : "";
+        msg += e.message || String(e);
+        setDataStatus(msg, true);
+        rowButtons.forEach(function (b) { b.disabled = false; });
+      });
+  }
+
+  document.getElementById("btn-sign-in").addEventListener("click", function () {
+    var email = document.getElementById("email").value.trim();
+    var password = document.getElementById("password").value;
+    setAuthStatus("");
+    auth.signInWithEmailAndPassword(email, password).catch(function (e) {
+      setAuthStatus(e.message || String(e), true);
+    });
+  });
+
+  document.getElementById("btn-sign-out").addEventListener("click", function () {
+    auth.signOut();
+  });
+
+  document.getElementById("btn-refresh").addEventListener("click", function () {
+    loadDrivers();
+  });
+
+  auth.onAuthStateChanged(function (user) {
+    document.getElementById("signed-out").hidden = !!user;
+    document.getElementById("signed-in").hidden = !user;
+    if (user) {
+      document.getElementById("user-email").textContent = user.email || user.uid;
+      dataPanel.hidden = false;
+      loadDrivers();
+    } else {
+      dataPanel.hidden = true;
+      tableEl.innerHTML = "";
+      setDataStatus("");
+    }
+  });
+})();
+  </script>
+</body>
+</html>

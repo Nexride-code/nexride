@@ -35,6 +35,7 @@ dependencies:
   permission_handler: ^11.4.0
   image_picker: ^1.1.2
   shared_preferences: ^2.2.3
+  app_links: ^6.4.0
 
   # SHARE TRIP FEATURE
   share_plus: ^7.2.1

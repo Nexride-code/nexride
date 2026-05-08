@@ -35,6 +35,10 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Disable R8 shrinking: Agora, Google Maps, geolocator, and audioplayers
+            // use reflection and JNI; R8 removes needed classes and causes native crashes.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }

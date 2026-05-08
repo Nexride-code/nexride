@@ -1,0 +1,65 @@
+2026-05-07T08:10:06.956338Z D patchriderequestmetadata: {"verifications":{"auth":"VALID","app":"MISSING"},"message":"Callable request verification passed"}
+2026-05-07T08:10:08.326453Z I patchriderequestmetadata: 
+2026-05-07T08:10:08.337725Z D patchriderequestmetadata: {"verifications":{"app":"MISSING","auth":"VALID"},"message":"Callable request verification passed"}
+2026-05-07T08:10:16.063148Z I acceptdeliveryrequest: 
+2026-05-07T08:10:16.089487Z I acceptdeliveryrequest: Starting new instance. Reason: AUTOSCALING - Instance started due to configured scaling factors (e.g. CPU utilization, request throughput, etc.) or no existing capacity for current traffic.
+2026-05-07T08:10:17.315692Z I acceptdeliveryrequest: Default STARTUP TCP probe succeeded after 1 attempt for container "worker" on port 8080.
+2026-05-07T08:10:17.421476Z W acceptdeliveryrequest: Failed to validate AppCheck token. FirebaseAppCheckError: Decoding App Check token failed. Make sure you passed the entire string JWT which represents the Firebase App Check token.
+    at /workspace/node_modules/firebase-admin/lib/app-check/token-verifier.js:79:19
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5) {
+  errorInfo: {
+    code: 'app-check/invalid-argument',
+    message: 'Decoding App Check token failed. Make sure you passed the entire string JWT which represents the Firebase App Check token.'
+  },
+  codePrefix: 'app-check'
+}
+2026-05-07T08:10:17.447287Z W acceptdeliveryrequest: {"verifications":{"app":"INVALID","auth":"VALID"},"message":"Callable request verification failed: AppCheck token was rejected."}
+2026-05-07T08:10:17.447465Z W acceptdeliveryrequest: Allowing request with invalid AppCheck token because enforcement is disabled
+2026-05-07T08:10:17.448153Z ? acceptdeliveryrequest: DELIVERY_ACCEPT_START -Os0U8ahFgeh9fET-dDS Hx8Nr6wVU6PfcBDbDdooNhHLe7H2
+
+2026-05-07T08:10:26.059770Z I acceptdeliveryrequest: 
+2026-05-07T08:10:26.083171Z W acceptdeliveryrequest: Failed to validate AppCheck token. FirebaseAppCheckError: Decoding App Check token failed. Make sure you passed the entire string JWT which represents the Firebase App Check token.
+    at /workspace/node_modules/firebase-admin/lib/app-check/token-verifier.js:79:19
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5) {
+  errorInfo: {
+    code: 'app-check/invalid-argument',
+    message: 'Decoding App Check token failed. Make sure you passed the entire string JWT which represents the Firebase App Check token.'
+  },
+  codePrefix: 'app-check'
+}
+2026-05-07T08:10:26.083417Z W acceptdeliveryrequest: {"message":"Callable request verification failed: AppCheck token was rejected.","verifications":{"app":"INVALID","auth":"VALID"}}
+2026-05-07T08:10:26.083495Z W acceptdeliveryrequest: Allowing request with invalid AppCheck token because enforcement is disabled
+2026-05-07T08:10:26.083814Z ? acceptdeliveryrequest: DELIVERY_ACCEPT_START -Os0U8ahFgeh9fET-dDS Hx8Nr6wVU6PfcBDbDdooNhHLe7H2
+
+2026-05-07T08:11:15.500699Z I acceptdeliveryrequest: 
+2026-05-07T08:11:15.514162Z W acceptdeliveryrequest: Failed to validate AppCheck token. FirebaseAppCheckError: Decoding App Check token failed. Make sure you passed the entire string JWT which represents the Firebase App Check token.
+    at /workspace/node_modules/firebase-admin/lib/app-check/token-verifier.js:79:19
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5) {
+  errorInfo: {
+    code: 'app-check/invalid-argument',
+    message: 'Decoding App Check token failed. Make sure you passed the entire string JWT which represents the Firebase App Check token.'
+  },
+  codePrefix: 'app-check'
+}
+2026-05-07T08:11:15.514517Z W acceptdeliveryrequest: {"message":"Callable request verification failed: AppCheck token was rejected.","verifications":{"auth":"VALID","app":"INVALID"}}
+2026-05-07T08:11:15.514592Z W acceptdeliveryrequest: Allowing request with invalid AppCheck token because enforcement is disabled
+2026-05-07T08:11:15.515002Z ? acceptdeliveryrequest: DELIVERY_ACCEPT_START -Os0U8ahFgeh9fET-dDS Hx8Nr6wVU6PfcBDbDdooNhHLe7H2
+
+2026-05-07T08:13:53.225663Z I expireriderequest: 
+2026-05-07T08:13:53.244780Z D expireriderequest: {"verifications":{"app":"MISSING","auth":"VALID"},"message":"Callable request verification passed"}
+2026-05-07T08:13:53.779421Z I cancelriderequest: 
+2026-05-07T08:13:53.801935Z D cancelriderequest: {"message":"Callable request verification passed","verifications":{"app":"MISSING","auth":"VALID"}}
+2026-05-07T08:14:00.351445Z I initiateflutterwavecardlinkintent: 
+2026-05-07T08:14:00.373027Z I initiateflutterwavecardlinkintent: Starting new instance. Reason: AUTOSCALING - Instance started due to configured scaling factors (e.g. CPU utilization, request throughput, etc.) or no existing capacity for current traffic.
+2026-05-07T08:14:01.613882Z I initiateflutterwavecardlinkintent: Default STARTUP TCP probe succeeded after 1 attempt for container "worker" on port 8080.
+2026-05-07T08:14:01.783634Z D initiateflutterwavecardlinkintent: {"verifications":{"auth":"VALID","app":"MISSING"},"message":"Callable request verification passed"}
+2026-05-07T08:14:02.029926Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141641788_-Os0V2kvlUFPNc4Xbwld reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}
+
+2026-05-07T08:15:39.785424Z I initiateflutterwavecardlinkintent: 
+2026-05-07T08:15:39.798744Z D initiateflutterwavecardlinkintent: {"message":"Callable request verification passed","verifications":{"app":"MISSING","auth":"VALID"}}
+2026-05-07T08:15:39.957001Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141739799_-Os0VQgG2WE4VZsWsbSM reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}
+
+2026-05-07T08:16:16.312553Z I initiateflutterwavecardlinkintent: 
+2026-05-07T08:16:16.320739Z D initiateflutterwavecardlinkintent: {"message":"Callable request verification passed","verifications":{"auth":"VALID","app":"MISSING"}}
+2026-05-07T08:16:16.483980Z ? initiateflutterwavecardlinkintent: CARD_LINK_INIT_FAIL rider=W8NFLNNQi3MGEbwMzszLSJFv1Gl1 tx_ref=nexride_cardlink_1778141776321_-Os0VZavcgAEg2oKvoUR reason=initiate_failed provider={"status":"error","message":"Invalid authorization key","data":null}
+

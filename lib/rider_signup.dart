@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:geolocator/geolocator.dart';
 import 'ride_type_screen.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'support/firebase_rtdb_guard.dart';
+import 'support/friendly_firebase_errors.dart';
 import 'support/startup_rtdb_support.dart';
 
 class RiderSignup extends StatefulWidget {
@@ -38,14 +40,35 @@ class _RiderSignupState extends State<RiderSignup> {
 
     try {
       // 🔐 CREATE AUTH ACCOUNT
-      UserCredential userCredential = await FirebaseAuth.instance
-          .createUserWithEmailAndPassword(
+      await FirebaseAuth.instance.createUserWithEmailAndPassword(
             email: emailController.text.trim(),
             password: passwordController.text.trim(),
           );
 
       final authUser = await waitForAuthenticatedUser();
       String uid = authUser.uid;
+
+      double? locLat;
+      double? locLng;
+      try {
+        final svc = await Geolocator.isLocationServiceEnabled();
+        if (svc) {
+          var permission = await Geolocator.checkPermission();
+          if (permission == LocationPermission.denied) {
+            permission = await Geolocator.requestPermission();
+          }
+          if (permission != LocationPermission.denied &&
+              permission != LocationPermission.deniedForever) {
+            final pos = await Geolocator.getCurrentPosition(
+              timeLimit: const Duration(seconds: 12),
+            );
+            locLat = pos.latitude;
+            locLng = pos.longitude;
+          }
+        }
+      } catch (e, st) {
+        debugPrint('[RIDER_SIGNUP_GPS] skipped error=$e $st');
+      }
 
       final baseUser = <String, dynamic>{
         "uid": uid,
@@ -54,6 +77,10 @@ class _RiderSignupState extends State<RiderSignup> {
         "phone": phoneController.text.trim(),
         "role": "rider",
         "created_at": ServerValue.timestamp,
+        if (locLat != null && locLng != null) "signup_lat": locLat,
+        if (locLat != null && locLng != null) "signup_lng": locLng,
+        if (locLat != null && locLng != null)
+          "signup_location_at": ServerValue.timestamp,
       };
       final bundle = await _trustBootstrapService.ensureRiderTrustState(
         riderId: uid,
@@ -92,7 +119,7 @@ class _RiderSignupState extends State<RiderSignup> {
       if (e.code == 'email-already-in-use') {
         showMessage("Email already in use ❌");
       } else {
-        showMessage(e.message ?? "Signup failed");
+        showMessage(friendlyFirebaseAuthError(e));
       }
     } catch (e) {
       debugPrint('$e');
@@ -105,7 +132,7 @@ class _RiderSignupState extends State<RiderSignup> {
           ),
         );
       } else {
-        showMessage("Error occurred ❌");
+        showMessage(friendlyFirebaseError(e, debugLabel: 'riderSignup'));
       }
     }
 

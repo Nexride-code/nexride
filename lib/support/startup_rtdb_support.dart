@@ -281,12 +281,19 @@ Map<String, Object?> buildRiderOwnedBootstrapUpdates({
     'updatedAt': rtdb.ServerValue.timestamp,
   };
 
+  final signupLat = userProfile['signup_lat'];
+  final signupLng = userProfile['signup_lng'];
+  final signupLocAt = userProfile['signup_location_at'];
+
   return <String, Object?>{
     'users/$riderId/uid': riderId,
     'users/$riderId/name': _safeText(userProfile['name'], fallback: 'Rider'),
     'users/$riderId/email': _safeText(userProfile['email']),
     'users/$riderId/phone': _safeText(userProfile['phone']),
     'users/$riderId/role': _safeText(userProfile['role'], fallback: 'rider'),
+    if (signupLat != null) 'users/$riderId/signup_lat': signupLat,
+    if (signupLng != null) 'users/$riderId/signup_lng': signupLng,
+    if (signupLocAt != null) 'users/$riderId/signup_location_at': signupLocAt,
     'users/$riderId/verification': verification,
     'users/$riderId/installFingerprint': _safeText(
       deviceFingerprints['installFingerprint'],

@@ -5,6 +5,20 @@ import '../models/admin_models.dart';
 import '../utils/admin_formatters.dart';
 import 'admin_components.dart';
 
+class AdminPendingNotification {
+  const AdminPendingNotification({
+    required this.title,
+    required this.subtitle,
+    required this.section,
+    this.updatedAt,
+  });
+
+  final String title;
+  final String subtitle;
+  final AdminSection section;
+  final int? updatedAt;
+}
+
 class AdminShell extends StatelessWidget {
   const AdminShell({
     required this.section,
@@ -15,6 +29,9 @@ class AdminShell extends StatelessWidget {
     required this.onRefresh,
     required this.onLogout,
     required this.liveDataSections,
+    required this.sidebarBadgeCounts,
+    required this.pendingNotifications,
+    required this.onNotificationSelected,
     required this.child,
     super.key,
   });
@@ -27,6 +44,9 @@ class AdminShell extends StatelessWidget {
   final VoidCallback onRefresh;
   final VoidCallback onLogout;
   final Map<String, bool> liveDataSections;
+  final Map<AdminSection, int> sidebarBadgeCounts;
+  final List<AdminPendingNotification> pendingNotifications;
+  final ValueChanged<AdminSection> onNotificationSelected;
   final Widget child;
 
   @override
@@ -43,6 +63,8 @@ class AdminShell extends StatelessWidget {
           onRefresh: onRefresh,
           onLogout: onLogout,
           liveDataSections: liveDataSections,
+          pendingNotifications: pendingNotifications,
+          onNotificationSelected: onNotificationSelected,
           compact: compact,
           showDrawerButton: !wide,
           child: child,
@@ -57,6 +79,7 @@ class AdminShell extends StatelessWidget {
                   _AdminSidebar(
                     selected: section,
                     onSelected: onSectionSelected,
+                    badgeCounts: sidebarBadgeCounts,
                   ),
                   Expanded(child: content),
                 ],
@@ -76,6 +99,7 @@ class AdminShell extends StatelessWidget {
                   Navigator.of(context).pop();
                   onSectionSelected(next);
                 },
+                badgeCounts: sidebarBadgeCounts,
               ),
             ),
           ),
@@ -95,6 +119,8 @@ class _AdminScaffoldContent extends StatelessWidget {
     required this.onRefresh,
     required this.onLogout,
     required this.liveDataSections,
+    required this.pendingNotifications,
+    required this.onNotificationSelected,
     required this.compact,
     required this.child,
     required this.showDrawerButton,
@@ -107,6 +133,8 @@ class _AdminScaffoldContent extends StatelessWidget {
   final VoidCallback onRefresh;
   final VoidCallback onLogout;
   final Map<String, bool> liveDataSections;
+  final List<AdminPendingNotification> pendingNotifications;
+  final ValueChanged<AdminSection> onNotificationSelected;
   final bool compact;
   final Widget child;
   final bool showDrawerButton;
@@ -307,6 +335,50 @@ class _AdminScaffoldContent extends StatelessWidget {
           onPressed: onLogout,
           icon: Icons.logout_rounded,
         ),
+        PopupMenuButton<AdminPendingNotification>(
+          tooltip: 'Pending notifications',
+          onSelected: (item) => onNotificationSelected(item.section),
+          itemBuilder: (context) {
+            if (pendingNotifications.isEmpty) {
+              return const <PopupMenuEntry<AdminPendingNotification>>[
+                PopupMenuItem<AdminPendingNotification>(
+                  enabled: false,
+                  child: Text('No pending items'),
+                ),
+              ];
+            }
+            return pendingNotifications
+                .map(
+                  (item) => PopupMenuItem<AdminPendingNotification>(
+                    value: item,
+                    child: Text('${item.title}: ${item.subtitle}'),
+                  ),
+                )
+                .toList(growable: false);
+          },
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(6),
+                child: Icon(Icons.notifications_none_rounded),
+              ),
+              if (pendingNotifications.isNotEmpty)
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD64545),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -316,10 +388,12 @@ class _AdminSidebar extends StatelessWidget {
   const _AdminSidebar({
     required this.selected,
     required this.onSelected,
+    required this.badgeCounts,
   });
 
   final AdminSection selected;
   final ValueChanged<AdminSection> onSelected;
+  final Map<AdminSection, int> badgeCounts;
 
   @override
   Widget build(BuildContext context) {
@@ -419,6 +493,26 @@ class _AdminSidebar extends StatelessWidget {
                               ),
                             ),
                           ),
+                          if ((badgeCounts[item] ?? 0) > 0)
+                            Container(
+                              margin: const EdgeInsets.only(right: 8),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFD64545),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: Text(
+                                '${badgeCounts[item] ?? 0}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
                           if (isSelected)
                             const Icon(
                               Icons.chevron_right_rounded,

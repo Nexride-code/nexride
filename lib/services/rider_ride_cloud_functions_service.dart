@@ -22,38 +22,40 @@ class RiderRideCloudFunctionsService {
   }
 
   final FirebaseFunctions _functions;
-  static const Duration _kCallableTimeout = Duration(seconds: 15);
+  static const Duration _kCallableTimeout = Duration(seconds: 30);
   static const int _kMaxAttempts = 2;
 
   Future<Map<String, dynamic>> _call(
     String name,
-    Map<String, dynamic> payload,
-  ) async {
+    Map<String, dynamic> payload, {
+    Duration? timeout,
+  }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
       await user.getIdToken(true);
     }
+    final effectiveTimeout = timeout ?? _kCallableTimeout;
     final callable = _functions.httpsCallable(
       name,
-      options: HttpsCallableOptions(timeout: _kCallableTimeout),
+      options: HttpsCallableOptions(timeout: effectiveTimeout),
     );
     debugPrint(
       'API_REQUEST_START name=$name region=us-central1 '
-      'project=${_functions.app.options.projectId} timeout_ms=${_kCallableTimeout.inMilliseconds}',
+      'project=${_functions.app.options.projectId} timeout_ms=${effectiveTimeout.inMilliseconds}',
     );
     dynamic result;
     Object? lastError;
     for (var attempt = 1; attempt <= _kMaxAttempts; attempt++) {
       try {
-        result = await callable.call(payload).timeout(_kCallableTimeout);
+        result = await callable.call(payload).timeout(effectiveTimeout);
         break;
       } on TimeoutException catch (error) {
         lastError = TimeoutException(
           'Request timed out while contacting backend.',
-          _kCallableTimeout,
+          effectiveTimeout,
         );
         debugPrint(
-          'API_TIMEOUT name=$name region=us-central1 timeout_ms=${_kCallableTimeout.inMilliseconds} '
+          'API_TIMEOUT name=$name region=us-central1 timeout_ms=${effectiveTimeout.inMilliseconds} '
           'attempt=$attempt error=$error',
         );
       } on FirebaseFunctionsException catch (error) {
@@ -102,7 +104,41 @@ class RiderRideCloudFunctionsService {
   Future<Map<String, dynamic>> createRideRequest(
     Map<String, dynamic> body,
   ) =>
-      _call('createRideRequest', body);
+      _call(
+        'createRideRequest',
+        body,
+        timeout: const Duration(seconds: 45),
+      );
+
+  Future<Map<String, dynamic>> initiateFlutterwaveRideIntent(
+    Map<String, dynamic> body,
+  ) =>
+      _call(
+        'initiateFlutterwaveRideIntent',
+        body,
+        timeout: const Duration(seconds: 45),
+      );
+
+  Future<Map<String, dynamic>> initiateFlutterwaveCardLinkIntent(
+    Map<String, dynamic> body,
+  ) =>
+      _call(
+        'initiateFlutterwaveCardLinkIntent',
+        body,
+        timeout: const Duration(seconds: 45),
+      );
+
+  Future<Map<String, dynamic>> abandonFlutterwaveRideIntent({
+    required String reference,
+  }) =>
+      _call(
+        'abandonFlutterwaveRideIntent',
+        <String, dynamic>{
+          'reference': reference,
+          'tx_ref': reference,
+        },
+        timeout: const Duration(seconds: 30),
+      );
 
   Future<Map<String, dynamic>> cancelRideRequest({
     required String rideId,
@@ -126,12 +162,41 @@ class RiderRideCloudFunctionsService {
       });
 
   /// Agora RTC token (same backend as driver app).
-  Future<Map<String, dynamic>> getRideCallRtcToken({required String rideId}) =>
-      _call('getRideCallRtcToken', <String, dynamic>{
+  Future<Map<String, dynamic>> getRideCallRtcToken({
+    required String rideId,
+    required String uid,
+    String? channelName,
+    bool force = false,
+    bool forceClearStale = true,
+  }) async {
+    final payload = <String, dynamic>{
+      'rideId': rideId,
+      'ride_id': rideId,
+      'requestId': rideId,
+      'tripId': rideId,
+      'uid': uid,
+      'channelName': channelName ?? 'nexride_$rideId',
+      'force': force,
+      'force_clear_stale': forceClearStale,
+    };
+    final callable = _functions.httpsCallable(
+      'generateAgoraToken',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(payload);
+    final data = result.data;
+    if (data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+    return <String, dynamic>{};
+  }
+
+  Future<Map<String, dynamic>> clearStaleRideCall({
+    required String rideId,
+  }) =>
+      _call('clearStaleRideCall', <String, dynamic>{
         'rideId': rideId,
         'ride_id': rideId,
-        'requestId': rideId,
-        'tripId': rideId,
       });
 
   Future<Map<String, dynamic>> initiateFlutterwavePayment({
@@ -153,14 +218,25 @@ class RiderRideCloudFunctionsService {
       });
 
   Future<Map<String, dynamic>> verifyFlutterwavePayment({
-    required String rideId,
+    String? rideId,
     required String reference,
+    String? transactionId,
+    bool verifyIntentOnly = false,
+    bool verifyCardLinkOnly = false,
   }) =>
-      _call('verifyFlutterwavePayment', <String, dynamic>{
-        'rideId': rideId,
-        'ride_id': rideId,
-        'reference': reference,
-      });
+      _call(
+        'verifyFlutterwavePayment',
+        <String, dynamic>{
+          if (rideId != null && rideId.isNotEmpty) 'rideId': rideId,
+          if (rideId != null && rideId.isNotEmpty) 'ride_id': rideId,
+          'reference': reference,
+          if (transactionId != null && transactionId.isNotEmpty)
+            'transaction_id': transactionId,
+          if (verifyIntentOnly) 'verify_intent_only': true,
+          if (verifyCardLinkOnly) 'verify_card_link_only': true,
+        },
+        timeout: const Duration(seconds: 45),
+      );
 
   Future<Map<String, dynamic>> registerBankTransferPayment({
     required String rideId,

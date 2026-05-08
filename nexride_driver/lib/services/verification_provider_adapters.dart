@@ -94,6 +94,13 @@ class VerificationProviderRegistry {
           'Prepared for future NIMC identity verification, currently queued for manual review.',
     ),
     const PlaceholderVerificationProviderAdapter(
+      providerKey: 'bvn_provider_placeholder',
+      providerLabel: 'BVN verification review queue',
+      supportedCheckTypes: <String>['bvn_verification'],
+      summary:
+          'Prepared for future BVN verification (NIBSS / provider API), currently queued for manual review.',
+    ),
+    const PlaceholderVerificationProviderAdapter(
       providerKey: 'frsc_provider_placeholder',
       providerLabel: 'Licence verification review queue',
       supportedCheckTypes: <String>['drivers_license_verification'],

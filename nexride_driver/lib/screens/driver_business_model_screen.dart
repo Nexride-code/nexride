@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/material.dart';
 
+import '../config/driver_app_config.dart';
+import 'driver_subscription_payment_screen.dart';
 import '../support/driver_profile_support.dart';
 import '../support/realtime_database_error_support.dart';
 
@@ -105,11 +109,7 @@ class _DriverBusinessModelScreenState extends State<DriverBusinessModelScreen> {
         _loading = false;
       });
       _showMessage(
-        realtimeDatabaseDebugMessage(
-          'We opened your business model settings with safe defaults. Pull to refresh in a moment.',
-          path: profilePath,
-          error: error,
-        ),
+        'We opened your business model settings with safe defaults. Pull to refresh in a moment.',
       );
     }
   }
@@ -149,8 +149,6 @@ class _DriverBusinessModelScreenState extends State<DriverBusinessModelScreen> {
     nextModel['canGoOnline'] = driverCanGoOnlineFromBusinessModel(nextModel);
     nextModel['eligibilityStatus'] = driverBusinessEligibilityStatus(nextModel);
     nextModel['updatedAt'] = rtdb.ServerValue.timestamp;
-    final updatePath =
-        'drivers/${widget.driverId}/businessModel + drivers/${widget.driverId}/updated_at';
 
     try {
       await _rootRef.update(<String, dynamic>{
@@ -193,11 +191,7 @@ class _DriverBusinessModelScreenState extends State<DriverBusinessModelScreen> {
         return;
       }
       _showMessage(
-        realtimeDatabaseDebugMessage(
-          'Unable to update your business model right now.',
-          path: updatePath,
-          error: error,
-        ),
+        'Unable to update your business model right now. Please try again.',
       );
     } finally {
       if (mounted) {
@@ -205,6 +199,60 @@ class _DriverBusinessModelScreenState extends State<DriverBusinessModelScreen> {
           _saving = false;
         });
       }
+    }
+  }
+
+  Future<void> _startSubscriptionFlow() async {
+    final subscription = Map<String, dynamic>.from(
+      _businessModel['subscription'] as Map<String, dynamic>,
+    );
+    final weeklyPrice = subscription['weeklyPriceNgn'] is num
+        ? (subscription['weeklyPriceNgn'] as num).toInt()
+        : DriverBusinessConfig.weeklySubscriptionPriceNgn;
+    final monthlyPrice = subscription['monthlyPriceNgn'] is num
+        ? (subscription['monthlyPriceNgn'] as num).toInt()
+        : DriverBusinessConfig.monthlySubscriptionPriceNgn;
+    final selectedPlan = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const SizedBox(height: 10),
+            const Text(
+              'Choose subscription plan',
+              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+            ),
+            ListTile(
+              title: Text('Weekly • ${formatDriverNairaAmount(weeklyPrice)}'),
+              subtitle: const Text('Valid for 7 days'),
+              onTap: () => Navigator.of(ctx).pop('weekly'),
+            ),
+            ListTile(
+              title: Text('Monthly • ${formatDriverNairaAmount(monthlyPrice)}'),
+              subtitle: const Text('Valid for 30 days'),
+              onTap: () => Navigator.of(ctx).pop('monthly'),
+            ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || selectedPlan == null) {
+      return;
+    }
+    final amount = selectedPlan == 'weekly' ? weeklyPrice : monthlyPrice;
+    final submitted = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => DriverSubscriptionPaymentScreen(
+          driverId: widget.driverId,
+          planType: selectedPlan,
+          amountNgn: amount,
+        ),
+      ),
+    );
+    if (submitted == true) {
+      await _loadProfile();
     }
   }
 
@@ -316,9 +364,21 @@ class _DriverBusinessModelScreenState extends State<DriverBusinessModelScreen> {
                   borderRadius: BorderRadius.circular(18),
                 ),
               ),
-              onPressed: _saving ? null : () => _selectModel(keyValue),
+              onPressed: _saving
+                  ? null
+                  : () {
+                      if (keyValue == 'subscription') {
+                        unawaited(_startSubscriptionFlow());
+                        return;
+                      }
+                      unawaited(_selectModel(keyValue));
+                    },
               child: Text(
-                selected ? 'Currently selected' : 'Choose this option',
+                keyValue == 'subscription'
+                    ? 'Select plan and pay'
+                    : selected
+                        ? 'Currently selected'
+                        : 'Choose this option',
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
             ),

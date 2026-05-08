@@ -1,0 +1,10 @@
+│ acceptRide                        │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ acceptRideRequest                 │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ cancelRide                        │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ cancelRideRequest                 │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ createRideRequest                 │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ initiateFlutterwaveCardLinkIntent │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ initiateFlutterwavePayment        │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ initiateFlutterwaveRideIntent     │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ registerBankTransferPayment       │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │
+│ verifyFlutterwavePayment          │ v2      │ callable │ us-central1 │ 256    │ nodejs20 │

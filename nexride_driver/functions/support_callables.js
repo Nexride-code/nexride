@@ -4,6 +4,7 @@
 
 const { logger } = require("firebase-functions");
 const { isNexRideAdminOrSupport, normUid } = require("./admin_auth");
+const { sendPushToUser } = require("./push_notifications");
 
 function maskEmail(email) {
   const e = String(email || "").trim();
@@ -231,6 +232,9 @@ async function supportUpdateTicket(data, context, db) {
     updates.last_message = message;
     updates.last_message_at = now;
   }
+  const ticketSnap = await db.ref(`support_tickets/${ticketId}`).get();
+  const ticket = ticketSnap.val() && typeof ticketSnap.val() === "object" ? ticketSnap.val() : {};
+  const ownerUid = normUid(ticket.createdByUserId);
   await db.ref(`support_tickets/${ticketId}`).update(updates);
   if (message) {
     const msgKey = db.ref("support_ticket_messages").push().key;
@@ -245,6 +249,21 @@ async function supportUpdateTicket(data, context, db) {
     }
   }
   logger.info("supportUpdateTicket", { ticketId, actor, status: status || undefined });
+  if (ownerUid && (message || status)) {
+    await sendPushToUser(db, ownerUid, {
+      notification: {
+        title: "Support ticket updated",
+        body: message
+          ? "NexRide support replied to your ticket."
+          : `Ticket status updated to ${status}.`,
+      },
+      data: {
+        type: "support_ticket_update",
+        ticketId,
+        status: status || "",
+      },
+    });
+  }
   return { success: true, reason: "updated", ticketId };
 }
 

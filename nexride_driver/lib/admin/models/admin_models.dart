@@ -301,6 +301,11 @@ class AdminSubscriptionRecord {
     required this.startDate,
     required this.endDate,
     required this.isActive,
+    required this.pendingApproval,
+    required this.requestedAt,
+    required this.paymentReference,
+    required this.hasProof,
+    required this.amountNgn,
     required this.rawData,
   });
 
@@ -313,6 +318,12 @@ class AdminSubscriptionRecord {
   final DateTime? startDate;
   final DateTime? endDate;
   final bool isActive;
+  final bool pendingApproval;
+  final DateTime? requestedAt;
+  final String paymentReference;
+  /// True when a subscription proof URL exists in RTDB; URL is fetched on demand via callable only.
+  final bool hasProof;
+  final int amountNgn;
   final Map<String, dynamic> rawData;
 }
 

@@ -336,6 +336,42 @@ class FakeAdminDataService extends AdminDataService {
     required String reviewedBy,
     String note = '',
   }) async {}
+
+  @override
+  Future<void> reviewSubscriptionRequest({
+    required AdminSubscriptionRecord subscription,
+    required bool approve,
+  }) async {}
+
+  @override
+  Future<String> fetchSubscriptionProofUrl({required String driverId}) async =>
+      'https://example.test/subscription-proof';
+
+  @override
+  Future<void> adminSuspendAccount({
+    required String uid,
+    required String role,
+    required String reason,
+  }) async {}
+
+  @override
+  Future<void> adminWarnAccount({
+    required String uid,
+    required String role,
+    required String reason,
+    String message = '',
+  }) async {}
+
+  @override
+  Future<void> adminDeleteAccount({
+    required String uid,
+    required String role,
+  }) async {}
+
+  @override
+  Future<void> adminApproveDriverVerification({
+    required String driverId,
+  }) async {}
 }
 
 class CachedFailureAdminDataService extends AdminDataService {
@@ -488,9 +524,9 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
       status: 'pending',
       requestDate: DateTime(2026, 4, 11, 14, 20),
       processedDate: null,
-      bankName: 'GTBank',
+      bankName: 'United Bank of Africa (UBA)',
       accountName: 'Samuel Driver',
-      accountNumber: '0123456789',
+      accountNumber: '1029983699',
       payoutReference: '',
       notes: 'Awaiting finance review',
       sourcePaths: const <String>['withdraw_requests/withdraw_001'],
@@ -508,6 +544,11 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
       startDate: DateTime(2026, 4, 1),
       endDate: DateTime(2026, 5, 1),
       isActive: true,
+      pendingApproval: false,
+      requestedAt: null,
+      paymentReference: '',
+      hasProof: false,
+      amountNgn: 15000,
       rawData: const <String, dynamic>{},
     ),
   ],

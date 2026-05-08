@@ -62,22 +62,20 @@ class PaymentMethodsService {
     final shouldMakeDefault =
         draft.makeDefault || existing.every((method) => !method.isDefault);
 
+    final providerStored = draft.provider.toLowerCase().contains('flutterwave')
+        ? 'flutterwave'
+        : draft.provider.trim();
     final updates = <String, Object?>{
       '${userPaymentMethodsPath(draft.riderId)}/$methodId': <String, Object?>{
-        'id': methodId,
-        'riderId': draft.riderId,
-        'type': draft.type.key,
-        'provider': draft.provider,
-        'maskedDetails': draft.maskedDetails,
-        'token_ref': draft.tokenRef,
-        'provider_reference': draft.providerReference,
-        'country': draft.country,
+        if (draft.brand.trim().isNotEmpty) 'brand': draft.brand.trim(),
         'last4': draft.last4,
-        'status': 'linked',
+        'provider':
+            providerStored.isNotEmpty ? providerStored : 'flutterwave',
+        'token_ref': draft.tokenRef.trim(),
+        'provider_reference': draft.providerReference.trim(),
+        'type': draft.type.key,
         'isDefault': shouldMakeDefault,
         'is_default': shouldMakeDefault,
-        'displayTitle': draft.displayTitle,
-        'detailLabel': draft.detailLabel,
         'createdAt': rtdb.ServerValue.timestamp,
         'updatedAt': rtdb.ServerValue.timestamp,
         'created_at': rtdb.ServerValue.timestamp,

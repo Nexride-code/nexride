@@ -2,10 +2,57 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../support/friendly_firebase_errors.dart';
 import '../support/ride_chat_support.dart';
 
 enum RideChatImageSource { camera, gallery }
+
+class _ChatStatusIndicator extends StatelessWidget {
+  const _ChatStatusIndicator({
+    required this.status,
+    required this.isRead,
+    required this.color,
+    this.readColor,
+    this.failedColor,
+  });
+
+  final String status;
+  final bool isRead;
+  final Color color;
+  final Color? readColor;
+  final Color? failedColor;
+
+  @override
+  Widget build(BuildContext context) {
+    if (status == 'sending' || status == 'pending') {
+      return SizedBox(
+        width: 12,
+        height: 12,
+        child: CircularProgressIndicator(
+          strokeWidth: 1.4,
+          valueColor: AlwaysStoppedAnimation<Color>(color),
+        ),
+      );
+    }
+    if (status == 'failed') {
+      return Icon(
+        Icons.error_outline,
+        size: 13,
+        color: failedColor ?? color,
+      );
+    }
+    if (isRead) {
+      return Icon(
+        Icons.done_all,
+        size: 14,
+        color: readColor ?? color,
+      );
+    }
+    return Icon(Icons.check, size: 14, color: color);
+  }
+}
 
 class RideChatSheet extends StatefulWidget {
   const RideChatSheet({
@@ -22,6 +69,8 @@ class RideChatSheet extends StatefulWidget {
     this.showCallButton = false,
     this.isCallButtonEnabled = true,
     this.isCallButtonBusy = false,
+    this.bankTransferReference = '',
+    this.bankTransferAmountLabel = '',
   });
 
   final String rideId;
@@ -38,17 +87,25 @@ class RideChatSheet extends StatefulWidget {
   final bool showCallButton;
   final bool isCallButtonEnabled;
   final bool isCallButtonBusy;
+  final String bankTransferReference;
+  final String bankTransferAmountLabel;
 
   @override
   State<RideChatSheet> createState() => _RideChatSheetState();
 }
 
 class _RideChatSheetState extends State<RideChatSheet> {
-  static const Duration _sendTimeout = Duration(seconds: 10);
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  bool _sending = false;
   int _lastMessageCount = 0;
+
+  Future<void> _copyReference(String reference) async {
+    await Clipboard.setData(ClipboardData(text: reference));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Payment reference copied')),
+    );
+  }
 
   @override
   void initState() {
@@ -88,25 +145,19 @@ class _RideChatSheetState extends State<RideChatSheet> {
 
   Future<void> _handleSend() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty || _sending) {
+    if (text.isEmpty) {
       return;
     }
 
     if (!mounted) {
       return;
     }
-    setState(() {
-      _sending = true;
-    });
+    _messageController.clear();
+    widget.onDraftChanged?.call('');
+    _scrollToBottom(animated: true);
 
     try {
-      final errorMessage = await widget
-          .onSendMessage(widget.rideId, text)
-          .timeout(
-            _sendTimeout,
-            onTimeout: () =>
-                'Sending this message took too long. Please try again.',
-          );
+      final errorMessage = await widget.onSendMessage(widget.rideId, text);
       if (!mounted) {
         return;
       }
@@ -126,9 +177,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
         );
         return;
       }
-      _messageController.clear();
-      widget.onDraftChanged?.call('');
-      _scrollToBottom(animated: true);
+      // Optimistic local message is already visible; no additional UI action needed.
     } catch (_) {
       if (!mounted) {
         return;
@@ -146,13 +195,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
           ),
         ),
       );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _sending = false;
-        });
-      }
-    }
+    } finally {}
   }
 
   Future<void> _handleRetry(RideChatMessage message) async {
@@ -162,7 +205,9 @@ class _RideChatSheetState extends State<RideChatSheet> {
     }
     final messenger = ScaffoldMessenger.maybeOf(context);
     messenger?.hideCurrentSnackBar();
-    messenger?.showSnackBar(SnackBar(content: Text(error)));
+    messenger?.showSnackBar(
+      SnackBar(content: Text(coerceUserFacingMessage(error))),
+    );
   }
 
   Future<void> _handleImageSend() async {
@@ -195,7 +240,9 @@ class _RideChatSheetState extends State<RideChatSheet> {
     }
     final messenger = ScaffoldMessenger.maybeOf(context);
     messenger?.hideCurrentSnackBar();
-    messenger?.showSnackBar(SnackBar(content: Text(error)));
+    messenger?.showSnackBar(
+      SnackBar(content: Text(coerceUserFacingMessage(error))),
+    );
   }
 
   void _scrollToBottom({required bool animated}) {
@@ -280,6 +327,82 @@ class _RideChatSheetState extends State<RideChatSheet> {
                 ],
               ),
               const SizedBox(height: 8),
+              if (widget.bankTransferReference.trim().isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF4D6),
+                    border: Border.all(color: const Color(0xFFE7C776)),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Bank Transfer Instructions',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: const Color(0xFF5F4A16),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Please transfer your fare of ${widget.bankTransferAmountLabel.isNotEmpty ? widget.bankTransferAmountLabel : '₦--'} to:\n'
+                        'Bank: UNITED BANK OF AFRICA\n'
+                        'Account Name: NEXRIDE DYNAMIC JOURNEY LTD\n'
+                        'Account Number: 1029983699\n'
+                        'Reference: ${widget.bankTransferReference.trim()} (include this exactly in your narration)\n'
+                        'Upload your payment proof after the trip to complete your booking.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: const Color(0xFF6B5A2B),
+                          height: 1.35,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 9,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFFBEE),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: const Color(0xFFE2C476),
+                                ),
+                              ),
+                              child: Text(
+                                widget.bankTransferReference.trim(),
+                                style: const TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 13,
+                                  color: Color(0xFF4D3E1A),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: () => _copyReference(
+                              widget.bankTransferReference.trim(),
+                            ),
+                            icon: const Icon(Icons.copy, size: 16),
+                            label: const Text('Copy'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color(0xFF6C551C),
+                              side: const BorderSide(color: Color(0xFFD6B563)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
               Expanded(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
@@ -372,6 +495,14 @@ class _RideChatSheetState extends State<RideChatSheet> {
                                     Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
+                                        _ChatStatusIndicator(
+                                          status: message.status,
+                                          isRead: message.isRead,
+                                          color: Colors.white70,
+                                          readColor: const Color(0xFF7CD1FF),
+                                          failedColor: const Color(0xFFFFB4A6),
+                                        ),
+                                        const SizedBox(width: 4),
                                         Flexible(
                                           child: Text(
                                             message.deliveryLabel,
@@ -394,11 +525,8 @@ class _RideChatSheetState extends State<RideChatSheet> {
                                               visualDensity:
                                                   VisualDensity.compact,
                                             ),
-                                            onPressed: _sending
-                                                ? null
-                                                : () => unawaited(
-                                                      _handleRetry(message),
-                                                    ),
+                                            onPressed: () =>
+                                                unawaited(_handleRetry(message)),
                                             child: const Text(
                                               'Retry',
                                               style: TextStyle(
@@ -438,8 +566,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
                         fillColor: const Color(0xFFF4F4F4),
                         prefixIcon: IconButton(
                           tooltip: 'Attach photo',
-                          onPressed:
-                              _sending ? null : () => unawaited(_handleImageSend()),
+                          onPressed: () => unawaited(_handleImageSend()),
                           icon: const Icon(Icons.photo_camera_outlined),
                         ),
                         border: OutlineInputBorder(
@@ -461,17 +588,8 @@ class _RideChatSheetState extends State<RideChatSheet> {
                           borderRadius: BorderRadius.circular(16),
                         ),
                       ),
-                      onPressed: _sending ? null : () => unawaited(_handleSend()),
-                      child: _sending
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.send, color: Colors.white),
+                      onPressed: () => unawaited(_handleSend()),
+                      child: const Icon(Icons.send, color: Colors.white),
                     ),
                   ),
                 ],

@@ -37,6 +37,10 @@ async function registerDevicePushToken(data, context, db) {
     last_token_app: app,
     last_token_updated_at: now,
   });
+  await db.ref(`users/${uid}`).update({
+    fcm_token: token,
+    updated_at: now,
+  });
   return { success: true, reason: "registered" };
 }
 
@@ -63,7 +67,17 @@ async function sendPushToUser(db, uid, payload) {
     tokens,
     notification: payload.notification,
     data: payload.data || {},
-    android: { priority: "high" },
+    android: {
+      priority: "high",
+      notification: {
+        channelId: "nexride_high_importance",
+        sound: "default",
+        priority: "max",
+        visibility: "public",
+        defaultSound: true,
+        defaultVibrateTimings: true,
+      },
+    },
     apns: {
       headers: { "apns-priority": "10" },
       payload: { aps: { sound: "default" } },

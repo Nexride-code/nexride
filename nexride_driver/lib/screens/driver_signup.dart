@@ -5,6 +5,7 @@ import 'package:firebase_database/firebase_database.dart';
 import '../config/driver_app_config.dart';
 import '../support/driver_profile_bootstrap_support.dart';
 import '../support/driver_profile_support.dart';
+import '../support/friendly_firebase_errors.dart';
 
 class DriverSignup extends StatefulWidget {
   const DriverSignup({super.key});
@@ -148,10 +149,10 @@ class _DriverSignupState extends State<DriverSignup> {
       } else if (e.code == 'invalid-email') {
         showMessage("Invalid email format ❌");
       } else {
-        showMessage(e.message ?? "Signup failed");
+        showMessage(friendlyFirebaseAuthError(e));
       }
     } catch (e) {
-      showMessage("Error: ${e.toString()}");
+      showMessage(friendlyFirebaseError(e, debugLabel: 'driverSignup'));
     }
 
     if (mounted) {

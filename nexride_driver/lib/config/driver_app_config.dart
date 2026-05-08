@@ -1,6 +1,10 @@
 class DriverFeatureFlags {
   static const bool driverVerificationRequired = false;
 
+  /// When true, `users/{uid}/kyc_status/kyc_approved` (or `kyc_admin_override`)
+  /// is required before GO ONLINE. Admins can set approval in the Firebase console.
+  static const bool driverKycGateEnabled = true;
+
   /// Phase 1: car rides only (no dispatch / mart / food offers).
   static const Set<String> activeRequestServiceTypes = <String>{
     'ride',

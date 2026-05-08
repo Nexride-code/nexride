@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 
@@ -138,7 +140,18 @@ class AdminDataService {
     );
 
     final usersData = results[0];
-    final driversData = results[1];
+    var driversData = results[1];
+    var driversFetchSource = 'rtdb';
+    if (driversData.isEmpty) {
+      debugPrint(
+        '[AdminData] /drivers RTDB map empty (rules or network); trying adminFetchDriversTree',
+      );
+      final serverDrivers = await _fetchDriversTreeViaCallable();
+      if (serverDrivers.isNotEmpty) {
+        driversData = serverDrivers;
+        driversFetchSource = 'callable_adminFetchDriversTree';
+      }
+    }
     final rideRequestsData = results[2];
     final walletsData = results[3];
     final withdrawalsData = results[4];
@@ -197,6 +210,21 @@ class AdminDataService {
       driversData: driversData,
       driverBusinessModelsData: driverBusinessModelsData,
     );
+    try {
+      _debugPrintSubscriptionRaw(
+        _subscriptionRawPayload(
+          driversFetchSource: driversFetchSource,
+          driversData: driversData,
+          subscriptions: subscriptions,
+        ),
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] subscription raw log failed: $error');
+      debugPrintStack(
+        label: '[AdminData] subscription raw log stack',
+        stackTrace: stackTrace,
+      );
+    }
 
     final verificationCases = _buildVerificationCases(
       driversData: driversData,
@@ -538,6 +566,8 @@ class AdminDataService {
       <String, dynamic>{
         ...currentBusinessModel,
         'selectedModel': 'subscription',
+        'commissionExempt': status == 'active',
+        'commission_exempt': status == 'active',
         'subscription': <String, dynamic>{
           ..._map(currentBusinessModel['subscription']),
           'status': status,
@@ -560,6 +590,230 @@ class AdminDataService {
         businessModel: nextBusinessModel,
       ),
     });
+  }
+
+  Future<void> reviewSubscriptionRequest({
+    required AdminSubscriptionRecord subscription,
+    required bool approve,
+  }) async {
+    debugPrint(
+      '[ADMIN_REVIEW_SUBSCRIPTION] callable=adminReviewSubscriptionRequest '
+      'approve=$approve driverId=${subscription.driverId} action=${approve ? 'approve' : 'reject'}',
+    );
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminReviewSubscriptionRequest',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      // `subscription.driverId` is the `drivers/{uid}` key (same as driver Firebase Auth UID).
+      'driverId': subscription.driverId,
+      'action': approve ? 'approve' : 'reject',
+    });
+    final data = _map(result.data);
+    if (data['success'] != true) {
+      throw StateError(
+        'Subscription review failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
+      );
+    }
+  }
+
+  Future<String> fetchSubscriptionProofUrl({required String driverId}) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminFetchSubscriptionProofUrl',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'driverId': driverId,
+    });
+    final data = _map(result.data);
+    if (data['success'] != true) {
+      throw StateError(
+        'Proof URL unavailable: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
+      );
+    }
+    return _text(data['proofUrl']);
+  }
+
+  Future<void> adminSuspendAccount({
+    required String uid,
+    required String role,
+    required String reason,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminSuspendAccount',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'uid': uid,
+      'role': role,
+      'reason': reason,
+    });
+    final data = _map(result.data);
+    if (data['success'] != true) {
+      throw StateError(
+        'Suspend failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
+      );
+    }
+  }
+
+  Future<void> adminWarnAccount({
+    required String uid,
+    required String role,
+    required String reason,
+    String message = '',
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminWarnAccount',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'uid': uid,
+      'role': role,
+      'reason': reason,
+      'message': message,
+    });
+    final data = _map(result.data);
+    if (data['success'] != true) {
+      throw StateError(
+        'Warn failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
+      );
+    }
+  }
+
+  Future<void> adminDeleteAccount({
+    required String uid,
+    required String role,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminDeleteAccount',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'uid': uid,
+      'role': role,
+    });
+    final data = _map(result.data);
+    if (data['success'] != true) {
+      throw StateError(
+        'Delete failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
+      );
+    }
+  }
+
+  Future<void> adminApproveDriverVerification({
+    required String driverId,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminApproveDriverVerification',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'driverId': driverId,
+    });
+    final data = _map(result.data);
+    if (data['success'] != true) {
+      throw StateError(
+        'Approve verification failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
+      );
+    }
+  }
+
+  Future<Map<String, dynamic>> _fetchDriversTreeViaCallable() async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminFetchDriversTree',
+        options: HttpsCallableOptions(
+          timeout: const Duration(seconds: 45),
+        ),
+      );
+      final result = await callable.call(<String, dynamic>{});
+      final data = _map(result.data);
+      if (data['success'] != true) {
+        debugPrint('[AdminData] adminFetchDriversTree rejected: $data');
+        return const <String, dynamic>{};
+      }
+      return _map(data['drivers']);
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] adminFetchDriversTree error=$error');
+      debugPrintStack(
+        label: '[AdminData] adminFetchDriversTree stack',
+        stackTrace: stackTrace,
+      );
+      return const <String, dynamic>{};
+    }
+  }
+
+  /// Safe logging only (no `dart:js_interop` — avoids browser crashes).
+  void _debugPrintSubscriptionRaw(Map<String, Object?> payload) {
+    try {
+      debugPrint('[SUBSCRIPTION_RAW_DATA] ${jsonEncode(payload)}');
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[SUBSCRIPTION_RAW_DATA] jsonEncode failed: $error payload=$payload',
+      );
+      debugPrintStack(
+        label: '[SUBSCRIPTION_RAW_DATA] stack',
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Map<String, Object?> _subscriptionRawPayload({
+    required String driversFetchSource,
+    required Map<String, dynamic> driversData,
+    required List<AdminSubscriptionRecord> subscriptions,
+  }) {
+    final slices = <String, Object?>{};
+    driversData.forEach((String uid, dynamic entryValue) {
+      final driver = _map(entryValue);
+      final bm = normalizedDriverBusinessModel(driver['businessModel']);
+      final sub = _map(bm['subscription']);
+      final hasProofUrl =
+          '${driver['subscription_proof_url'] ?? ''}'.trim().isNotEmpty;
+      slices[uid] = <String, Object?>{
+        'subscription_pending': driver['subscription_pending'],
+        'subscription_status': driver['subscription_status'],
+        'subscription_type': driver['subscription_type'],
+        'subscription_amount': driver['subscription_amount'],
+        'has_proof_url': hasProofUrl,
+        'nested_subscription_status': sub['status'],
+      };
+    });
+    final pendingRows =
+        subscriptions.where((AdminSubscriptionRecord r) => r.pendingApproval).toList();
+    return <String, Object?>{
+      'driversFetchSource': driversFetchSource,
+      'driverRootCount': driversData.length,
+      'subscriptionRowCount': subscriptions.length,
+      'pendingApprovalRowCount': pendingRows.length,
+      'driverSubscriptionSlices': slices,
+      'pendingRows': pendingRows
+          .map(
+            (AdminSubscriptionRecord r) => <String, Object?>{
+              'driverId': r.driverId,
+              'driverName': r.driverName,
+              'planType': r.planType,
+              'amountNgn': r.amountNgn,
+              'pendingApproval': r.pendingApproval,
+              'hasProof': r.hasProof,
+            },
+          )
+          .toList(growable: false),
+    };
   }
 
   Future<Map<String, dynamic>> _safeMapAt(
@@ -1169,8 +1423,36 @@ class AdminDataService {
       final subscription = _map(businessModel['subscription']);
       final selectedModel = _text(businessModel['selectedModel']);
       final status = _text(subscription['status']);
+      final rootSubStatus =
+          _text(driver['subscription_status']).toLowerCase().trim();
+      final hasProof =
+          '${driver['subscription_proof_url'] ?? ''}'.trim().isNotEmpty;
+      final pendingApproval = _boolish(driver['subscription_pending']) ||
+          status == 'pending_approval' ||
+          rootSubStatus == 'pending' ||
+          rootSubStatus == 'pending_review' ||
+          hasProof;
+      final requestedAt = _dateFromCandidates(<dynamic>[
+        driver['subscription_requested_at'],
+      ]);
+      final paymentReference = _firstText(<dynamic>[
+        driver['subscription_payment_reference'],
+      ]);
+      final planNormalized = _normalizedSubscriptionPlanKind(
+        subscription: subscription,
+        driver: driver,
+      );
+      final amountNgn = _firstInt(<dynamic>[
+        driver['subscription_amount'],
+        planNormalized == 'weekly'
+            ? DriverBusinessConfig.weeklySubscriptionPriceNgn
+            : DriverBusinessConfig.monthlySubscriptionPriceNgn,
+      ]);
 
       if (selectedModel != 'subscription' &&
+          !pendingApproval &&
+          !hasProof &&
+          _text(driver['subscription_payment_reference']).isEmpty &&
           (status.isEmpty ||
               status == 'setup_required' ||
               status == 'not_started')) {
@@ -1182,8 +1464,7 @@ class AdminDataService {
           driverId: driverId,
           driverName: _firstText(<dynamic>[driver['name']], fallback: 'Driver'),
           city: _firstText(<dynamic>[driver['city']]),
-          planType: _firstText(<dynamic>[subscription['planType']],
-              fallback: 'monthly'),
+          planType: planNormalized,
           status: status.isNotEmpty ? status : 'setup_required',
           paymentStatus: _firstText(<dynamic>[
             subscription['paymentStatus'],
@@ -1197,14 +1478,25 @@ class AdminDataService {
             subscription['validUntil'],
             subscription['expiresAt'],
             subscription['renewalDate'],
+            driver['subscription_expires_at'],
           ]),
           isActive: driverSubscriptionIsActive(businessModel),
+          pendingApproval: pendingApproval,
+          requestedAt: requestedAt,
+          paymentReference: paymentReference,
+          hasProof: hasProof,
+          amountNgn: amountNgn,
           rawData: <String, dynamic>{
             ...subscription,
             'driverId': driverId,
             'driverName': driver['name'],
           },
         ),
+      );
+      debugPrint(
+        '[AdminData][Subscriptions] driverId=$driverId pending=$pendingApproval '
+        'status=${_text(driver['subscription_status'])} plan=${_text(driver['subscription_type'])} '
+        'hasProof=$hasProof reference=${paymentReference.isNotEmpty}',
       );
     }
 
@@ -2387,6 +2679,28 @@ class AdminDataService {
     final message = error.toString().toLowerCase();
     return message.contains('permission-denied') ||
         message.contains('permission denied');
+  }
+
+  String _normalizedSubscriptionPlanKind({
+    required Map<String, dynamic> subscription,
+    required Map<String, dynamic> driver,
+  }) {
+    final raw = _firstText(<dynamic>[
+      subscription['planType'],
+      driver['subscription_type'],
+    ], fallback: 'monthly');
+    final lower = raw.toLowerCase().trim();
+    return lower == 'weekly' || lower.contains('week')
+        ? 'weekly'
+        : 'monthly';
+  }
+
+  bool _boolish(dynamic value) {
+    if (value is bool) {
+      return value;
+    }
+    final normalized = _text(value).toLowerCase();
+    return normalized == 'true' || normalized == '1' || normalized == 'yes';
   }
 }
 

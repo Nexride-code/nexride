@@ -3,9 +3,55 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../support/friendly_firebase_errors.dart';
 import '../support/ride_chat_support.dart';
 
 enum DriverRideChatImageSource { camera, gallery }
+
+class _ChatStatusIndicator extends StatelessWidget {
+  const _ChatStatusIndicator({
+    required this.status,
+    required this.isRead,
+    required this.color,
+    this.readColor,
+    this.failedColor,
+  });
+
+  final String status;
+  final bool isRead;
+  final Color color;
+  final Color? readColor;
+  final Color? failedColor;
+
+  @override
+  Widget build(BuildContext context) {
+    if (status == 'sending' || status == 'pending') {
+      return SizedBox(
+        width: 12,
+        height: 12,
+        child: CircularProgressIndicator(
+          strokeWidth: 1.4,
+          valueColor: AlwaysStoppedAnimation<Color>(color),
+        ),
+      );
+    }
+    if (status == 'failed') {
+      return Icon(
+        Icons.error_outline,
+        size: 13,
+        color: failedColor ?? color,
+      );
+    }
+    if (isRead) {
+      return Icon(
+        Icons.done_all,
+        size: 14,
+        color: readColor ?? color,
+      );
+    }
+    return Icon(Icons.check, size: 14, color: color);
+  }
+}
 
 class DriverRideChatSheet extends StatefulWidget {
   const DriverRideChatSheet({
@@ -46,7 +92,6 @@ class DriverRideChatSheet extends StatefulWidget {
 class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  bool _sending = false;
   String _lastMessageListSignature = '';
 
   String _messageListSignature(List<RideChatMessage> messages) {
@@ -105,16 +150,16 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
 
   Future<void> _handleSend() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty || _sending) {
+    if (text.isEmpty) {
       return;
     }
 
     if (!mounted) {
       return;
     }
-    setState(() {
-      _sending = true;
-    });
+    _messageController.clear();
+    widget.onDraftChanged?.call('');
+    _scrollToBottom(animated: true);
 
     try {
       final errorMessage = await widget.onSendMessage(widget.rideId, text);
@@ -137,9 +182,7 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
         );
         return;
       }
-      _messageController.clear();
-      widget.onDraftChanged?.call('');
-      _scrollToBottom(animated: true);
+      // Optimistic local message is already visible; no additional UI action needed.
     } catch (_) {
       if (!mounted) {
         return;
@@ -157,13 +200,7 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
           ),
         ),
       );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _sending = false;
-        });
-      }
-    }
+    } finally {}
   }
 
   Future<void> _handleRetry(RideChatMessage message) async {
@@ -173,7 +210,9 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
     }
     final messenger = ScaffoldMessenger.maybeOf(context);
     messenger?.hideCurrentSnackBar();
-    messenger?.showSnackBar(SnackBar(content: Text(error)));
+    messenger?.showSnackBar(
+      SnackBar(content: Text(coerceUserFacingMessage(error))),
+    );
   }
 
   Future<void> _handleImageSend() async {
@@ -208,7 +247,9 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
     }
     final messenger = ScaffoldMessenger.maybeOf(context);
     messenger?.hideCurrentSnackBar();
-    messenger?.showSnackBar(SnackBar(content: Text(error)));
+    messenger?.showSnackBar(
+      SnackBar(content: Text(coerceUserFacingMessage(error))),
+    );
   }
 
   void _scrollToBottom({required bool animated}) {
@@ -384,6 +425,14 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                                     Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
+                                        _ChatStatusIndicator(
+                                          status: message.status,
+                                          isRead: message.isRead,
+                                          color: Colors.white70,
+                                          readColor: const Color(0xFF7CD1FF),
+                                          failedColor: const Color(0xFFFFB4A6),
+                                        ),
+                                        const SizedBox(width: 4),
                                         Flexible(
                                           child: Text(
                                             message.deliveryLabel,
@@ -406,11 +455,8 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                                               visualDensity:
                                                   VisualDensity.compact,
                                             ),
-                                            onPressed: _sending
-                                                ? null
-                                                : () => unawaited(
-                                                      _handleRetry(message),
-                                                    ),
+                                            onPressed: () =>
+                                                unawaited(_handleRetry(message)),
                                             child: const Text(
                                               'Retry',
                                               style: TextStyle(
@@ -450,8 +496,7 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                         fillColor: const Color(0xFFF4F4F4),
                         prefixIcon: IconButton(
                           tooltip: 'Attach photo',
-                          onPressed:
-                              _sending ? null : () => unawaited(_handleImageSend()),
+                          onPressed: () => unawaited(_handleImageSend()),
                           icon: const Icon(Icons.photo_camera_outlined),
                         ),
                         border: OutlineInputBorder(
@@ -473,17 +518,8 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                           borderRadius: BorderRadius.circular(16),
                         ),
                       ),
-                      onPressed: _sending ? null : () => unawaited(_handleSend()),
-                      child: _sending
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.black,
-                              ),
-                            )
-                          : const Icon(Icons.send, color: Colors.black),
+                      onPressed: () => unawaited(_handleSend()),
+                      child: const Icon(Icons.send, color: Colors.black),
                     ),
                   ),
                 ],

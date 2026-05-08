@@ -89,7 +89,7 @@ class _DriverDocumentSubmissionScreenState
         ? rawValue.toInt()
         : int.tryParse(rawValue?.toString() ?? '');
     if (timestamp == null || timestamp <= 0) {
-      return 'Not submitted yet';
+      return 'No submission date';
     }
     final date = DateTime.fromMillisecondsSinceEpoch(timestamp).toLocal();
     return '${date.day}/${date.month}/${date.year}';
@@ -267,6 +267,10 @@ class _DriverDocumentSubmissionScreenState
 
     if (widget.document.key == 'nin' && !RegExp(r'^\d{11}$').hasMatch(value)) {
       return 'Enter the 11-digit NIN exactly as issued.';
+    }
+
+    if (widget.document.key == 'bvn' && !RegExp(r'^\d{11}$').hasMatch(value)) {
+      return 'Enter the 11-digit BVN exactly as issued.';
     }
 
     if (widget.document.key == 'drivers_license' && value.length < 6) {

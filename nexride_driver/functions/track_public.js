@@ -129,13 +129,13 @@ function tripPhaseAndStatus(ride) {
     return { trip_phase: "expired", trip_status: "Request expired" };
   }
   if (ts === TRIP_STATE.in_progress || ts === "trip_started") {
-    return { trip_phase: "in_progress", trip_status: "Trip in progress" };
+    return { trip_phase: "en_route", trip_status: "Trip in progress" };
   }
   if (ts === TRIP_STATE.arrived || ts === "driver_arrived") {
     return { trip_phase: "arrived", trip_status: "Driver at pickup" };
   }
   if (ts === TRIP_STATE.driver_arriving || ts === "driver_arriving") {
-    return { trip_phase: "en_route", trip_status: "Driver on the way" };
+    return { trip_phase: "arriving", trip_status: "Driver on the way" };
   }
   if (
     ts === TRIP_STATE.accepted ||
@@ -159,6 +159,19 @@ function buildPublicDoc(ride, driverProfile, userProfile) {
   const driverId = normUid(ride.driver_id);
   const hasDriver = driverId && !isPlaceholderDriverId(ride.driver_id);
 
+  const pickup = ride.pickup && typeof ride.pickup === "object" ? ride.pickup : {};
+  const destination =
+    (ride.destination && typeof ride.destination === "object" ? ride.destination : null) ||
+    (ride.dropoff && typeof ride.dropoff === "object" ? ride.dropoff : {});
+  const live = ride.live_location && typeof ride.live_location === "object" ? ride.live_location : {};
+  const driverLat = Number(live.lat ?? ride.driver_lat ?? 0);
+  const driverLng = Number(live.lng ?? ride.driver_lng ?? 0);
+  const pickupLat = Number(pickup.lat ?? pickup.latitude ?? 0);
+  const pickupLng = Number(pickup.lng ?? pickup.longitude ?? 0);
+  const destinationLat = Number(destination.lat ?? destination.latitude ?? 0);
+  const destinationLng = Number(destination.lng ?? destination.longitude ?? 0);
+  const fare = Number(ride.fare ?? 0) || 0;
+
   return {
     trip_status,
     trip_phase,
@@ -167,6 +180,16 @@ function buildPublicDoc(ride, driverProfile, userProfile) {
     eta_min,
     vehicle_label: hasDriver ? vehicleLabelFromDriver(driverProfile) : "",
     driver_first_name: hasDriver ? firstNameFromDriverAndUser(driverProfile, userProfile) : null,
+    phase: trip_phase,
+    ride_id: String(ride.ride_id ?? "").trim() || null,
+    driver_name: hasDriver ? firstNameFromDriverAndUser(driverProfile, userProfile) : null,
+    driver_lat: Number.isFinite(driverLat) ? driverLat : null,
+    driver_lng: Number.isFinite(driverLng) ? driverLng : null,
+    pickup_lat: Number.isFinite(pickupLat) ? pickupLat : null,
+    pickup_lng: Number.isFinite(pickupLng) ? pickupLng : null,
+    destination_lat: Number.isFinite(destinationLat) ? destinationLat : null,
+    destination_lng: Number.isFinite(destinationLng) ? destinationLng : null,
+    fare,
     updated_at: nowMs(),
   };
 }
@@ -209,6 +232,12 @@ async function syncRideTrackPublic(db, rideId) {
 
   const publicDoc = buildPublicDoc(ride, driverProfile, userProfile);
   await db.ref(`ride_track_public/${token}`).set(publicDoc);
+  console.log(
+    "SYNC_TRACK_PUBLIC",
+    `rideId=${rid}`,
+    `token=${token}`,
+    `phase=${String(publicDoc.phase ?? publicDoc.trip_phase ?? "unknown")}`,
+  );
 }
 
 /**
@@ -290,6 +319,7 @@ async function createTripShareToken(data, context, db) {
     ride_id: rideId,
     track_token: token,
     track_path: `/track/${token}`,
+    share_url: `https://nexride-8d5bc.web.app/ride?token=${encodeURIComponent(token)}`,
   };
 }
 

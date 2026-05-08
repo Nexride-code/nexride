@@ -20,6 +20,10 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
 
   List<Map<String, dynamic>> trips = <Map<String, dynamic>>[];
   bool loading = true;
+  bool _loadFailed = false;
+
+  static const String _tripHistoryFetchError =
+      'Could not load trip history. Please try again.';
 
   @override
   void initState() {
@@ -31,6 +35,13 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
   }
 
   Future<void> fetchTrips() async {
+    if (mounted) {
+      setState(() {
+        loading = true;
+        _loadFailed = false;
+      });
+    }
+
     final ref = rtdb.FirebaseDatabase.instance.ref(
       'rider_trips/${widget.userId}',
     );
@@ -67,6 +78,7 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
         setState(() {
           trips = loaded;
           loading = false;
+          _loadFailed = false;
         });
       } else {
         if (!mounted) {
@@ -76,6 +88,7 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
         setState(() {
           trips = <Map<String, dynamic>>[];
           loading = false;
+          _loadFailed = false;
         });
       }
     } catch (error, stackTrace) {
@@ -90,8 +103,14 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
       }
 
       setState(() {
+        trips = <Map<String, dynamic>>[];
         loading = false;
+        _loadFailed = true;
       });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text(_tripHistoryFetchError)),
+      );
     }
   }
 
@@ -168,27 +187,41 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: <Widget>[
                     Icon(
-                      Icons.history_toggle_off,
+                      _loadFailed ? Icons.cloud_off_outlined : Icons.history_toggle_off,
                       size: 52,
                       color: Colors.black.withValues(alpha: 0.45),
                     ),
                     const SizedBox(height: 14),
-                    const Text(
-                      'No trips yet',
-                      style: TextStyle(
+                    Text(
+                      _loadFailed ? _tripHistoryFetchError : 'No trips yet',
+                      style: const TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.w800,
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Completed rides and deliveries will appear here for easy review and support.',
-                      style: TextStyle(
-                        color: Colors.black.withValues(alpha: 0.62),
-                        height: 1.5,
-                      ),
                       textAlign: TextAlign.center,
                     ),
+                    if (!_loadFailed) ...<Widget>[
+                      const SizedBox(height: 8),
+                      Text(
+                        'Completed rides and deliveries will appear here for easy review and support.',
+                        style: TextStyle(
+                          color: Colors.black.withValues(alpha: 0.62),
+                          height: 1.5,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                    if (_loadFailed) ...<Widget>[
+                      const SizedBox(height: 24),
+                      FilledButton(
+                        onPressed: fetchTrips,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: _gold,
+                          foregroundColor: Colors.black,
+                        ),
+                        child: const Text('Try again'),
+                      ),
+                    ],
                   ],
                 ),
               ),

@@ -8,6 +8,7 @@ class RideCloudFunctionsService {
             functions ?? FirebaseFunctions.instanceFor(region: 'us-central1');
 
   final FirebaseFunctions _functions;
+  static const Duration _kCallableTimeout = Duration(seconds: 30);
 
   Future<Map<String, dynamic>> _call(
     String name,
@@ -17,8 +18,11 @@ class RideCloudFunctionsService {
     if (user != null) {
       await user.getIdToken(true);
     }
-    final callable = _functions.httpsCallable(name);
-    final result = await callable.call(payload);
+    final callable = _functions.httpsCallable(
+      name,
+      options: HttpsCallableOptions(timeout: _kCallableTimeout),
+    );
+    final result = await callable.call(payload).timeout(_kCallableTimeout);
     final data = result.data;
     if (data is Map) {
       return Map<String, dynamic>.from(data);
@@ -98,12 +102,41 @@ class RideCloudFunctionsService {
         'reference': reference,
       });
 
-  Future<Map<String, dynamic>> getRideCallRtcToken({required String rideId}) =>
-      _call('getRideCallRtcToken', <String, dynamic>{
+  Future<Map<String, dynamic>> getRideCallRtcToken({
+    required String rideId,
+    required String uid,
+    String? channelName,
+    bool force = false,
+    bool forceClearStale = true,
+  }) async {
+    final payload = <String, dynamic>{
+      'rideId': rideId,
+      'ride_id': rideId,
+      'requestId': rideId,
+      'tripId': rideId,
+      'uid': uid,
+      'channelName': channelName ?? 'nexride_$rideId',
+      'force': force,
+      'force_clear_stale': forceClearStale,
+    };
+    final callable = _functions.httpsCallable(
+      'generateAgoraToken',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(payload).timeout(_kCallableTimeout);
+    final data = result.data;
+    if (data is Map) {
+      return Map<String, dynamic>.from(data);
+    }
+    return <String, dynamic>{};
+  }
+
+  Future<Map<String, dynamic>> clearStaleRideCall({
+    required String rideId,
+  }) =>
+      _call('clearStaleRideCall', <String, dynamic>{
         'rideId': rideId,
         'ride_id': rideId,
-        'requestId': rideId,
-        'tripId': rideId,
       });
 
   Future<Map<String, dynamic>> registerDevicePushToken({

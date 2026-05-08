@@ -823,11 +823,13 @@
     let sharedTripRef = null;
     let connectionRef = null;
     let sharedTripSnapshot = null;
+    let sharedTripFallbackUsed = false;
     let currentModel = null;
     let currentToken = "";
     let currentRideId = "";
     let hasLoadedTrip = false;
     let isConnected = true;
+    let missingDataRetryTimer = null;
 
     let routeBackdrop = null;
     let routeTravelled = null;
@@ -872,6 +874,53 @@
         if (text) {
           return text;
         }
+      }
+      return "";
+    }
+
+    function safeDecode(value) {
+      const raw = firstNonEmpty(value);
+      if (!raw) {
+        return "";
+      }
+      try {
+        return decodeURIComponent(raw);
+      } catch (_) {
+        return raw;
+      }
+    }
+
+    function normalizedPathSegments() {
+      return window.location.pathname
+        .split("/")
+        .map((segment) => safeDecode(segment))
+        .map((segment) => segment.trim())
+        .filter(Boolean);
+    }
+
+    function tokenFromPath() {
+      const segments = normalizedPathSegments();
+      if (segments.length < 2) {
+        return "";
+      }
+
+      // Supports /track/<token> deep-links.
+      const root = segments[0].toLowerCase();
+      if (root === "track") {
+        return firstNonEmpty(segments[1]);
+      }
+      return "";
+    }
+
+    function rideIdFromPath() {
+      const segments = normalizedPathSegments();
+      if (segments.length < 2) {
+        return "";
+      }
+
+      // Supports /ride/<rideId> links where token is resolved later.
+      if (segments[0].toLowerCase() === "ride") {
+        return firstNonEmpty(segments[1]);
       }
       return "";
     }
@@ -1079,15 +1128,16 @@
     function headlineForPhase(phase) {
       switch (phase) {
         case "accepted":
-          return "Driver accepted the trip";
+          return "Driver assigned - on the way to pick you up";
         case "arriving":
           return "Driver is approaching pickup";
         case "arrived":
           return "Driver has arrived";
         case "in_progress":
+        case "en_route":
           return "Trip is in progress";
         case "completed":
-          return "Trip completed";
+          return "Trip completed - thank you for riding with NexRide";
         case "cancelled":
           return "Trip unavailable";
         default:
@@ -1108,6 +1158,7 @@
         case "arrived":
           return { text: "Arrived", className: "" };
         case "in_progress":
+        case "en_route":
           return { text: "In progress", className: "" };
         default:
           return { text: "Searching", className: "" };
@@ -1373,10 +1424,62 @@
       return { travelled, remaining };
     }
 
-    function buildModel(sharedTrip) {
+    function buildModel(sharedTrip, tokenHint = "") {
       const share = asObject(sharedTrip);
       if (!share) {
         return null;
+      }
+      const hasPublicSummaryShape =
+        firstNonEmpty(share.trip_phase, share.trip_status).length > 0 &&
+        !asObject(share.route);
+      if (hasPublicSummaryShape) {
+        const phaseRaw = firstNonEmpty(share.trip_phase).toLowerCase();
+        const phaseMap = {
+          searching: "searching",
+          assigned: "accepted",
+          en_route: "arriving",
+          arriving: "arriving",
+          arrived: "arrived",
+          in_progress: "en_route",
+          completed: "completed",
+          cancelled: "cancelled",
+          expired: "cancelled"
+        };
+        const phase = phaseMap[phaseRaw] || "searching";
+        const status = normalizeStatus(phase, phase);
+        return {
+          rideId: firstNonEmpty(share.ride_id, tokenHint),
+          status,
+          phase,
+          shareVersion: 1,
+          pickup: locationFrom(null, firstNonEmpty(share.pickup_area, "Pickup area")),
+          destination: locationFrom(null, firstNonEmpty(share.dropoff_area, "Drop-off area")),
+          stops: [],
+          driver: {
+            id: "",
+            name: firstNonEmpty(share.driver_first_name, "Driver assigned"),
+            car: firstNonEmpty(share.vehicle_label),
+            plate: "",
+            rating: null,
+            photoUrl: ""
+          },
+          liveLocation: {
+            lat: null,
+            lng: null,
+            heading: null,
+            updatedAt: asInt(share.updated_at) || Date.now()
+          },
+          routePath: [],
+          routeDistanceKm: null,
+          updatedAt: asInt(share.updated_at) || Date.now(),
+          expiresAt: 0,
+          acceptedAt: null,
+          arrivingAt: null,
+          arrivedAt: null,
+          startedAt: null,
+          completedAt: null,
+          cancelledAt: null
+        };
       }
 
       const route = asObject(share.route) || {};
@@ -1408,7 +1511,7 @@
       const phase = phaseForStatus(status);
 
       return {
-        rideId: firstNonEmpty(share.ride_id),
+        rideId: firstNonEmpty(share.ride_id, tokenHint),
         status,
         phase,
         shareVersion: asInt(share.share_version) || 1,
@@ -1461,7 +1564,7 @@
         };
       }
 
-      if (model.phase === "in_progress") {
+      if (model.phase === "in_progress" || model.phase === "en_route") {
         const projection = projectLocationOnPath(model.liveLocation, model.routePath);
         if (projection) {
           const percent = Math.max(1, Math.min(99, Math.round((projection.travelledMeters / projection.totalMeters) * 100)));
@@ -1489,6 +1592,14 @@
             value: model.phase === "arrived" ? "Arrived" : formatDistance(approach.distance) || "Live",
             percent: approach.percent,
             copy: etaText
+          };
+        }
+        if (model.phase === "accepted") {
+          return {
+            label: "Driver assigned",
+            value: "Assigned",
+            percent: 28,
+            copy: "Driver assigned - trip not started yet."
           };
         }
         return {
@@ -1834,6 +1945,11 @@
       sharedTripSnapshot = snapshot.exists() ? asObject(snapshot.val()) : null;
 
       if (!sharedTripSnapshot) {
+        scheduleMissingDataRetry();
+        if (!sharedTripFallbackUsed && currentToken) {
+          attachLegacySharedTripListener(currentToken);
+          return;
+        }
         if (hasLoadedTrip) {
           showState("Share link expired", "This NexRide share link is no longer active.", "EX");
         } else {
@@ -1842,7 +1958,8 @@
         return;
       }
 
-      const model = buildModel(sharedTripSnapshot);
+      cancelMissingDataRetry();
+      const model = buildModel(sharedTripSnapshot, currentToken);
       if (!model || !model.rideId) {
         showState("Trip unavailable", "The trip data is incomplete for public tracking.", "NR");
         return;
@@ -1870,8 +1987,44 @@
       }
     }
 
+    function cancelMissingDataRetry() {
+      if (missingDataRetryTimer) {
+        clearTimeout(missingDataRetryTimer);
+        missingDataRetryTimer = null;
+      }
+    }
+
+    function scheduleMissingDataRetry() {
+      if (missingDataRetryTimer) {
+        return;
+      }
+      missingDataRetryTimer = setTimeout(() => {
+        missingDataRetryTimer = null;
+        if (!currentToken) {
+          return;
+        }
+        attachSharedTripListener(currentToken);
+      }, 10000);
+    }
+
     function attachSharedTripListener(token) {
       detachSharedTripListener();
+      sharedTripFallbackUsed = false;
+      console.log("[NexRide tracking] attaching listener", {
+        token,
+        path: `ride_track_public/${token}`
+      });
+      sharedTripRef = db.ref(`ride_track_public/${token}`);
+      sharedTripRef.on("value", handleSharedTripSnapshot);
+    }
+
+    function attachLegacySharedTripListener(token) {
+      detachSharedTripListener();
+      sharedTripFallbackUsed = true;
+      console.log("[NexRide tracking] falling back to legacy listener", {
+        token,
+        path: `shared_trips/${token}`
+      });
       sharedTripRef = db.ref(`shared_trips/${token}`);
       sharedTripRef.on("value", handleSharedTripSnapshot);
     }
@@ -1882,6 +2035,20 @@
       }
 
       try {
+        const rideSnapshot = await db.ref(`ride_requests/${rideId}`).once("value");
+        const ride = asObject(rideSnapshot.val());
+        const directToken = firstNonEmpty(
+          ride && ride.track_token,
+          ride && ride.share && ride.share.token
+        );
+        if (directToken) {
+          console.log("[NexRide tracking] resolved token from ride_requests", {
+            rideId,
+            token: directToken
+          });
+          return directToken;
+        }
+
         const snapshot = await db.ref(`shared_trip_lookup/${rideId}`).once("value");
         if (!snapshot.exists()) {
           return "";
@@ -1897,7 +2064,14 @@
           return "";
         }
 
-        return firstNonEmpty(lookup.token);
+        const fallbackToken = firstNonEmpty(lookup.token);
+        if (fallbackToken) {
+          console.log("[NexRide tracking] resolved token from shared_trip_lookup", {
+            rideId,
+            token: fallbackToken
+          });
+        }
+        return fallbackToken;
       } catch (error) {
         console.error("[NexRide tracking] share lookup failed", error);
         return "";
@@ -1938,22 +2112,45 @@
       attachConnectionListener();
 
       const params = new URLSearchParams(window.location.search);
-      currentRideId = firstNonEmpty(params.get("rideId"));
-      currentToken = firstNonEmpty(params.get("token"));
+      const hashParams = new URLSearchParams(
+        window.location.hash.startsWith("#")
+          ? window.location.hash.slice(1)
+          : window.location.hash
+      );
+
+      currentToken = firstNonEmpty(
+        safeDecode(params.get("token")),
+        safeDecode(params.get("trackToken")),
+        safeDecode(hashParams.get("token")),
+        safeDecode(hashParams.get("trackToken")),
+        tokenFromPath()
+      );
+      currentRideId = firstNonEmpty(
+        safeDecode(params.get("rideId")),
+        safeDecode(params.get("ride_id")),
+        safeDecode(hashParams.get("rideId")),
+        safeDecode(hashParams.get("ride_id")),
+        rideIdFromPath()
+      );
 
       if (!currentToken && currentRideId) {
         currentToken = await resolveTokenForRide(currentRideId);
       }
+      console.log("[NexRide tracking] init", {
+        rideId: currentRideId,
+        token: currentToken || "(missing)"
+      });
 
       if (!currentToken) {
         elements.loadingState.classList.add("hidden");
         showState(
-          "Tracking unavailable",
+          "Tracking link may have expired",
           currentRideId
-            ? "This ride does not have an active public tracking session right now."
-            : "Open a valid NexRide tracking link with a ride ID to view live trip progress.",
+            ? "Tracking link may have expired. Ask your driver for a new link."
+            : "Tracking link may have expired. Ask your driver for a new link.",
           "NF"
         );
+        scheduleMissingDataRetry();
         return;
       }
 
