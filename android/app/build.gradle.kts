@@ -6,6 +6,17 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Optional production signing: copy `key.properties.template` to
+// `android/key.properties`, fill in keystore credentials, then release builds
+// will sign with the production keystore. If `key.properties` is missing the
+// release build falls back to the debug keystore so local `flutter run --release`
+// still works.
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = java.util.Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+}
+
 android {
     namespace = "com.nexride.rider"
     compileSdk = flutter.compileSdkVersion
@@ -30,11 +41,29 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        create("release") {
+            if (keystorePropertiesFile.exists()) {
+                keyAlias = keystoreProperties["keyAlias"] as String?
+                keyPassword = keystoreProperties["keyPassword"] as String?
+                storeFile = (keystoreProperties["storeFile"] as String?)?.let { file(it) }
+                storePassword = keystoreProperties["storePassword"] as String?
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
+            // Explicitly disable R8 — Google Maps, geolocator, Agora, and
+            // audioplayers use reflection/JNI; R8 removes required classes and
+            // causes native crashes in release builds.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }

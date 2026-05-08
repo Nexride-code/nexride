@@ -105,6 +105,12 @@
         ".write": false
       }
     },
+    "ride_offer_fanout": {
+      "$rideId": {
+        ".read": false,
+        ".write": false
+      }
+    },
 
     "rider_verifications": {
       "$uid": {
@@ -135,6 +141,14 @@
       "rider_trust_rules": {
         ".read": "auth != null",
         ".write": "auth != null && root.child('users/' + auth.uid + '/role').val() === 'admin'"
+      },
+      "nexride_dispatch": {
+        ".read": false,
+        ".write": false
+      },
+      "nexride_rider": {
+        ".read": false,
+        ".write": false
       }
     },
 

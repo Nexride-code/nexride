@@ -1,0 +1,22 @@
+# NexRide Driver — Production keystore credentials.
+#
+# 1. Generate the keystore (one-time):
+#    keytool -genkey -v -keystore nexride-driver-release.keystore \
+#      -alias nexride-driver -keyalg RSA -keysize 2048 -validity 10000
+#
+# 2. Store the keystore *outside* the repository (e.g. ~/keys/).
+#
+# 3. Copy this file to `nexride_driver/android/key.properties`, fill in real
+#    values, and DO NOT commit it.
+#
+# 4. After this file is in place, `flutter build appbundle --release` and
+#    `flutter build apk --release` will sign with the production keystore.
+#
+# 5. ALSO add `nexride_driver/android/app/google-services.json` (download from
+#    Firebase Console → Project settings → "NexRide Driver" Android app). The
+#    gradle plugin auto-applies once the file is present.
+
+storePassword=REPLACE_WITH_KEYSTORE_PASSWORD
+keyPassword=REPLACE_WITH_KEY_PASSWORD
+keyAlias=nexride-driver
+storeFile=/absolute/path/to/nexride-driver-release.keystore

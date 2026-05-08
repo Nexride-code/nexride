@@ -4948,7 +4948,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           Text(
             locked
                 ? 'Payment method is fixed for this request.'
-                : 'Choose card checkout or bank transfer. Drivers are matched only after NexRide verifies payment on our servers.',
+                : 'Pay securely with your card. Drivers are matched only after NexRide verifies your payment on our servers.',
             style: const TextStyle(
               color: _panelMutedInk,
               fontSize: 12,
@@ -4957,54 +4957,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             ),
           ),
           const SizedBox(height: 12),
+          // Production: card-only. Bank transfer is gated server-side behind
+          // `app_config/nexride_dispatch/bank_transfer_dispatch_enabled`; we do
+          // not expose it in the rider UI because dispatch will refuse to
+          // fan it out by default.
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: [
               ChoiceChip(
                 label: const Text('Card (Flutterwave)'),
-                selected:
-                    _riderTripPaymentMethod != 'bank_transfer',
-                onSelected: (selected) {
-                  if (!selected || locked) {
-                    return;
-                  }
-                  setState(() => _riderTripPaymentMethod = 'flutterwave');
-                },
+                selected: true,
+                onSelected: (_) {},
                 selectedColor: _gold.withValues(alpha: 0.22),
-                labelStyle: TextStyle(
-                  color: _riderTripPaymentMethod != 'bank_transfer'
-                      ? _panelInk
-                      : _panelMutedInk,
+                labelStyle: const TextStyle(
+                  color: _panelInk,
                   fontWeight: FontWeight.w700,
                 ),
-                side: BorderSide(
-                  color: _riderTripPaymentMethod != 'bank_transfer'
-                      ? _gold
-                      : _panelBorder,
-                ),
-              ),
-              ChoiceChip(
-                label: const Text('Bank transfer'),
-                selected: _riderTripPaymentMethod == 'bank_transfer',
-                onSelected: (selected) {
-                  if (!selected || locked) {
-                    return;
-                  }
-                  setState(() => _riderTripPaymentMethod = 'bank_transfer');
-                },
-                selectedColor: _gold.withValues(alpha: 0.22),
-                labelStyle: TextStyle(
-                  color: _riderTripPaymentMethod == 'bank_transfer'
-                      ? _panelInk
-                      : _panelMutedInk,
-                  fontWeight: FontWeight.w700,
-                ),
-                side: BorderSide(
-                  color: _riderTripPaymentMethod == 'bank_transfer'
-                      ? _gold
-                      : _panelBorder,
-                ),
+                side: BorderSide(color: _gold),
               ),
             ],
           ),

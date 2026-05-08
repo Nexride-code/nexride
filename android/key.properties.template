@@ -1,0 +1,19 @@
+# NexRide Rider — Production keystore credentials.
+#
+# 1. Generate the keystore (one-time):
+#    keytool -genkey -v -keystore nexride-rider-release.keystore \
+#      -alias nexride-rider -keyalg RSA -keysize 2048 -validity 10000
+#
+# 2. Store the keystore *outside* the repository (e.g. ~/keys/).
+#
+# 3. Copy this file to `android/key.properties`, fill in real values, and
+#    DO NOT commit it (already covered by the root .gitignore via *.properties
+#    pattern; verify before pushing).
+#
+# 4. After this file is in place, `flutter build appbundle --release` and
+#    `flutter build apk --release` will sign with the production keystore.
+
+storePassword=REPLACE_WITH_KEYSTORE_PASSWORD
+keyPassword=REPLACE_WITH_KEY_PASSWORD
+keyAlias=nexride-rider
+storeFile=/absolute/path/to/nexride-rider-release.keystore

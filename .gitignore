@@ -5,11 +5,26 @@ firebase-debug.log
 build/
 .dart_tool/
 third_party/agora_rtc_engine/**/.cxx/
+
+# Android build artifacts
 android/.gradle/
 android/app/build/
+nexride_driver/android/.gradle/
+nexride_driver/android/app/build/
+
+# Production signing credentials — NEVER commit
+**/android/key.properties
+**/android/*.keystore
+**/android/*.jks
+
+# iOS / desktop ephemeral
 ios/Pods/
+nexride_driver/ios/Pods/
 macos/Flutter/ephemeral/
 windows/flutter/ephemeral/
 linux/flutter/ephemeral/ios/Pods/
 macos/Pods/
-android/.gradle/
+
+# Local Firebase emulator artifacts
+firebase-export-*/
+.firebase/

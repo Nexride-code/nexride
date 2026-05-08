@@ -69,9 +69,12 @@ Future<void> _initializeFirebase({
     _logStartup(
       'Initializing Firebase for route=$startupRoute authDomain=${DefaultFirebaseOptions.webAuthDomain} databaseUrl=${DefaultFirebaseOptions.webDatabaseUrl}',
     );
+    // Cap the Firebase init wait so a flaky network on cold start does not
+    // freeze the splash forever. After the timeout we fall through to the
+    // global error handler which renders the recoverable startup screen.
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
-    );
+    ).timeout(const Duration(seconds: 8));
     print('FIREBASE_INIT_DONE');
     print("RUNTIME_PROJECT_ID: ${Firebase.app().options.projectId}");
     print("RUNTIME_DB_URL: ${FirebaseDatabase.instance.databaseURL}");

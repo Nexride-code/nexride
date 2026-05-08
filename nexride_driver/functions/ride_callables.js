@@ -331,11 +331,16 @@ function isOpenPoolRide(ride) {
 }
 
 /**
- * Driver discovery / fanout / accept eligibility.
- * Card: prepaid `paid`, or webhook/callable `verified`, with Flutterwave txn id when applicable.
- * Bank transfer: rider request is searchable while NexRide confirms the transfer offline.
+ * Production rule: NexRide dispatches a ride to drivers only after a verified
+ * card payment is on file. Cash is unsupported. Bank transfer dispatch is
+ * gated behind an explicit RTDB flag (`app_config/nexride_dispatch/
+ * bank_transfer_dispatch_enabled`) and is OFF in production by default — when
+ * it is allowed it still requires `payment_status === pending*`.
+ *
+ * Anyone changing this function must also re-read `fanOutDriverOffersIfEligible`
+ * and `acceptRideRequest` because they all share this gate.
  */
-function paymentAllowsDispatch(ride) {
+function paymentAllowsDispatch(ride, options = {}) {
   if (!ride || typeof ride !== "object") {
     return false;
   }
@@ -347,13 +352,26 @@ function paymentAllowsDispatch(ride) {
   const ps = String(ride.payment_status ?? ride.paymentStatus ?? "")
     .trim()
     .toLowerCase();
+
+  // Cash is permanently disabled. If a stale ride somehow has it,
+  // refuse to dispatch.
+  if (pm === "cash") {
+    return false;
+  }
+
   if (pm === "bank_transfer") {
+    if (options.bankTransferDispatchEnabled !== true) {
+      return false;
+    }
     return (
       ps === "pending_manual_confirmation" ||
       ps === "pending_review" ||
       ps === "pending"
     );
   }
+
+  // Card / Flutterwave path: must be verified AND have a transaction id.
+  // No transaction id → not a real charge, never dispatch.
   const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
   if (!ptid) {
     return false;

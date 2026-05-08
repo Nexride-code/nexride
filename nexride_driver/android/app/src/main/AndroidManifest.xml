@@ -4,6 +4,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- Wake the device for high-priority FCM ride offers / call invites
+         while the screen is off (Grab/Uber-style heads-up alerts). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- Allow the offer popup to vibrate even if the channel sound is muted. -->
+    <uses-permission android:name="android.permission.VIBRATE"/>
     <!-- Required for geolocator foreground location service (Android 9+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <!-- Required for location foreground service type declaration (Android 14+) -->
