@@ -42,6 +42,7 @@ import 'support/rider_trust_support.dart';
 import 'support/ride_create_metadata.dart';
 import 'support/rtdb_flow_debug_log.dart';
 import 'support/friendly_firebase_errors.dart';
+import 'support/nexride_contact_constants.dart';
 import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
@@ -1548,10 +1549,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         title: const Text('Finish your trip'),
-        content: const Text(
+        content: Text(
           'Your card payment completed, but the trip setup did not finish. '
           'Tap complete trip to continue, or discard to start over. '
-          'If money left your account and you discard, save your bank receipt and contact support.',
+          'If money left your account and you discard, save your bank receipt and contact support at $kNexRideSupportEmail.',
         ),
         actions: [
           TextButton(
@@ -1581,7 +1582,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           }
         } else if (mounted) {
           _showSnackBar(
-            'Could not discard that pending payment. Please contact support.',
+            'Could not discard that pending payment. Please contact support at $kNexRideSupportEmail.',
           );
         }
       } catch (_) {
@@ -9364,8 +9365,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 ListTile(
                   leading: const Icon(Icons.support_agent, color: _gold),
                   title: const Text('Contact support team'),
-                  subtitle: const Text(
-                    'Describe what happened; include your ride ID if you can.',
+                  subtitle: Text(
+                    'Email $kNexRideSupportEmail — include your ride ID if you can.',
                   ),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -9373,8 +9374,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                     safeShowSnackBar(
                       context,
                       id.isEmpty
-                          ? 'Support: open your trip receipt after the ride ends, or email help with your account phone number.'
-                          : 'Support: reference ride ID $id when you reach out (email / in-app help).',
+                          ? 'Support: email $kNexRideSupportEmail with your account phone number, or use your trip receipt after the ride ends.'
+                          : 'Support: email $kNexRideSupportEmail and reference ride ID $id.',
                     );
                   },
                 ),

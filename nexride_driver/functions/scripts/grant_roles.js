@@ -13,8 +13,8 @@ const admin = require("firebase-admin");
 const PROJECT_ID = "nexride-8d5bc";
 const DATABASE_URL = "https://nexride-8d5bc-default-rtdb.firebaseio.com";
 
-const ADMIN_EMAIL = "nexrideinfo@gmail.com";
-const SUPPORT_EMAIL = "nexridesupportteam@gmail.com";
+const ADMIN_EMAIL = "admin@nexride.africa";
+const SUPPORT_EMAIL = "support@nexride.africa";
 
 function nowMs() {
   return Date.now();

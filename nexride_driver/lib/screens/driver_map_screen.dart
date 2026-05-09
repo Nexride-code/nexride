@@ -39,6 +39,7 @@ import '../support/driver_kyc_gate_support.dart';
 import '../support/driver_profile_support.dart';
 import '../support/dispatch_payment_support.dart';
 import '../support/friendly_firebase_errors.dart';
+import '../support/nexride_contact_constants.dart';
 import '../support/production_user_messages.dart';
 import '../support/realtime_database_error_support.dart';
 import '../support/rtdb_flow_debug_log.dart';
@@ -7517,7 +7518,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         'Your driver session needs to reconnect before you can accept rides.',
       'ride_missing' => _kCouldNotAcceptRideTakenMessage,
       'invalid_ride_payload' =>
-        'This ride request is missing required data. Please try again or contact support.',
+        'This ride request is missing required data. Please try again or contact support at $kNexRideSupportEmail.',
       'unauthorized' => 'Driver not eligible',
       'invalid_input' => 'Invalid state',
       _ => 'This request is no longer available.',

@@ -13,7 +13,7 @@ void main() {
   late FakeAdminDataService dataService;
   const adminSession = AdminSession(
     uid: 'admin_uid_001',
-    email: 'admin@nexride.com',
+    email: 'admin@nexride.africa',
     displayName: 'Ops Admin',
     accessMode: 'database_role',
   );
@@ -428,7 +428,7 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
       id: 'rider_001',
       name: 'Ada Rider',
       phone: '+234800000001',
-      email: 'ada.rider@nexride.com',
+      email: 'ada.rider@nexride.africa',
       city: 'Lagos',
       status: 'active',
       verificationStatus: 'verified',
@@ -453,7 +453,7 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
       id: 'driver_001',
       name: 'Samuel Driver',
       phone: '+234800000002',
-      email: 'samuel.driver@nexride.com',
+      email: 'samuel.driver@nexride.africa',
       city: 'Abuja',
       status: 'active',
       accountStatus: 'active',
@@ -557,13 +557,13 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
       driverId: 'driver_001',
       driverName: 'Samuel Driver',
       phone: '+234800000002',
-      email: 'samuel.driver@nexride.com',
+      email: 'samuel.driver@nexride.africa',
       businessModel: 'subscription',
       status: 'approved',
       overallStatus: 'approved',
       submittedAt: DateTime(2026, 3, 22),
       reviewedAt: DateTime(2026, 3, 24),
-      reviewedBy: 'ops@nexride.com',
+      reviewedBy: 'ops@nexride.africa',
       failureReason: '',
       documents: const <String, dynamic>{
         'drivers_license': <String, dynamic>{
@@ -627,7 +627,7 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
     driverVerificationRequired: false,
     activeServiceTypes: <String>['ride'],
     offRouteToleranceMeters: 250,
-    adminEmail: 'admin@nexride.com',
+    adminEmail: 'admin@nexride.africa',
     rawData: <String, dynamic>{},
   ),
   tripTrends: const <AdminTrendPoint>[

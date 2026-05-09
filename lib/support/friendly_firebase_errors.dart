@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart'
     show FirebaseAuthException, FirebaseException;
 import 'package:flutter/foundation.dart';
 
+import 'nexride_contact_constants.dart';
 import 'production_user_messages.dart';
 import 'startup_rtdb_support.dart' show isPermissionDeniedError;
 
@@ -91,7 +92,7 @@ String friendlyFirebaseAuthError(Object error) {
     case 'invalid-email':
       return 'That email address does not look valid.';
     case 'user-disabled':
-      return 'This account has been disabled. Contact support.';
+      return 'This account has been disabled. Contact support at $kNexRideSupportEmail.';
     case 'email-already-in-use':
       return 'That email is already registered.';
     case 'weak-password':

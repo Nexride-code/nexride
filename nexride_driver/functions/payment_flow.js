@@ -22,6 +22,15 @@ const { syncRideTrackPublic } = require("./track_public");
 const DEFAULT_FLUTTERWAVE_REDIRECT_URL =
   "https://nexride-8d5bc.web.app/pay/card-link-complete";
 
+const FLUTTERWAVE_CHECKOUT_SUPPORT_EMAIL = "support@nexride.africa";
+
+function flutterwaveCheckoutCustomizations(title) {
+  return {
+    title,
+    description: `Support: ${FLUTTERWAVE_CHECKOUT_SUPPORT_EMAIL}`,
+  };
+}
+
 function normUid(uid) {
   return String(uid ?? "").trim();
 }
@@ -182,7 +191,9 @@ async function initiateFlutterwavePayment(data, context, db) {
     meta: deliveryId
       ? { delivery_id: deliveryId, rider_id: riderId }
       : { ride_id: rideId, rider_id: riderId },
-    customizations: { title: deliveryId ? "NexRide delivery" : "NexRide trip" },
+    customizations: flutterwaveCheckoutCustomizations(
+      deliveryId ? "NexRide delivery" : "NexRide trip",
+    ),
   };
   const r = await createHostedPaymentLink(body);
   if (!r.ok) {
@@ -354,7 +365,7 @@ async function initiateFlutterwaveRideIntent(data, context, db) {
       name: String(data?.customer_name ?? "NexRide rider").trim(),
     },
     meta: { rider_id: riderId, ride_intent: "1" },
-    customizations: { title: "NexRide trip" },
+    customizations: flutterwaveCheckoutCustomizations("NexRide trip"),
   };
   const r = await createHostedPaymentLink(body);
   if (!r.ok) {
@@ -455,7 +466,7 @@ async function initiateFlutterwaveCardLinkIntent(data, context, db) {
       name: String(data?.customer_name ?? "NexRide rider").trim(),
     },
     meta: { rider_id: riderId, card_link_intent: "1" },
-    customizations: { title: "Save card on NexRide" },
+    customizations: flutterwaveCheckoutCustomizations("Save card on NexRide"),
   };
   let r;
   try {

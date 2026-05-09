@@ -1,7 +1,7 @@
 /** Marketing copy for public NexRide pages (replace contact details for your deployment). */
 
 export const SITE = {
-  contactEmail: "hello@nexride.example",
+  contactEmail: "info@nexride.africa",
   contactPhone: "+234 (0) 000 000 0000",
 };
 

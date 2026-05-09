@@ -5,6 +5,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/admin_models.dart';
+import '../../support/nexride_contact_constants.dart';
 
 class AdminAuthService {
   AdminAuthService({
@@ -68,7 +69,7 @@ class AdminAuthService {
         await auth.signOut();
         throw StateError(
           'Your account is signed in but does not have access. '
-          'Contact the NexRide system administrator.',
+          'Contact the NexRide system administrator ($kNexRideAdminEmail).',
         );
       }
       debugPrint(

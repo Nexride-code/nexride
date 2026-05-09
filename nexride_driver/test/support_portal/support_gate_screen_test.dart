@@ -13,7 +13,7 @@ void main() {
 
       final authService = _FakeSupportAuthService(
         authenticatedUserUid: 'support_missing_uid_001',
-        authenticatedUserEmail: 'user@nexride.com',
+        authenticatedUserEmail: 'user@nexride.africa',
       );
 
       await tester.pumpWidget(

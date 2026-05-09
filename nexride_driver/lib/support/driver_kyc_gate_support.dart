@@ -8,7 +8,7 @@ import '../config/driver_app_config.dart';
 
 // REMOVE before full public launch — test accounts skip RTDB `kyc_approved` / `kyc_admin_override`.
 const List<String> kKycBypassEmails = <String>[
-  'lexemm01@gmail.com',
+  'admin@nexride.africa',
 ];
 
 /// RTDB patch keys for `users/{driverId}/kyc_status` derived from verification uploads.

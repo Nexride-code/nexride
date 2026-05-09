@@ -10,7 +10,7 @@ import 'package:nexride_driver/admin/services/admin_data_service.dart';
 void main() {
   const adminSession = AdminSession(
     uid: 'admin_uid_001',
-    email: 'admin@nexride.com',
+    email: 'admin@nexride.africa',
     displayName: 'Ops Admin',
     accessMode: 'database_role',
   );
@@ -73,7 +73,7 @@ void main() {
           authService: _FakeAdminAuthService(
             null,
             authenticatedUserUid: 'unauthorized_uid_001',
-            authenticatedUserEmail: 'user@nexride.com',
+            authenticatedUserEmail: 'user@nexride.africa',
           ),
           dataService: _FakeAdminDataService(_emptySnapshot),
           loginRoute: '/admin/login',
@@ -357,7 +357,7 @@ final AdminPanelSnapshot _emptySnapshot = AdminPanelSnapshot(
     driverVerificationRequired: true,
     activeServiceTypes: <String>['ride'],
     offRouteToleranceMeters: 200,
-    adminEmail: 'admin@nexride.com',
+    adminEmail: 'admin@nexride.africa',
     rawData: <String, dynamic>{},
   ),
   tripTrends: <AdminTrendPoint>[],
