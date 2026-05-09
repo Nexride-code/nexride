@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
@@ -20,6 +22,9 @@ class DriverLoginScreen extends StatefulWidget {
 
 class _DriverLoginScreenState extends State<DriverLoginScreen>
     with SingleTickerProviderStateMixin {
+  static const Duration _loginRtdbReadTimeout = Duration(seconds: 22);
+  static const int _loginAuthMaxAttempts = 3;
+
   final TextEditingController emailController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
 
@@ -48,6 +53,37 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
     ).animate(_controller);
   }
 
+  Future<UserCredential> _signInWithBackoff(String email, String password) async {
+    Object? lastError;
+    for (var attempt = 1; attempt <= _loginAuthMaxAttempts; attempt++) {
+      try {
+        return await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: email,
+          password: password,
+        );
+      } on FirebaseAuthException catch (e) {
+        lastError = e;
+        debugPrint(
+          '[DriverLogin] signIn attempt=$attempt/$_loginAuthMaxAttempts '
+          'code=${e.code} message=${e.message}',
+        );
+        final retryable =
+            e.code == 'network-request-failed' || e.code == 'internal-error';
+        if (!retryable || attempt >= _loginAuthMaxAttempts) {
+          rethrow;
+        }
+        await Future<void>.delayed(Duration(milliseconds: 350 * attempt));
+      }
+    }
+    if (lastError is FirebaseAuthException) {
+      throw lastError;
+    }
+    throw FirebaseAuthException(
+      code: 'unknown',
+      message: 'Could not reach sign-in service.',
+    );
+  }
+
   Future<void> loginDriver() async {
     final email = emailController.text.trim();
     final password = passwordController.text.trim();
@@ -64,10 +100,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
       debugPrint('[DriverLogin] attempting login email=$email');
 
       final userCredential =
-          await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email: email,
-        password: password,
-      );
+          await _signInWithBackoff(email, password);
 
       final user = userCredential.user;
       if (user == null) {
@@ -82,12 +115,17 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
       final verificationPath = driverVerificationAdminPath(user.uid);
       final driverRef = rootRef.child(profilePath);
       debugPrint(
-        '[DriverLogin] driver profile read started uid=${user.uid} path=$profilePath timeout=${kDriverProfileReadTimeout.inSeconds}s',
+        '[DriverLogin] driver profile read started uid=${user.uid} path=$profilePath '
+        'timeout=${_loginRtdbReadTimeout.inSeconds}s',
       );
-      await driverRef.keepSynced(true);
-      final snapshot = (await driverRef.once(DatabaseEventType.value).timeout(
-                kDriverProfileReadTimeout,
-              ))
+      try {
+        await driverRef.keepSynced(true);
+      } catch (e) {
+        debugPrint('[DriverLogin] keepSynced non-fatal error=$e');
+      }
+      final snapshot = (await driverRef
+              .once(DatabaseEventType.value)
+              .timeout(_loginRtdbReadTimeout))
           .snapshot;
       debugPrint(
         '[DriverLogin] driver profile read completed uid=${user.uid} path=$profilePath found=${snapshot.exists} valueType=${snapshot.value?.runtimeType ?? 'null'}',
@@ -98,6 +136,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
       final pricingConfig = await fetchDriverPricingConfig(
         rootRef: rootRef,
         source: 'login',
+        readTimeout: _loginRtdbReadTimeout,
       );
 
       final profileRecord = buildDriverProfileRecord(

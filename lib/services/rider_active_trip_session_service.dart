@@ -5,6 +5,7 @@ import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 
 import '../trip_sync/trip_state_machine.dart';
+import 'rider_ride_cloud_functions_service.dart';
 
 class RiderActiveTripSession {
   const RiderActiveTripSession({
@@ -48,6 +49,10 @@ class RiderActiveTripSessionService {
   static const Duration _staleSearchingRestoreTimeout = Duration(minutes: 3);
 
   static const Set<String> _activeStatuses = <String>{
+    'requested',
+    'searching',
+    'searching_driver',
+    'matching',
     // Treat only driver-committed/active-trip states as active for UI gating.
     'pending_driver_action',
     'assigned',
@@ -66,6 +71,36 @@ class RiderActiveTripSessionService {
   };
 
   RiderActiveTripSession? get currentSession => sessionNotifier.value;
+
+  /// Cancel before the trip is in progress (matches map-screen policy).
+  bool allowsRiderBannerCancel(RiderActiveTripSession session) {
+    final st = session.status.trim().toLowerCase();
+    if (st == 'on_trip') {
+      return false;
+    }
+    if (_terminalStatuses.contains(st)) {
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> cancelActiveTripViaCloudFunction(
+    RiderRideCloudFunctionsService rideCloud, {
+    String cancelReason = 'rider_cancelled',
+  }) async {
+    final session = sessionNotifier.value;
+    if (session == null) {
+      return;
+    }
+    await rideCloud.cancelRideRequest(
+      rideId: session.rideId,
+      cancelReason: cancelReason,
+    );
+    clearSession(
+      reason: 'rider_cancel_request',
+      source: 'cancel_via_cf',
+    );
+  }
 
   bool get hasActiveTrip {
     final session = sessionNotifier.value;

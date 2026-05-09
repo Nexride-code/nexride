@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
+import 'driver_offer_prime_coordinator.dart';
 import 'ride_cloud_functions_service.dart';
 
 @pragma('vm:entry-point')
@@ -36,14 +37,26 @@ class DriverPushNotificationService {
       );
 
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      debugPrint('DRIVER_PUSH_FOREGROUND type=${message.data['type'] ?? ''}');
+      final t = message.data['type'] ?? '';
+      debugPrint('DRIVER_PUSH_FOREGROUND type=$t');
+      if (t == 'driver_offer') {
+        DriverOfferPrimeCoordinator.instance.requestPrime();
+      }
     });
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-      debugPrint('DRIVER_PUSH_OPENED type=${message.data['type'] ?? ''}');
+      final t = message.data['type'] ?? '';
+      debugPrint('DRIVER_PUSH_OPENED type=$t');
+      if (t == 'driver_offer') {
+        DriverOfferPrimeCoordinator.instance.requestPrime();
+      }
     });
     final initialMessage = await _messaging.getInitialMessage();
     if (initialMessage != null) {
-      debugPrint('DRIVER_PUSH_INITIAL type=${initialMessage.data['type'] ?? ''}');
+      final t = initialMessage.data['type'] ?? '';
+      debugPrint('DRIVER_PUSH_INITIAL type=$t');
+      if (t == 'driver_offer') {
+        DriverOfferPrimeCoordinator.instance.requestPrime();
+      }
     }
 
     _tokenRefreshSubscription = _messaging.onTokenRefresh.listen((String token) {

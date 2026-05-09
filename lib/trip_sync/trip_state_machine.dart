@@ -233,6 +233,22 @@ class TripStateMachine {
     final fromTrip = canonicalFromTripStateField();
     final fromLegacy = _canonicalFromLegacyNormalizedStatus(normalizedStatus);
 
+    String coerceIfMissingDriver(String canonical) {
+      if (hasConcreteDriver) {
+        return canonical;
+      }
+      const needsDriver = <String>{
+        TripLifecycleState.driverAssigned,
+        TripLifecycleState.driverArriving,
+        TripLifecycleState.arrived,
+        TripLifecycleState.inProgress,
+      };
+      if (needsDriver.contains(canonical)) {
+        return TripLifecycleState.searching;
+      }
+      return canonical;
+    }
+
     if (fromTrip != null) {
       if (isTerminal(fromTrip)) {
         return fromTrip;
@@ -266,10 +282,10 @@ class TripStateMachine {
           );
         }
       }
-      return effective;
+      return coerceIfMissingDriver(effective);
     }
 
-    return fromLegacy;
+    return coerceIfMissingDriver(fromLegacy);
   }
 
   static String legacyStatusForCanonical(String canonicalState) {

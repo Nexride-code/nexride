@@ -23,6 +23,7 @@ import '../services/call_permissions.dart';
 import '../services/call_service.dart';
 import '../services/dispatch_photo_upload_service.dart';
 import '../services/driver_alert_sound_service.dart';
+import '../services/driver_offer_prime_coordinator.dart';
 import '../services/local_backend_simulation_service.dart';
 import '../services/delivery_cloud_functions_service.dart';
 import '../services/ride_cloud_functions_service.dart';
@@ -701,6 +702,13 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _log('screen init blocked: missing auth user');
       return;
     }
+
+    DriverOfferPrimeCoordinator.instance.register(() {
+      if (!mounted || !_isOnline) {
+        return;
+      }
+      unawaited(_presentFirstValidQueuedOfferIfIdle());
+    });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
@@ -2603,6 +2611,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _driverChatMessages.dispose();
     _mapLayerVersion.dispose();
     _mapController?.dispose();
+    DriverOfferPrimeCoordinator.instance.unregister();
     super.dispose();
   }
 
@@ -2637,6 +2646,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (rideId == null || rideId.isEmpty) {
       _ensureRideDiscoverySubscriptionIfOnline(
           reason: 'lifecycle_resume_no_local_ride');
+      DriverOfferPrimeCoordinator.instance.requestPrime();
       return;
     }
 
@@ -9302,26 +9312,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   }
 
   Future<void> _handleGoOnline() async {
-    final driverId = _effectiveDriverId;
     try {
-      await _doGoOnline().timeout(
-        const Duration(seconds: 10),
-        onTimeout: () async {
-          debugPrint('[GO_ONLINE_TIMEOUT]');
-          if (driverId.trim().isNotEmpty) {
-            await _driversRef.child(driverId).update(<String, Object?>{
-              'isOnline': true,
-              'is_online': true,
-              'online': true,
-              'isAvailable': true,
-              'available': true,
-              'status': 'available',
-              'dispatch_state': 'available',
-              'updated_at': rtdb.ServerValue.timestamp,
-            });
-          }
-        },
-      );
+      await _doGoOnline();
     } catch (e) {
       debugPrint('[GO_ONLINE_ERROR] $e');
       if (!mounted) {
@@ -9698,6 +9690,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
       _log(
         'goOnline success driverId=$driverId city=$cityToSave lat=$latitude lng=$longitude',
+      );
+      debugPrint(
+        '[NEXRIDE_DRIVER_LOCATION] lat=$latitude lng=$longitude '
+        'resolved_city=${resolvedCity ?? ''} dispatch_market=$cityToSave',
       );
       _log('[ONLINE] success driverId=$driverId city=$cityToSave');
       _log(

@@ -19,9 +19,6 @@ import 'support/driver_profile_support.dart';
 import 'services/driver_push_notification_service.dart';
 import 'support/production_user_messages.dart';
 
-final ValueNotifier<_FatalAppError?> _fatalAppError =
-    ValueNotifier<_FatalAppError?>(null);
-
 Future<void> main() async {
   runZonedGuarded(
     () {
@@ -30,11 +27,6 @@ Future<void> main() async {
     (Object error, StackTrace stack) {
       debugPrint('[ZONE_ERROR] $error');
       debugPrint('[ZONE_STACK] $stack');
-      _storeFatalError(
-        phase: 'zone_uncaught',
-        error: error,
-        stackTrace: stack,
-      );
     },
   );
 }
@@ -66,12 +58,12 @@ Future<void> _runDriverApp() async {
     );
   }
 
-  final initialization = _initializeFirebase(startupRoute: startupRoute);
   runApp(
     NexRideDriver(
       startupRoute: startupRoute,
       startupUri: startupUri,
-      initialization: initialization,
+      initializationFactory: () =>
+          _initializeFirebase(startupRoute: startupRoute),
     ),
   );
 }
@@ -79,45 +71,75 @@ Future<void> _runDriverApp() async {
 Future<void> _initializeFirebase({
   required String startupRoute,
 }) async {
-  try {
-    if (kIsWeb && DefaultFirebaseOptions.webAppIdLooksLikeMobileConfig) {
-      _logStartup(
-        'Web Firebase appId looks like a mobile config: ${DefaultFirebaseOptions.webAppId}',
-      );
-    }
+  if (kIsWeb && DefaultFirebaseOptions.webAppIdLooksLikeMobileConfig) {
     _logStartup(
-      'Initializing Firebase for route=$startupRoute authDomain=${DefaultFirebaseOptions.webAuthDomain} databaseUrl=${DefaultFirebaseOptions.webDatabaseUrl}',
+      'Web Firebase appId looks like a mobile config: ${DefaultFirebaseOptions.webAppId}',
     );
-    // Cap the Firebase init wait so a flaky network on cold start does not
-    // freeze the splash forever. After the timeout we fall through to the
-    // global error handler which renders the recoverable startup screen.
-    await Firebase.initializeApp(
-      options: DefaultFirebaseOptions.currentPlatform,
-    ).timeout(const Duration(seconds: 8));
-    print('FIREBASE_INIT_DONE');
-    print("RUNTIME_PROJECT_ID: ${Firebase.app().options.projectId}");
-    print("RUNTIME_DB_URL: ${FirebaseDatabase.instance.databaseURL}");
-    print("RUNTIME_UID: ${FirebaseAuth.instance.currentUser?.uid}");
-    _logStartup('Firebase initializeApp succeeded.');
-    await DriverPushNotificationService.instance.initialize();
-
-    final database = FirebaseDatabase.instance;
-    if (!kIsWeb) {
-      database.setPersistenceEnabled(true);
-      database.setPersistenceCacheSizeBytes(10000000);
-      _logStartup('Realtime Database persistence enabled.');
-    } else {
-      _logStartup('Web detected, skipping RTDB persistence setup.');
-    }
-  } catch (error, stackTrace) {
-    _logStartup('Firebase initializeApp failed: $error');
-    _storeFatalError(
-      phase: 'firebase_initialize',
-      error: error,
-      stackTrace: stackTrace,
-    );
-    rethrow;
   }
+  _logStartup(
+    'Initializing Firebase for route=$startupRoute authDomain=${DefaultFirebaseOptions.webAuthDomain} databaseUrl=${DefaultFirebaseOptions.webDatabaseUrl}',
+  );
+
+  Object? lastError;
+  StackTrace? lastStack;
+  const attempts = 5;
+  final timeoutPerAttempt =
+      kIsWeb ? const Duration(seconds: 25) : const Duration(seconds: 40);
+
+  for (var attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      if (Firebase.apps.isEmpty) {
+        await Firebase.initializeApp(
+          options: DefaultFirebaseOptions.currentPlatform,
+        ).timeout(timeoutPerAttempt);
+      }
+      print('FIREBASE_INIT_DONE');
+      print("RUNTIME_PROJECT_ID: ${Firebase.app().options.projectId}");
+      print("RUNTIME_DB_URL: ${FirebaseDatabase.instance.databaseURL}");
+      print("RUNTIME_UID: ${FirebaseAuth.instance.currentUser?.uid}");
+      _logStartup(
+        'Firebase initializeApp succeeded (attempt=$attempt/$attempts).',
+      );
+
+      try {
+        await DriverPushNotificationService.instance.initialize();
+      } catch (e, st) {
+        debugPrint('[Startup] FCM init non-fatal: $e\n$st');
+      }
+
+      if (!kIsWeb) {
+        try {
+          FirebaseDatabase.instance.setPersistenceEnabled(true);
+          FirebaseDatabase.instance.setPersistenceCacheSizeBytes(10000000);
+          _logStartup('Realtime Database persistence enabled.');
+        } catch (e, st) {
+          debugPrint('[Startup] RTDB persistence non-fatal: $e\n$st');
+        }
+      } else {
+        _logStartup('Web detected, skipping RTDB persistence setup.');
+      }
+      return;
+    } catch (error, stackTrace) {
+      lastError = error;
+      lastStack = stackTrace;
+      _logStartup(
+        'Firebase init attempt $attempt/$attempts failed: $error',
+      );
+      debugPrintStack(
+        label: '[Startup] Firebase init stack',
+        stackTrace: stackTrace,
+      );
+      if (attempt < attempts) {
+        await Future<void>.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+  }
+
+  final err = lastError ?? StateError('Firebase init exhausted retries');
+  if (lastStack != null) {
+    Error.throwWithStackTrace(err, lastStack);
+  }
+  throw err;
 }
 
 void _configureGlobalErrorHandling({
@@ -136,11 +158,7 @@ void _configureGlobalErrorHandling({
         stackTrace: details.stack,
       );
     }
-    _storeFatalError(
-      phase: 'flutter_error',
-      error: details.exception,
-      stackTrace: details.stack,
-    );
+    // Log only — avoid swapping the entire app UI on transient framework errors.
   };
 
   PlatformDispatcher.instance.onError = (Object error, StackTrace stackTrace) {
@@ -150,11 +168,7 @@ void _configureGlobalErrorHandling({
       label: '[Startup] PlatformDispatcher stack',
       stackTrace: stackTrace,
     );
-    _storeFatalError(
-      phase: 'platform_dispatcher',
-      error: error,
-      stackTrace: stackTrace,
-    );
+    // Same as FlutterError: log only; avoid full-app fatal overlay on runtime errors.
     return true;
   };
 
@@ -166,27 +180,15 @@ void _configureGlobalErrorHandling({
     return _FatalErrorView(
       title: adminRoute
           ? 'Admin screen failed to load'
-          : 'NexRide screen failed to load',
+          : 'NexRide',
       message: adminRoute
           ? 'A widget error interrupted the admin interface before it could finish rendering.'
-          : 'A widget error interrupted app startup before the requested screen could render.',
+          : 'Something went wrong while building this screen. Go back if you can, or restart the app.',
       error: details.exception,
       stackTrace: details.stack,
       admin: adminRoute,
     );
   };
-}
-
-void _storeFatalError({
-  required String phase,
-  required Object error,
-  StackTrace? stackTrace,
-}) {
-  _fatalAppError.value = _FatalAppError(
-    phase: phase,
-    error: error,
-    stackTrace: stackTrace,
-  );
 }
 
 void _logStartup(String message) {
@@ -231,13 +233,13 @@ class NexRideDriver extends StatefulWidget {
   const NexRideDriver({
     required this.startupRoute,
     required this.startupUri,
-    required this.initialization,
+    required this.initializationFactory,
     super.key,
   });
 
   final String startupRoute;
   final Uri startupUri;
-  final Future<void> initialization;
+  final Future<void> Function() initializationFactory;
 
   @override
   State<NexRideDriver> createState() => _NexRideDriverState();
@@ -344,7 +346,7 @@ class _NexRideDriverState extends State<NexRideDriver> {
           case AdminRoutePaths.admin:
             return MaterialPageRoute<void>(
               builder: (_) => _AppBootstrapRoute(
-                initialization: widget.initialization,
+                initializationFactory: widget.initializationFactory,
                 routeName: resolvedRoute,
                 adminRoute: true,
                 child: const AdminGateScreen(
@@ -356,7 +358,7 @@ class _NexRideDriverState extends State<NexRideDriver> {
           case AdminRoutePaths.adminLogin:
             return MaterialPageRoute<void>(
               builder: (_) => _AppBootstrapRoute(
-                initialization: widget.initialization,
+                initializationFactory: widget.initializationFactory,
                 routeName: resolvedRoute,
                 adminRoute: true,
                 child: AdminGateScreen(
@@ -370,7 +372,7 @@ class _NexRideDriverState extends State<NexRideDriver> {
           case AdminRoutePaths.driverHome:
             return MaterialPageRoute<void>(
               builder: (_) => _AppBootstrapRoute(
-                initialization: widget.initialization,
+                initializationFactory: widget.initializationFactory,
                 routeName: resolvedRoute,
                 child: const AuthGate(),
               ),
@@ -389,118 +391,96 @@ class _NexRideDriverState extends State<NexRideDriver> {
   }
 }
 
-class _AppBootstrapRoute extends StatelessWidget {
+class _AppBootstrapRoute extends StatefulWidget {
   const _AppBootstrapRoute({
-    required this.initialization,
+    required this.initializationFactory,
     required this.routeName,
     required this.child,
     this.adminRoute = false,
   });
 
-  final Future<void> initialization;
+  final Future<void> Function() initializationFactory;
   final String routeName;
   final Widget child;
   final bool adminRoute;
 
   @override
+  State<_AppBootstrapRoute> createState() => _AppBootstrapRouteState();
+}
+
+class _AppBootstrapRouteState extends State<_AppBootstrapRoute> {
+  late Future<void> _bootstrapFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrapFuture = widget.initializationFactory();
+  }
+
+  void _retryBootstrap() {
+    setState(() {
+      _bootstrapFuture = widget.initializationFactory();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<_FatalAppError?>(
-      valueListenable: _fatalAppError,
+    return FutureBuilder<void>(
+      future: _bootstrapFuture,
       builder: (
         BuildContext context,
-        _FatalAppError? fatalError,
-        Widget? _,
+        AsyncSnapshot<void> snapshot,
       ) {
-        if (fatalError != null) {
-          debugPrint('[Startup] fatalError phase=${fatalError.phase} err=${fatalError.error}');
-          if (fatalError.stackTrace != null) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          _logStartup('Bootstrap waiting route=${widget.routeName}');
+          return widget.adminRoute
+              ? const AdminFullscreenState(
+                  title: 'Loading NexRide admin',
+                  message:
+                      'Starting Firebase, restoring auth state, and preparing the admin control center.',
+                  icon: Icons.admin_panel_settings_outlined,
+                  isLoading: true,
+                )
+              : const _BootstrapStatusScreen(
+                  title: 'NexRide Driver',
+                  message: 'Connecting… This can take longer on a weak signal.',
+                  loading: true,
+                );
+        }
+
+        if (snapshot.hasError) {
+          _logStartup(
+            'Bootstrap error on route=${widget.routeName} error=${snapshot.error}',
+          );
+          debugPrint(
+            '[Startup] Firebase bootstrap error route=${widget.routeName} err=${snapshot.error}',
+          );
+          if (snapshot.stackTrace != null) {
             debugPrintStack(
-              label: '[Startup] fatal stack',
-              stackTrace: fatalError.stackTrace,
+              label: '[Startup] Firebase bootstrap stack',
+              stackTrace: snapshot.stackTrace,
             );
           }
           return _FatalErrorView(
-            title: adminRoute
+            title: widget.adminRoute
                 ? 'Admin screen failed to load'
                 : 'NexRide',
-            message: adminRoute
-                ? 'The admin route hit a startup error before the UI could finish loading.'
-                : kProductionNexRideSupportMessage,
-            error: fatalError.error,
-            stackTrace: fatalError.stackTrace,
-            admin: adminRoute,
+            message: widget.adminRoute
+                ? 'Firebase startup failed before the admin route could render.'
+                : kDriverBootstrapAfterRetriesMessage,
+            error: snapshot.error ??
+                StateError('Unknown bootstrap error on ${widget.routeName}'),
+            stackTrace: snapshot.stackTrace,
+            admin: widget.adminRoute,
+            onRetry: widget.adminRoute ? null : _retryBootstrap,
           );
         }
 
-        return FutureBuilder<void>(
-          future: initialization,
-          builder: (
-            BuildContext context,
-            AsyncSnapshot<void> snapshot,
-          ) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              _logStartup('Bootstrap waiting route=$routeName');
-              return adminRoute
-                  ? const AdminFullscreenState(
-                      title: 'Loading NexRide admin',
-                      message:
-                          'Starting Firebase, restoring auth state, and preparing the admin control center.',
-                      icon: Icons.admin_panel_settings_outlined,
-                      isLoading: true,
-                    )
-                  : const _BootstrapStatusScreen(
-                      title: 'NexRide Driver',
-                      message: 'Starting up…',
-                      loading: true,
-                    );
-            }
-
-            if (snapshot.hasError) {
-              _logStartup(
-                'Bootstrap error on route=$routeName error=${snapshot.error}',
-              );
-              debugPrint(
-                '[Startup] Firebase bootstrap error route=$routeName err=${snapshot.error}',
-              );
-              if (snapshot.stackTrace != null) {
-                debugPrintStack(
-                  label: '[Startup] Firebase bootstrap stack',
-                  stackTrace: snapshot.stackTrace,
-                );
-              }
-              return _FatalErrorView(
-                title: adminRoute
-                    ? 'Admin screen failed to load'
-                    : 'NexRide',
-                message: adminRoute
-                    ? 'Firebase startup failed before the admin route could render.'
-                    : kProductionNexRideSupportMessage,
-                error: snapshot.error ??
-                    StateError('Unknown bootstrap error on $routeName'),
-                stackTrace: snapshot.stackTrace,
-                admin: adminRoute,
-              );
-            }
-
-            _logStartup('Bootstrap ready route=$routeName');
-            return child;
-          },
-        );
+        _logStartup('Bootstrap ready route=${widget.routeName}');
+        return widget.child;
       },
     );
   }
-}
-
-class _FatalAppError {
-  const _FatalAppError({
-    required this.phase,
-    required this.error,
-    this.stackTrace,
-  });
-
-  final String phase;
-  final Object error;
-  final StackTrace? stackTrace;
 }
 
 class _FatalErrorView extends StatelessWidget {
@@ -510,6 +490,7 @@ class _FatalErrorView extends StatelessWidget {
     required this.error,
     this.stackTrace,
     this.admin = false,
+    this.onRetry,
   });
 
   final String title;
@@ -517,6 +498,7 @@ class _FatalErrorView extends StatelessWidget {
   final Object error;
   final StackTrace? stackTrace;
   final bool admin;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -534,6 +516,7 @@ class _FatalErrorView extends StatelessWidget {
       message: message,
       error: error,
       stackTrace: stackTrace,
+      onRetry: onRetry,
     );
   }
 }
@@ -545,6 +528,7 @@ class _BootstrapStatusScreen extends StatelessWidget {
     this.error,
     this.stackTrace,
     this.loading = false,
+    this.onRetry,
   });
 
   final String title;
@@ -552,6 +536,7 @@ class _BootstrapStatusScreen extends StatelessWidget {
   final Object? error;
   final StackTrace? stackTrace;
   final bool loading;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -593,6 +578,13 @@ class _BootstrapStatusScreen extends StatelessWidget {
                         height: 1.5,
                       ),
                     ),
+                    if (!loading && onRetry != null) ...<Widget>[
+                      const SizedBox(height: 22),
+                      FilledButton(
+                        onPressed: onRetry,
+                        child: const Text('Try again'),
+                      ),
+                    ],
                     if (error != null && kDebugMode) ...<Widget>[
                       const SizedBox(height: 16),
                       SelectableText(

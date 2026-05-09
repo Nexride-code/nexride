@@ -2759,8 +2759,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     debugPrint('[RideType] MapScreen initState');
     WidgetsBinding.instance.addObserver(this);
     _riderLocation = _selectedLaunchCityCenter;
-    unawaited(_refreshRiderTrustState(persist: true));
-    unawaited(_prepareBrowseLocationContext());
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _prepareBrowseLocationContext();
+      if (mounted) {
+        await _refreshRiderTrustState(persist: true);
+      }
+    });
     _loadDrivers();
     _startIncomingCallListener();
     unawaited(_resyncIncomingCallState());
@@ -3268,8 +3272,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       await _usersRef.child(riderId).update(<String, dynamic>{
         'launch_market_city': normalizedCity,
         'launch_market_country': RiderLaunchScope.countryName,
+        'market_pool': normalizedCity,
         'launch_market_updated_at': rtdb.ServerValue.timestamp,
       });
+      debugPrint(
+        '[NEXRIDE_RIDER_LOCATION] persisted launch_market_city=$normalizedCity market_pool=$normalizedCity',
+      );
     } catch (error) {
       _logRideFlow(
         'launch market persist failed riderId=$riderId city=$normalizedCity error=$error',
@@ -5907,7 +5915,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
 
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      final permission = await Geolocator.checkPermission();
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+
       final canUseDeviceLocation =
           serviceEnabled &&
           (permission == LocationPermission.always ||
@@ -5915,8 +5927,54 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
       if (!canUseDeviceLocation) {
         _logRideFlow(
-          'browse location unavailable serviceEnabled=$serviceEnabled permission=$permission',
+          '[NEXRIDE_RIDER_LOCATION] unavailable serviceEnabled=$serviceEnabled permission=$permission',
         );
+        if (mounted) {
+          final messenger = ScaffoldMessenger.maybeOf(context);
+          if (!serviceEnabled) {
+            messenger?.showSnackBar(
+              SnackBar(
+                content: const Text(
+                  'Turn on device location so NexRide can set your city and pickup from GPS, or choose addresses manually.',
+                ),
+                action: SnackBarAction(
+                  label: 'Retry',
+                  onPressed: () {
+                    unawaited(_prepareBrowseLocationContext());
+                  },
+                ),
+              ),
+            );
+          } else if (permission == LocationPermission.deniedForever) {
+            messenger?.showSnackBar(
+              SnackBar(
+                content: const Text(
+                  'Location permission is denied for NexRide. Open Settings to allow access, or set pickup manually.',
+                ),
+                action: SnackBarAction(
+                  label: 'Retry',
+                  onPressed: () {
+                    unawaited(_prepareBrowseLocationContext());
+                  },
+                ),
+              ),
+            );
+          } else if (permission == LocationPermission.denied) {
+            messenger?.showSnackBar(
+              SnackBar(
+                content: const Text(
+                  'Allow location access so your market and map match where you are.',
+                ),
+                action: SnackBarAction(
+                  label: 'Retry',
+                  onPressed: () {
+                    unawaited(_prepareBrowseLocationContext());
+                  },
+                ),
+              ),
+            );
+          }
+        }
         if (!mounted) {
           _deviceLocationAvailable = false;
           _riderLocation = _fallbackBrowseLocation;
@@ -5958,10 +6016,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _selectLaunchCity(
           detectedCity,
           manual: false,
-          persist: false,
+          persist: true,
           moveCamera: false,
         );
       }
+      final pool = RiderServiceAreaConfig.marketForCity(_selectedLaunchCity).city;
+      debugPrint(
+        '[NEXRIDE_RIDER_LOCATION] lat=${position.latitude} lng=${position.longitude} '
+        'detected_city=$detectedCity selected_launch_city=$_selectedLaunchCity '
+        'market_pool=$pool',
+      );
       await _applyCurrentLocationAsPickup(
         position,
         moveCamera: false,
@@ -6974,6 +7038,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         createRes = await _rideCloud
             .createRideRequest(createPayload)
             .timeout(const Duration(seconds: 45));
+        if (_rideRequestUserAborted) {
+          _logRideFlow(
+            'createRideRequest user aborted right after callable',
+          );
+          final rid = _firstNonEmptyText(<dynamic>[
+            createRes['rideId'],
+            createRes['ride_id'],
+          ]);
+          if (rid.isNotEmpty) {
+            await _discardInFlightRideRequestSubmission(rideId: rid);
+          } else {
+            await _discardInFlightRideRequestSubmission();
+          }
+          return;
+        }
       } catch (error) {
         if (kDebugMode) {
           debugPrint(
@@ -7093,6 +7172,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       if (rideId.isEmpty) {
         throw StateError('missing_ride_id_in_create_response');
       }
+      if (_rideRequestUserAborted) {
+        _logRideFlow(
+          'createRideRequest user aborted after callable rideId=$rideId',
+        );
+        await _discardInFlightRideRequestSubmission(rideId: rideId);
+        return;
+      }
       await _prepaidRecoveryStore.clearPendingTxRef();
       _pendingRideRequestSubmissionId = rideId;
       var movedToSearching = false;
@@ -7117,6 +7203,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         rideData: Map<String, dynamic>.from(committedRideData),
         lastEvent: 'rider_create',
       );
+      if (_rideRequestUserAborted) {
+        _logRideFlow(
+          'createRideRequest user aborted after sync rideId=$rideId',
+        );
+        await _discardInFlightRideRequestSubmission(rideId: rideId);
+        return;
+      }
       _logDiscoveryRideRequestPayload(
         'after_callable',
         rideId,
@@ -8006,6 +8099,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (_isCreatingRide || _isSubmittingRideRequest) {
       _rideRequestUserAborted = true;
       _logRideFlow('rider cancel_request flagged during submit');
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text('Cancelling your request…'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
       return;
     }
     await cancelRide();

@@ -140,11 +140,12 @@ class RiderRideCloudFunctionsService {
         timeout: const Duration(seconds: 30),
       );
 
+  /// Server exports this callable as [cancelRide] (see nexride_driver/functions/index.js).
   Future<Map<String, dynamic>> cancelRideRequest({
     required String rideId,
     required String cancelReason,
   }) =>
-      _call('cancelRideRequest', <String, dynamic>{
+      _call('cancelRide', <String, dynamic>{
         'rideId': rideId,
         'cancel_reason': cancelReason,
       });

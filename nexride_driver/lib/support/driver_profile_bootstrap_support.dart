@@ -96,12 +96,13 @@ void _logFirebaseDatabaseError(String label, Object error) {
 Future<Map<String, dynamic>> fetchDriverPricingConfig({
   required DatabaseReference rootRef,
   required String source,
+  Duration? readTimeout,
 }) async {
   const path = 'app_config/pricing';
+  final budget = readTimeout ?? kDriverProfileReadTimeout;
   debugPrint('[DriverProfile] pricing fetch started source=$source path=$path');
   try {
-    final snapshot =
-        await rootRef.child(path).get().timeout(kDriverProfileReadTimeout);
+    final snapshot = await rootRef.child(path).get().timeout(budget);
     final rawValue = snapshot.value;
     if (rawValue is Map) {
       final pricing = Map<String, dynamic>.from(rawValue);

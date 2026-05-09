@@ -83,6 +83,8 @@ String friendlyFirebaseAuthError(Object error) {
     case 'weak-password':
       return 'Please choose a stronger password.';
     case 'network-request-failed':
+      return 'Sign-in could not reach NexRide (network hiccup). '
+          'Try Wi‑Fi or stronger mobile data, wait a few seconds, then tap Log In again.';
     case 'too-many-requests':
       return kFriendlyNetworkFailureMessage;
     case 'missing-user':

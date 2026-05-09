@@ -10,6 +10,7 @@ import 'map_screen.dart';
 import 'rider_profile_screen.dart';
 import 'rider_login.dart';
 import 'service_type.dart';
+import 'services/rider_ride_cloud_functions_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_active_trip_session_service.dart';
 import 'support/rider_trust_support.dart';
@@ -34,6 +35,8 @@ class _RideTypeScreenState extends State<RideTypeScreen>
       const RiderTrustBootstrapService();
   final RiderActiveTripSessionService _activeTripSessionService =
       RiderActiveTripSessionService.instance;
+  final RiderRideCloudFunctionsService _rideCloud =
+      RiderRideCloudFunctionsService();
 
   Map<String, dynamic> _userProfile = <String, dynamic>{};
   Map<String, dynamic> _verification = buildRiderVerificationDefaults(null);
@@ -44,6 +47,87 @@ class _RideTypeScreenState extends State<RideTypeScreen>
   bool _loadingTrust = true;
   bool _serviceNavigationInFlight = false;
   String _lastRequestUiStateLog = '';
+  bool _tripCancelInFlight = false;
+
+  String _tripBannerHeadline(RiderActiveTripSession session) {
+    switch (session.status) {
+      case 'searching':
+      case 'requested':
+      case 'searching_driver':
+      case 'matching':
+        return 'Finding a driver';
+      case 'accepted':
+      case 'pending_driver_action':
+      case 'assigned':
+        return 'Driver assigned';
+      case 'arriving':
+        return 'Driver on the way';
+      case 'arrived':
+        return 'Driver arrived';
+      case 'on_trip':
+        return 'Trip in progress';
+      default:
+        return 'Active trip';
+    }
+  }
+
+  Future<void> _cancelActiveTripFromBanner(RiderActiveTripSession session) async {
+    if (_tripCancelInFlight ||
+        !_activeTripSessionService.allowsRiderBannerCancel(session)) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Cancel this trip?'),
+          content: const Text(
+            'You can request again anytime. Continue only if the trip has not started.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('KEEP TRIP'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('CANCEL TRIP'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    setState(() {
+      _tripCancelInFlight = true;
+    });
+    try {
+      await _activeTripSessionService.cancelActiveTripViaCloudFunction(
+        _rideCloud,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Trip cancelled')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not cancel: $error')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _tripCancelInFlight = false;
+        });
+      } else {
+        _tripCancelInFlight = false;
+      }
+    }
+  }
 
   String? get _currentRiderId => FirebaseAuth.instance.currentUser?.uid;
 
@@ -475,12 +559,19 @@ class _RideTypeScreenState extends State<RideTypeScreen>
                       padding: const EdgeInsets.only(bottom: 14),
                       child: _ActiveTripBanner(
                         session: session,
-                        onTap: () {
+                        headline: _tripBannerHeadline(session),
+                        showCancel: _activeTripSessionService
+                            .allowsRiderBannerCancel(session),
+                        cancelling: _tripCancelInFlight,
+                        onOpen: () {
                           debugPrint(
                             '[RIDER_NAV_RETURN_TO_TRIP] source=ride_type rideId=${session.rideId}',
                           );
                           unawaited(_openBookCarFlow());
                         },
+                        onCancel: () => unawaited(
+                          _cancelActiveTripFromBanner(session),
+                        ),
                       ),
                     );
                   },
@@ -624,10 +715,21 @@ class _RideTypeScreenState extends State<RideTypeScreen>
 }
 
 class _ActiveTripBanner extends StatelessWidget {
-  const _ActiveTripBanner({required this.session, required this.onTap});
+  const _ActiveTripBanner({
+    required this.session,
+    required this.headline,
+    required this.onOpen,
+    required this.onCancel,
+    this.showCancel = false,
+    this.cancelling = false,
+  });
 
   final RiderActiveTripSession session;
-  final VoidCallback onTap;
+  final String headline;
+  final VoidCallback onOpen;
+  final VoidCallback onCancel;
+  final bool showCancel;
+  final bool cancelling;
 
   @override
   Widget build(BuildContext context) {
@@ -637,31 +739,65 @@ class _ActiveTripBanner extends StatelessWidget {
     return Material(
       color: const Color(0xFF1A1A1A),
       borderRadius: BorderRadius.circular(20),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
-        onTap: onTap,
-        child: Ink(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0xFFB57A2A)),
-          ),
-          child: Row(
-            children: <Widget>[
-              const Icon(Icons.alt_route_rounded, color: Color(0xFFB57A2A)),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Trip active • ${session.status.replaceAll('_', ' ')}',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w800,
+      child: Ink(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFFB57A2A)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: onOpen,
+              child: Row(
+                children: <Widget>[
+                  const Icon(Icons.alt_route_rounded, color: Color(0xFFB57A2A)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(
+                          headline,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Status: ${session.status.replaceAll('_', ' ')} · tap to open map',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.62),
+                            fontSize: 12.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right_rounded, color: Colors.white70),
+                ],
+              ),
+            ),
+            if (showCancel) ...<Widget>[
+              const SizedBox(height: 12),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: cancelling ? null : onCancel,
+                  child: Text(
+                    cancelling ? 'Cancelling…' : 'Cancel trip',
+                    style: const TextStyle(
+                      color: Color(0xFFE8C08A),
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
-              const Icon(Icons.chevron_right_rounded, color: Colors.white70),
             ],
-          ),
+          ],
         ),
       ),
     );

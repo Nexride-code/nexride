@@ -8,6 +8,7 @@ import 'config/rider_app_config.dart';
 import 'payment_methods_screen.dart';
 import 'rider_verification_screen.dart';
 import 'services/payment_methods_service.dart';
+import 'services/rider_ride_cloud_functions_service.dart';
 import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/user_support_ticket_service.dart';
@@ -56,6 +57,8 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
       const UserSupportTicketService();
   final RiderActiveTripSessionService _activeTripSessionService =
       RiderActiveTripSessionService.instance;
+  final RiderRideCloudFunctionsService _rideCloud =
+      RiderRideCloudFunctionsService();
   final rtdb.DatabaseReference _rootRef = rtdb.FirebaseDatabase.instance.ref();
 
   late Map<String, dynamic> _userProfile;
@@ -68,6 +71,87 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
   UserSupportInboxSummary? _supportSummary;
   bool _loading = true;
   bool _refreshing = false;
+  bool _tripCancelInFlight = false;
+
+  String _tripStatusHeadline(String status) {
+    switch (status) {
+      case 'searching':
+      case 'requested':
+      case 'searching_driver':
+      case 'matching':
+        return 'Finding a driver';
+      case 'accepted':
+      case 'pending_driver_action':
+      case 'assigned':
+        return 'Driver assigned';
+      case 'arriving':
+        return 'Driver on the way';
+      case 'arrived':
+        return 'Driver arrived';
+      case 'on_trip':
+        return 'Trip in progress';
+      default:
+        return 'Active trip';
+    }
+  }
+
+  Future<void> _cancelTripFromProfile(RiderActiveTripSession session) async {
+    if (_tripCancelInFlight ||
+        !_activeTripSessionService.allowsRiderBannerCancel(session)) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: const Text('Cancel this trip?'),
+          content: const Text(
+            'You can book again anytime. Only cancel if the driver has not started the trip.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('KEEP TRIP'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('CANCEL TRIP'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    setState(() {
+      _tripCancelInFlight = true;
+    });
+    try {
+      await _activeTripSessionService.cancelActiveTripViaCloudFunction(
+        _rideCloud,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Trip cancelled')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not cancel: $error')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _tripCancelInFlight = false;
+        });
+      } else {
+        _tripCancelInFlight = false;
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -393,7 +477,7 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
     Color? valueColor,
   }) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(22),
@@ -407,21 +491,27 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: <Widget>[
-          Text(
-            value,
-            style: TextStyle(
-              color: valueColor ?? Colors.black87,
-              fontSize: 19,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 4),
           Text(
             label,
             style: TextStyle(
-              color: Colors.black.withValues(alpha: 0.62),
-              height: 1.4,
+              color: Colors.black.withValues(alpha: 0.55),
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.2,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: valueColor ?? Colors.black87,
+              fontSize: 20,
+              fontWeight: FontWeight.w900,
+              height: 1.15,
             ),
           ),
         ],
@@ -554,41 +644,49 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
                                   return Column(
                                     children: <Widget>[
                                       _buildMetricCard(
-                                        label: 'User Verification',
+                                        label: 'Verification',
                                         value: verificationLabel,
                                         valueColor: verificationColor,
                                       ),
                                       const SizedBox(height: 12),
                                       _buildMetricCard(
                                         label: ratingCount <= 0
-                                            ? 'Rating baseline'
-                                            : '$ratingCount driver ratings',
-                                        value: rating.toStringAsFixed(1),
+                                            ? 'Rating'
+                                            : 'Rating ($ratingCount)',
+                                        value: ratingCount <= 0
+                                            ? '${rating.toStringAsFixed(1)} baseline'
+                                            : rating.toStringAsFixed(1),
                                         valueColor: _gold,
                                       ),
                                     ],
                                   );
                                 }
-                                return Row(
-                                  children: <Widget>[
-                                    Expanded(
-                                      child: _buildMetricCard(
-                                        label: 'User Verification',
-                                        value: verificationLabel,
-                                        valueColor: verificationColor,
+                                return IntrinsicHeight(
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: <Widget>[
+                                      Expanded(
+                                        child: _buildMetricCard(
+                                          label: 'Verification',
+                                          value: verificationLabel,
+                                          valueColor: verificationColor,
+                                        ),
                                       ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: _buildMetricCard(
-                                        label: ratingCount <= 0
-                                            ? 'Rating baseline'
-                                            : '$ratingCount driver ratings',
-                                        value: rating.toStringAsFixed(1),
-                                        valueColor: _gold,
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: _buildMetricCard(
+                                          label: ratingCount <= 0
+                                              ? 'Rating'
+                                              : 'Rating ($ratingCount)',
+                                          value: ratingCount <= 0
+                                              ? '${rating.toStringAsFixed(1)} baseline'
+                                              : rating.toStringAsFixed(1),
+                                          valueColor: _gold,
+                                        ),
                                       ),
-                                    ),
-                                  ],
+                                    ],
+                                  ),
                                 );
                               },
                             ),
@@ -663,25 +761,50 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
                         );
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 12),
-                          child: _ProfileActionTile(
-                            icon: Icons.alt_route_rounded,
-                            title: 'Trip active',
-                            subtitle:
-                                'Status: ${session.status.replaceAll('_', ' ')}. Tap to return to your active trip.',
-                            trailing: const _ProfileStatusChip(
-                              label: 'Live',
-                              color: Color(0xFF198754),
-                            ),
-                            onTap: () {
-                              debugPrint(
-                                '[RIDER_NAV_RETURN_TO_TRIP] source=profile rideId=${session.rideId}',
-                              );
-                              Navigator.of(context).push(
-                                MaterialPageRoute<void>(
-                                  builder: (_) => const MapScreen(),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: <Widget>[
+                              _ProfileActionTile(
+                                icon: Icons.alt_route_rounded,
+                                title: _tripStatusHeadline(session.status),
+                                subtitle:
+                                    'Status: ${session.status.replaceAll('_', ' ')}. Tap to open the map and track this trip.',
+                                trailing: const _ProfileStatusChip(
+                                  label: 'Live',
+                                  color: Color(0xFF198754),
                                 ),
-                              );
-                            },
+                                onTap: () {
+                                  debugPrint(
+                                    '[RIDER_NAV_RETURN_TO_TRIP] source=profile rideId=${session.rideId}',
+                                  );
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) => const MapScreen(),
+                                    ),
+                                  );
+                                },
+                              ),
+                              if (_activeTripSessionService
+                                  .allowsRiderBannerCancel(session))
+                                Align(
+                                  alignment: Alignment.centerRight,
+                                  child: TextButton(
+                                    onPressed: _tripCancelInFlight
+                                        ? null
+                                        : () => unawaited(
+                                              _cancelTripFromProfile(session),
+                                            ),
+                                    child: Text(
+                                      _tripCancelInFlight
+                                          ? 'Cancelling…'
+                                          : 'Cancel trip',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                         );
                       },

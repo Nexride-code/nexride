@@ -268,6 +268,12 @@ class RiderServiceAreaConfig {
       latitude: 6.2104,
       longitude: 7.0741,
     ),
+    RiderLaunchMarket(
+      city: 'edo',
+      label: 'Edo',
+      latitude: 6.3350,
+      longitude: 5.6037,
+    ),
   ];
 
   static RiderLaunchMarket get defaultMarket => launchMarkets.first;
@@ -660,6 +666,16 @@ class RiderLaunchScope {
       'ekwulobia',
       'amawbia',
     ];
+    const edoTokens = <String>[
+      'edo',
+      'edo state',
+      'benin',
+      'benin city',
+      'okada',
+      'ekpoma',
+      'uromi',
+      'abudu',
+    ];
 
     bool containsToken(List<String> tokens) {
       for (final token in tokens) {
@@ -687,6 +703,10 @@ class RiderLaunchScope {
 
     if (containsToken(anambraTokens)) {
       return 'anambra';
+    }
+
+    if (containsToken(edoTokens)) {
+      return 'edo';
     }
 
     return null;
@@ -763,6 +783,11 @@ class RiderLaunchScope {
       'nnewi': <String>['otolo', 'umudim'],
       'ekwulobia': <String>['aguata'],
     };
+    const edoAreas = <String, List<String>>{
+      'benin': <String>['graa', 'ubiahon o', 'sapele road'],
+      'okada': <String>['iguen', 'owa'],
+      'ekpoma': <String>['iruekpen', 'usen'],
+    };
 
     if (normalizedCity == 'lagos') {
       return matchArea(lagosAreas);
@@ -776,11 +801,15 @@ class RiderLaunchScope {
     if (normalizedCity == 'anambra') {
       return matchArea(anambraAreas);
     }
+    if (normalizedCity == 'edo') {
+      return matchArea(edoAreas);
+    }
 
     return matchArea(lagosAreas) ??
         matchArea(abujaAreas) ??
         matchArea(deltaAreas) ??
-        matchArea(anambraAreas);
+        matchArea(anambraAreas) ??
+        matchArea(edoAreas);
   }
 
   static Map<String, String> buildServiceAreaFields({
@@ -802,7 +831,8 @@ class RiderLaunchScope {
 }
 
 class RiderLocationPolicy {
-  static const bool useTestRiderLocation = true;
+  /// Live GPS + geocoded market; set true only for local dev override.
+  static const bool useTestRiderLocation = false;
   static const String testRiderCity = 'lagos';
 }
 

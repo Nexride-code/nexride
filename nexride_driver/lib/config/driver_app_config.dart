@@ -90,6 +90,12 @@ class DriverServiceAreaConfig {
       latitude: 6.2104,
       longitude: 7.0741,
     ),
+    DriverLaunchMarket(
+      city: 'edo',
+      label: 'Edo',
+      latitude: 6.3350,
+      longitude: 5.6037,
+    ),
   ];
 
   static DriverLaunchMarket get defaultMarket => launchMarkets.first;
@@ -237,6 +243,16 @@ class DriverLaunchScope {
       'ekwulobia',
       'amawbia',
     ];
+    const edoTokens = <String>[
+      'edo',
+      'edo state',
+      'benin',
+      'benin city',
+      'okada',
+      'ekpoma',
+      'uromi',
+      'abudu',
+    ];
 
     bool containsToken(List<String> tokens) {
       for (final token in tokens) {
@@ -264,6 +280,10 @@ class DriverLaunchScope {
 
     if (containsToken(anambraTokens)) {
       return 'anambra';
+    }
+
+    if (containsToken(edoTokens)) {
+      return 'edo';
     }
 
     return null;
@@ -344,6 +364,11 @@ class DriverLaunchScope {
       'nnewi': <String>['otolo', 'umudim'],
       'ekwulobia': <String>['aguata'],
     };
+    const edoAreas = <String, List<String>>{
+      'benin': <String>['ring road', 'sapele road'],
+      'okada': <String>['iguen'],
+      'ekpoma': <String>['iruekpen'],
+    };
 
     if (normalizedCity == 'lagos') {
       return matchArea(lagosAreas);
@@ -357,10 +382,14 @@ class DriverLaunchScope {
     if (normalizedCity == 'anambra') {
       return matchArea(anambraAreas);
     }
+    if (normalizedCity == 'edo') {
+      return matchArea(edoAreas);
+    }
     return matchArea(lagosAreas) ??
         matchArea(abujaAreas) ??
         matchArea(deltaAreas) ??
-        matchArea(anambraAreas);
+        matchArea(anambraAreas) ??
+        matchArea(edoAreas);
   }
 
   static Map<String, String> buildServiceAreaFields({
@@ -385,6 +414,7 @@ class DriverLocationPolicy {
   static const bool allowBrowseWithoutLocation = true;
   static const bool allowApproximateLocationForBrowse = true;
   static const bool requireLocationForGoOnline = true;
-  static const bool useTestDriverLocation = true;
+  /// Live GPS for GO ONLINE; set true only for local dev override.
+  static const bool useTestDriverLocation = false;
   static const String testDriverCity = 'lagos';
 }

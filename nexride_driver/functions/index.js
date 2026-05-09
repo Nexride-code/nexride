@@ -228,6 +228,8 @@ exports.cancelRide = onCall(rideCallOpts, async (request) =>
   ride.cancelRideRequest(request.data, callableContext(request), db),
 );
 
+/** Alias — some app builds still call [cancelRideRequest]. */
+exports.cancelRideRequest = exports.cancelRide;
 
 /** Alternate client-safe name (deployed parity with Flutter callables). */
 exports.requestRide = exports.createRideRequest;

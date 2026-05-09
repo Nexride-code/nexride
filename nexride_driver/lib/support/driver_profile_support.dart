@@ -262,8 +262,8 @@ String _businessEligibilityStatusFromNormalized(
 }
 
 bool _canGoOnlineFromNormalized(Map<String, dynamic> businessModel) {
-  final selectedModel = _text(businessModel['selectedModel']);
-  if (selectedModel == 'subscription') {
+  final effectiveModel = _text(businessModel['effectiveModel']);
+  if (effectiveModel == 'subscription') {
     return _text(
             _asStringDynamicMap(businessModel['subscription'])['status']) ==
         'active';
@@ -271,7 +271,9 @@ bool _canGoOnlineFromNormalized(Map<String, dynamic> businessModel) {
 
   final status =
       _text(_asStringDynamicMap(businessModel['commission'])['status']);
-  return status == 'eligible' || status == 'active';
+  return status == 'eligible' ||
+      status == 'active' ||
+      status == 'setup_required';
 }
 
 bool driverSubscriptionIsActive(
