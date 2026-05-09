@@ -1,4 +1,4 @@
-package com.example.nexride_driver
+package com.nexride.driver
 
 import android.app.NotificationChannel
 import android.app.NotificationManager

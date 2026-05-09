@@ -1,20 +1,17 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    id("com.google.gms.google-services")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.gms.google-services")
 }
 
-// Optional production signing: copy `key.properties.template` to
-// `android/key.properties`, fill in keystore credentials, then release builds
-// will sign with the production keystore. If `key.properties` is missing the
-// release build falls back to the debug keystore so local `flutter run --release`
-// still works.
 val keystorePropertiesFile = rootProject.file("key.properties")
-val keystoreProperties = java.util.Properties()
+val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 android {
@@ -33,8 +30,6 @@ android {
 
     defaultConfig {
         applicationId = "com.nexride.rider"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -44,10 +39,10 @@ android {
     signingConfigs {
         create("release") {
             if (keystorePropertiesFile.exists()) {
-                keyAlias = keystoreProperties["keyAlias"] as String?
-                keyPassword = keystoreProperties["keyPassword"] as String?
-                storeFile = (keystoreProperties["storeFile"] as String?)?.let { file(it) }
-                storePassword = keystoreProperties["storePassword"] as String?
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
             }
         }
     }
@@ -59,19 +54,23 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
-            // Explicitly disable R8 — Google Maps, geolocator, Agora, and
-            // audioplayers use reflection/JNI; R8 removes required classes and
-            // causes native crashes in release builds.
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 }
 
-dependencies {
-    implementation("com.google.android.libraries.places:places:3.4.0")
-}
-
 flutter {
     source = "../.."
+}
+
+dependencies {
+    implementation("com.google.android.libraries.places:places:3.4.0")
+    // Required for R8 with minifyShrink: Flutter engine references deferred-components /
+    // Play Store dynamic feature APIs even when the app does not use split installs.
+    implementation("com.google.android.play:core:1.10.3")
 }

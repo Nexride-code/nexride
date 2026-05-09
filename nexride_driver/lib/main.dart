@@ -23,12 +23,31 @@ final ValueNotifier<_FatalAppError?> _fatalAppError =
     ValueNotifier<_FatalAppError?>(null);
 
 Future<void> main() async {
+  runZonedGuarded(
+    () {
+      unawaited(_runDriverApp());
+    },
+    (Object error, StackTrace stack) {
+      debugPrint('[ZONE_ERROR] $error');
+      debugPrint('[ZONE_STACK] $stack');
+      _storeFatalError(
+        phase: 'zone_uncaught',
+        error: error,
+        stackTrace: stack,
+      );
+    },
+  );
+}
+
+Future<void> _runDriverApp() async {
   print('APP_START');
   assert(() {
     print('APP MODE: DRIVER ONLY');
     return true;
   }());
+
   WidgetsFlutterBinding.ensureInitialized();
+
   final startupRoute =
       WidgetsBinding.instance.platformDispatcher.defaultRouteName;
   final startupUri = Uri.base;
@@ -106,6 +125,8 @@ void _configureGlobalErrorHandling({
   required Uri startupUri,
 }) {
   FlutterError.onError = (FlutterErrorDetails details) {
+    debugPrint('[CRASH] ${details.exception}');
+    debugPrint('[CRASH_STACK] ${details.stack}');
     debugPrint('[FLUTTER_ERROR] ${details.exception}\n${details.stack}');
     FlutterError.presentError(details);
     _logStartup('FlutterError caught: ${details.exception}');

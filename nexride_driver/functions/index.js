@@ -2,6 +2,7 @@ require("./params");
 const { onCall, onRequest } = require("firebase-functions/v2/https");
 const { monitorSubscriptionExpiry } = require("./subscription_expiry_jobs");
 const { sweepDispatchHealth } = require("./dispatch_maintenance_jobs");
+const { cleanExpiredDriverOffers } = require("./offer_cleanup_jobs");
 const admin = require("firebase-admin");
 const { verifyFlutterwavePaymentStrict } = require("./flutterwave_api");
 const { createWalletTransactionInternal } = require("./wallet_core");
@@ -19,6 +20,7 @@ const db = admin.database();
 
 exports.monitorSubscriptionExpiry = monitorSubscriptionExpiry;
 exports.sweepDispatchHealth = sweepDispatchHealth;
+exports.cleanExpiredDriverOffers = cleanExpiredDriverOffers;
 
 function callableContext(request) {
   return { auth: request.auth };

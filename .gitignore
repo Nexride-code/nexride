@@ -16,6 +16,8 @@ nexride_driver/android/app/build/
 **/android/key.properties
 **/android/*.keystore
 **/android/*.jks
+**/android/app/*.keystore
+**/android/app/*.jks
 
 # iOS / desktop ephemeral
 ios/Pods/

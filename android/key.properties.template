@@ -16,4 +16,5 @@
 storePassword=REPLACE_WITH_KEYSTORE_PASSWORD
 keyPassword=REPLACE_WITH_KEY_PASSWORD
 keyAlias=nexride-rider
-storeFile=/absolute/path/to/nexride-rider-release.keystore
+# Place the .jks beside android/app/build.gradle.kts — path is resolved from android/app/.
+storeFile=nexride-rider-release.jks

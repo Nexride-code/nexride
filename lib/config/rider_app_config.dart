@@ -43,6 +43,15 @@ class RiderFeatureFlags {
   }
 }
 
+/// Official payout account shown for bank-transfer trips (rider chat + trip UI).
+class RiderBankTransferConfig {
+  RiderBankTransferConfig._();
+
+  static const String bankName = 'UNITED BANK FOR AFRICA (UBA)';
+  static const String accountName = 'NEXRIDE DYNAMIC JOURNEY LTD';
+  static const String accountNumber = '1029983699';
+}
+
 class RiderVerificationCopy {
   static const String title = 'User Verification';
   static const String titleLowercase = 'user verification';

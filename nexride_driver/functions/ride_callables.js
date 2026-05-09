@@ -331,52 +331,60 @@ function isOpenPoolRide(ride) {
 }
 
 /**
- * Production rule: NexRide dispatches a ride to drivers only after a verified
- * card payment is on file. Cash is unsupported. Bank transfer dispatch is
- * gated behind an explicit RTDB flag (`app_config/nexride_dispatch/
- * bank_transfer_dispatch_enabled`) and is OFF in production by default — when
- * it is allowed it still requires `payment_status === pending*`.
+ * Gate dispatch (fan-out) and driver accept on payment state.
+ * Cash is never dispatched.
+ *
+ * `payment_method` is normalized (`bank transfer` → `bank_transfer`) so RTDB
+ * variants still match.
  *
  * Anyone changing this function must also re-read `fanOutDriverOffersIfEligible`
  * and `acceptRideRequest` because they all share this gate.
  */
-function paymentAllowsDispatch(ride, options = {}) {
+function paymentAllowsDispatch(ride) {
   if (!ride || typeof ride !== "object") {
     return false;
   }
   const pmRaw = ride.payment_method ?? ride.paymentMethod ?? "";
-  const pm = String(pmRaw ?? "")
+  const method = String(pmRaw ?? "")
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, "_");
-  const ps = String(ride.payment_status ?? ride.paymentStatus ?? "")
-    .trim()
-    .toLowerCase();
 
-  // Cash is permanently disabled. If a stale ride somehow has it,
-  // refuse to dispatch.
-  if (pm === "cash") {
+  const psRaw = ride.payment_status ?? ride.paymentStatus ?? "";
+  const status = String(psRaw ?? "").trim().toLowerCase();
+
+  if (method === "cash") {
     return false;
   }
 
-  if (pm === "bank_transfer") {
-    if (options.bankTransferDispatchEnabled !== true) {
-      return false;
-    }
-    return (
-      ps === "pending_manual_confirmation" ||
-      ps === "pending_review" ||
-      ps === "pending"
-    );
+  if (method === "bank_transfer") {
+    return [
+      "pending_manual_confirmation",
+      "pending_review",
+      "pending",
+      "paid",
+      "verified",
+    ].includes(status);
   }
 
-  // Card / Flutterwave path: must be verified AND have a transaction id.
-  // No transaction id → not a real charge, never dispatch.
-  const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
-  if (!ptid) {
-    return false;
+  if (
+    method === "card" ||
+    method === "flutterwave" ||
+    method === "credit_card" ||
+    method === "creditcard" ||
+    method === "debit_card"
+  ) {
+    if (["paid", "verified", "prepaid"].includes(status)) return true;
+    // Card on file: match drivers before hosted checkout / capture.
+    return status === "pending";
   }
-  return ps === "verified" || ps === "paid";
+
+  return [
+    "paid",
+    "verified",
+    "pending_manual_confirmation",
+    "pending",
+  ].includes(status);
 }
 
 /** True when ride has settled online payment credentials (trip completion / wallet credit). */
@@ -386,7 +394,10 @@ function rideHasVerifiedOnlinePayment(ride) {
     .trim()
     .toLowerCase();
   const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
-  return (ps === "verified" || ps === "paid") && Boolean(ptid);
+  if ((ps === "verified" || ps === "paid") && Boolean(ptid)) return true;
+  // Driver attestation for card-on-file, bank transfer, or delayed capture.
+  if (ride.driver_confirmed_rider_payment === true) return true;
+  return false;
 }
 
 const ACCEPTABLE_OPEN_STATUS = new Set([
@@ -1248,6 +1259,11 @@ async function createRideRequest(data, context, db) {
       intentMerged?.service_type ?? data?.service_type ?? data?.serviceType ?? "ride",
     ).trim(),
   };
+
+  if (paymentNormalized === "bank_transfer" && !prepaidFwRef) {
+    payload.payment_reference = rideId;
+    payload.customer_transaction_reference = rideId;
+  }
 
   const RIDER_CREATE_METADATA_ALLOW = new Set([
     "stops",
@@ -2344,6 +2360,8 @@ const PATCHABLE_TOP_LEVEL = new Set([
   "bank_transfer_receipt_url",
   "receipt_uploaded",
   "bank_transfer_receipt_uploaded_at",
+  "driver_confirmed_rider_payment",
+  "driver_confirmed_rider_payment_at",
 ]);
 
 const RECEIPT_MIRROR_KEYS = new Set([
@@ -2400,6 +2418,23 @@ async function patchRideRequestMetadata(data, context, db) {
     const st = String(ride.status ?? "").trim().toLowerCase();
     if (st !== "completed") {
       return { success: false, reason: "ride_not_completed" };
+    }
+  }
+
+  const driverPaymentConfirmKeys = new Set([
+    "driver_confirmed_rider_payment",
+    "driver_confirmed_rider_payment_at",
+  ]);
+  for (const k of Object.keys(patch)) {
+    if (!driverPaymentConfirmKeys.has(k)) {
+      continue;
+    }
+    if (uid !== driver) {
+      return { success: false, reason: "forbidden" };
+    }
+    const ts = String(ride.trip_state ?? "").trim().toLowerCase();
+    if (ts !== TRIP_STATE.in_progress && ts !== "trip_started") {
+      return { success: false, reason: "invalid_state_for_payment_confirm" };
     }
   }
 

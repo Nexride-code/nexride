@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../config/rider_app_config.dart';
 import '../support/friendly_firebase_errors.dart';
 import '../support/ride_chat_support.dart';
 
@@ -350,11 +351,11 @@ class _RideChatSheetState extends State<RideChatSheet> {
                       const SizedBox(height: 4),
                       Text(
                         'Please transfer your fare of ${widget.bankTransferAmountLabel.isNotEmpty ? widget.bankTransferAmountLabel : '₦--'} to:\n'
-                        'Bank: UNITED BANK OF AFRICA\n'
-                        'Account Name: NEXRIDE DYNAMIC JOURNEY LTD\n'
-                        'Account Number: 1029983699\n'
+                        'Bank: ${RiderBankTransferConfig.bankName}\n'
+                        'Account name: ${RiderBankTransferConfig.accountName}\n'
+                        'Account number: ${RiderBankTransferConfig.accountNumber}\n'
                         'Reference: ${widget.bankTransferReference.trim()} (include this exactly in your narration)\n'
-                        'Upload your payment proof after the trip to complete your booking.',
+                        'Upload your payment proof during or after the trip so your driver can verify.',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: const Color(0xFF6B5A2B),
                           height: 1.35,
@@ -427,6 +428,33 @@ class _RideChatSheetState extends State<RideChatSheet> {
                         itemCount: messages.length,
                         itemBuilder: (context, index) {
                           final message = messages[index];
+                          if (message.senderRole == 'system') {
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFF8EC),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: const Color(0xFFE7C776),
+                                  ),
+                                ),
+                                child: Text(
+                                  message.text,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall
+                                      ?.copyWith(
+                                        color: const Color(0xFF4D3E1A),
+                                        height: 1.4,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                ),
+                              ),
+                            );
+                          }
                           final isMine = message.isSentBy(widget.currentUserId);
 
                           return Align(

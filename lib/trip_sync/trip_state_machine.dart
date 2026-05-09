@@ -306,8 +306,18 @@ class TripStateMachine {
     if (rideData == null || rideData.isEmpty) {
       return false;
     }
+    final canonical = canonicalStateFromSnapshot(rideData);
+    final pm = _normalizePaymentMethodKey(rideData['payment_method']);
+    if (pm == 'bank_transfer' && canonical == TripLifecycleState.searching) {
+      return true;
+    }
     final uiStatus = uiStatusFromSnapshot(rideData);
     return isChatEligibleUiStatus(uiStatus);
+  }
+
+  static String _normalizePaymentMethodKey(dynamic raw) {
+    final s = raw?.toString().trim().toLowerCase() ?? '';
+    return s.replaceAll(RegExp(r'[\s-]+'), '_');
   }
 
   /// When RTDB uses legacy `status: cancelled`, infer who cancelled for rider UI.

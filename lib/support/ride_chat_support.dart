@@ -258,6 +258,9 @@ String _normalizeSenderRole(dynamic value) {
   if (normalized == 'rider' || normalized == 'driver') {
     return normalized;
   }
+  if (normalized == 'system' || normalized == 'nexride' || normalized == 'support') {
+    return 'system';
+  }
   return 'unknown';
 }
 

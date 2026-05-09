@@ -71,9 +71,11 @@ class DefaultFirebaseOptions {
   static const String defaultRealtimeDatabaseUrl =
       'https://nexride-8d5bc-default-rtdb.firebaseio.com';
 
+  /// Must match the Android app for `applicationId` / package `com.nexride.driver`
+  /// in Firebase Console and `android/app/google-services.json`.
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyBPKbsKmUCfq0ylIAuekiVko_Gu6wWQse4',
-    appId: '1:684231437366:android:ce00fc6559282fbaec3c97',
+    appId: '1:684231437366:android:5f7ce624ff1aa9d6ec3c97',
     messagingSenderId: '684231437366',
     projectId: 'nexride-8d5bc',
     storageBucket: 'nexride-8d5bc.firebasestorage.app',

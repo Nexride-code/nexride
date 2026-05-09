@@ -357,6 +357,33 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                         itemCount: messages.length,
                         itemBuilder: (context, index) {
                           final message = messages[index];
+                          if (message.senderRole == 'system') {
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFF8EC),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: const Color(0xFFE7C776),
+                                  ),
+                                ),
+                                child: Text(
+                                  message.text,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall
+                                      ?.copyWith(
+                                        color: const Color(0xFF4D3E1A),
+                                        height: 1.4,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                ),
+                              ),
+                            );
+                          }
                           final isMine = message.isSentBy(widget.currentUserId);
 
                           return Align(

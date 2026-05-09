@@ -19,4 +19,4 @@
 storePassword=REPLACE_WITH_KEYSTORE_PASSWORD
 keyPassword=REPLACE_WITH_KEY_PASSWORD
 keyAlias=nexride-driver
-storeFile=/absolute/path/to/nexride-driver-release.keystore
+storeFile=nexride-driver-release.jks
