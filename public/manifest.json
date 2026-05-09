@@ -1,0 +1,9 @@
+{
+  "name": "NexRide Africa",
+  "short_name": "NexRide",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0f0f0f",
+  "theme_color": "#1a1a1a",
+  "description": "NexRide Africa — ride hailing, dispatch, rider and driver apps."
+}

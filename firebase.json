@@ -37,15 +37,10 @@
     ],
     "ignore": [
       "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
+      "**/node_modules/**",
+      "**/.DS_Store"
     ],
     "redirects": [
-      {
-        "source": "/",
-        "destination": "/admin/login",
-        "type": 302
-      },
       {
         "source": "/track",
         "destination": "/ride",
@@ -88,11 +83,114 @@
         "destination": "/support/index.html"
       },
       {
+        "source": "/about",
+        "destination": "/index.html"
+      },
+      {
+        "source": "/rider",
+        "destination": "/index.html"
+      },
+      {
+        "source": "/driver",
+        "destination": "/index.html"
+      },
+      {
+        "source": "/safety",
+        "destination": "/index.html"
+      },
+      {
+        "source": "/contact",
+        "destination": "/index.html"
+      },
+      {
+        "source": "/privacy",
+        "destination": "/index.html"
+      },
+      {
+        "source": "/terms",
+        "destination": "/index.html"
+      },
+      {
+        "source": "/trip/**",
+        "destination": "/index.html"
+      },
+      {
         "source": "/ride",
-        "destination": "/track.html"
+        "destination": "/index.html"
       }
     ],
     "headers": [
+      {
+        "source": "/.well-known/apple-app-site-association",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=300"
+          }
+        ]
+      },
+      {
+        "source": "/.well-known/assetlinks.json",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=300"
+          }
+        ]
+      },
+      {
+        "source": "/index.html",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/flutter_bootstrap.js",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/flutter_service_worker.js",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, max-age=0, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/main.dart.js",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=3600"
+          }
+        ]
+      },
+      {
+        "source": "/canvaskit/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=31536000,immutable"
+          }
+        ]
+      },
       {
         "source": "/admin/index.html",
         "headers": [

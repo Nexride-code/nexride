@@ -42,6 +42,22 @@
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="nexride" android:host="card-link-complete"/>
             </intent-filter>
+            <!-- Deep link: open shared trip in rider app (see /.well-known/assetlinks.json for https). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="nexride" android:host="trip"/>
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data
+                    android:scheme="https"
+                    android:host="nexride.africa"
+                    android:pathPrefix="/trip"/>
+            </intent-filter>
 
         </activity>
 

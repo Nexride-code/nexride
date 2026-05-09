@@ -28798,9 +28798,9 @@ return r.length!==0?r:"setup_required"},
 b5d(a){if(A.fD(a.h(0,"selectedModel"))==="subscription")return A.fD(A.qf(a.h(0,"subscription")).h(0,"status"))
 return A.fD(A.qf(a.h(0,"commission")).h(0,"status"))},
 b5l(a){var s
-if(A.fD(a.h(0,"selectedModel"))==="subscription")return A.fD(A.qf(a.h(0,"subscription")).h(0,"status"))==="active"
+if(A.fD(a.h(0,"effectiveModel"))==="subscription")return A.fD(A.qf(a.h(0,"subscription")).h(0,"status"))==="active"
 s=A.fD(A.qf(a.h(0,"commission")).h(0,"status"))
-return s==="eligible"||s==="active"},
+return s==="eligible"||s==="active"||s==="setup_required"},
 aHa(a,b){var s=A.k6(a,b)
 return A.fD(s.h(0,"selectedModel"))==="subscription"&&A.fD(A.qf(s.h(0,"subscription")).h(0,"status"))==="active"},
 aLu(a,b){var s,r="commissionRate",q=A.k6(a,b)
@@ -97232,7 +97232,7 @@ A.bd(h,$.c2(),!0)
 i=A.kk(new A.bS(h))
 s=13
 return A.q(i.h1(),$async$mR)
-case 13:i=A.V(u.p)
+case 13:i=A.V("Your account is signed in but does not have access. Contact the NexRide system administrator (admin@nexride.africa).")
 throw A.e(i)
 case 12:A.bE().$1("[AdminAuth] signIn granted uid="+k.a+" mode="+k.d)
 q=k

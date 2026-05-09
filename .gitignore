@@ -30,3 +30,7 @@ macos/Pods/
 # Local Firebase emulator artifacts
 firebase-export-*/
 .firebase/
+
+# Flutter web marketing bundle (large; rebuilt by tools/build_hosted_web.sh / firebase predeploy)
+public/main.dart.js
+public/canvaskit/

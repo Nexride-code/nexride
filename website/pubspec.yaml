@@ -1,0 +1,32 @@
+name: nexride_website
+description: Official NexRide marketing site and public trip tracking (Flutter Web).
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  firebase_core: ^3.8.1
+  firebase_auth: ^5.3.4
+  firebase_database: ^11.2.0
+  go_router: ^14.6.2
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+  url_launcher: ^6.3.1
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/branding/nexride_app_icon.png

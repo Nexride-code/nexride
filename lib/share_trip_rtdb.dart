@@ -45,7 +45,8 @@ class ShareTripRtdbService {
   ShareTripRtdbService({rtdb.FirebaseDatabase? database})
     : _database = database ?? rtdb.FirebaseDatabase.instance;
 
-  static const String shareBaseUrl = 'https://nexride-8d5bc.web.app/ride';
+  /// Canonical public share URL (Firebase Hosting + Flutter web at nexride.africa).
+  static const String shareBaseUrl = 'https://nexride.africa/trip';
   static const Duration shareLifetime = Duration(hours: 24);
 
   final rtdb.FirebaseDatabase _database;
@@ -77,8 +78,8 @@ class ShareTripRtdbService {
 
     return ShareTripLink(
       token: shareMeta.token,
-      url: '$shareBaseUrl?rideId=${Uri.encodeComponent(payload.rideId)}'
-          '&token=${Uri.encodeComponent(shareMeta.token)}',
+      url: '$shareBaseUrl/${Uri.encodeComponent(payload.rideId)}'
+          '?token=${Uri.encodeQueryComponent(shareMeta.token)}',
       expiresAt: shareMeta.expiresAt,
     );
   }

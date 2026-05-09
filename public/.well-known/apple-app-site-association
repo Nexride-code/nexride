@@ -1,0 +1,14 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "TEAMID.com.nexride.rider",
+        "paths": ["/trip/*", "/ride*"]
+      }
+    ]
+  },
+  "webcredentials": {
+    "apps": ["TEAMID.com.nexride.rider"]
+  }
+}
