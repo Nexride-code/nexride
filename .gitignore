@@ -34,3 +34,6 @@ firebase-export-*/
 # Flutter web marketing bundle (large; rebuilt by tools/build_hosted_web.sh / firebase predeploy)
 public/main.dart.js
 public/canvaskit/
+
+# Local Play Store artifact staging (AAB/APK copies); do not commit binaries
+builds/

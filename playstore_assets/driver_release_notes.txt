@@ -1,0 +1,1 @@
+Initial Play Store release: go online/offline, incoming trip offers, navigation, earnings visibility, subscriptions where applicable, and in-app driver support—aligned with NexRide Nigeria operations.
