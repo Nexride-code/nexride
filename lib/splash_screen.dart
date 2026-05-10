@@ -6,8 +6,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
 
+import 'map_screen.dart';
 import 'ride_type_screen.dart';
 import 'rider_login.dart';
+import 'services/rider_trip_deep_link_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'support/app_startup_state.dart';
@@ -210,7 +212,15 @@ class _SplashScreenState extends State<SplashScreen> {
       }
 
       if (mounted && !_hasNavigated && runId == _startupRunId) {
-        _navigateTo(nextScreen);
+        var target = nextScreen;
+        if (authenticatedUser != null && nextScreen is RideTypeScreen) {
+          final rideId =
+              await RiderTripDeepLinkService.instance.consumePendingAfterAuth();
+          if (rideId != null && rideId.isNotEmpty) {
+            target = MapScreen(initialOpenRideId: rideId);
+          }
+        }
+        _navigateTo(target);
       }
     }
   }

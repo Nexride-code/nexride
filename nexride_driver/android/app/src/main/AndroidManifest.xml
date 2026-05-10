@@ -28,6 +28,13 @@
         android:icon="@mipmap/ic_launcher">
 
         <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_stat_nexride" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/notification_color" />
+
+        <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyDPk-B9EoqGsYkvxS5aiiTWl1S-cezWsos" />
 

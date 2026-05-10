@@ -6,9 +6,11 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'firebase_options.dart';
+import 'map_screen.dart';
 import 'payment_methods_screen.dart';
 import 'services/rider_ride_cloud_functions_service.dart';
 import 'services/rider_push_notification_service.dart';
+import 'services/rider_trip_deep_link_service.dart';
 import 'splash_screen.dart';
 import 'support/app_startup_state.dart';
 
@@ -69,6 +71,7 @@ class _NexRideAppState extends State<NexRideApp> {
       RiderRideCloudFunctionsService.instance;
   StreamSubscription<Uri>? _deepLinkSubscription;
   bool _handlingCardLink = false;
+  bool _handlingTripLink = false;
 
   @override
   void initState() {
@@ -91,6 +94,12 @@ class _NexRideAppState extends State<NexRideApp> {
   }
 
   Future<void> _handleDeepLinkUri(Uri uri) async {
+    final tripLinks = RiderTripDeepLinkService.instance;
+    if (tripLinks.looksLikeTripDeepLink(uri)) {
+      await _handleTripDeepLink(uri);
+      return;
+    }
+
     if (!_isCardLinkUri(uri) || _handlingCardLink) {
       return;
     }
@@ -135,6 +144,69 @@ class _NexRideAppState extends State<NexRideApp> {
       _showSnack('Card verification failed: $error');
     } finally {
       _handlingCardLink = false;
+    }
+  }
+
+  Future<void> _handleTripDeepLink(Uri uri) async {
+    if (_handlingTripLink) {
+      return;
+    }
+    _handlingTripLink = true;
+    final svc = RiderTripDeepLinkService.instance;
+    try {
+      await svc.logOpen(uri);
+      final rideId = svc.parseTripRideId(uri)?.trim() ?? '';
+      final token = (uri.queryParameters['token'] ?? '').trim();
+      if (rideId.isEmpty || token.isEmpty) {
+        await svc.logInvalid('missing_ride_or_token');
+        _showSnack('This trip link is missing details.');
+        return;
+      }
+
+      final routeName = '/trip_map/$rideId';
+
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        await svc.persistPendingLink(rideId: rideId, token: token);
+        _showSnack('Sign in to open this shared trip.');
+        return;
+      }
+
+      final ok = await svc.verifyShareToken(rideId: rideId, token: token);
+      if (!ok) {
+        await svc.clearPendingLink();
+        await svc.logInvalid('token_verify_failed');
+        _showSnack('This trip link is invalid or expired.');
+        return;
+      }
+
+      await svc.clearPendingLink();
+
+      if (_navigatorKey.currentState == null) {
+        return;
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        final ctx = _navigatorKey.currentContext;
+        if (ctx == null || !ctx.mounted) {
+          return;
+        }
+        final name = ModalRoute.of(ctx)?.settings.name;
+        if (name == routeName) {
+          return;
+        }
+        await Navigator.of(ctx).push(
+          MaterialPageRoute<void>(
+            settings: RouteSettings(name: routeName),
+            builder: (_) => MapScreen(initialOpenRideId: rideId),
+          ),
+        );
+        if (ctx.mounted) {
+          await svc.logNavigated(rideId);
+        }
+      });
+    } finally {
+      _handlingTripLink = false;
     }
   }
 

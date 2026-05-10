@@ -54,6 +54,9 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            // TODO: Keep minify/shrink off until we have a full R8 pass verified against
+            // Agora RTC, Google Maps Flutter, geolocator, and Firebase on real devices.
+            // See nexride_driver/playstore_assets/android_release_readiness.md
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(

@@ -77,6 +77,7 @@ void main() {
           session: adminSession,
           dataService: dataService,
           authService: FakeAdminAuthService(adminSession),
+          enableRealtimeBadgeListeners: false,
         ),
       ),
     );
@@ -92,7 +93,7 @@ void main() {
       'Finance': 'Finance and revenue',
       'Withdrawals': 'Driver withdrawals',
       'Pricing': 'Pricing management',
-      'Subscriptions': 'Subscriptions management',
+      'Subscriptions': 'No pending subscription requests',
       'Verification': 'Verification and compliance',
       'Settings': 'Settings and configuration',
     };
@@ -124,6 +125,7 @@ void main() {
           authService: FakeAdminAuthService(adminSession),
           initialSection: AdminSection.riders,
           snapshotTimeout: const Duration(milliseconds: 20),
+          enableRealtimeBadgeListeners: false,
         ),
       ),
     );
@@ -149,6 +151,7 @@ void main() {
           authService: FakeAdminAuthService(adminSession),
           initialSection: AdminSection.riders,
           snapshotTimeout: const Duration(milliseconds: 20),
+          enableRealtimeBadgeListeners: false,
         ),
       ),
     );
@@ -171,6 +174,7 @@ void main() {
           session: adminSession,
           dataService: dataService,
           authService: FakeAdminAuthService(adminSession),
+          enableRealtimeBadgeListeners: false,
         ),
       ),
     );
@@ -228,6 +232,7 @@ Widget _buildTestApp({
               mode: AdminGateMode.dashboard,
               authService: authService,
               dataService: dataService,
+              enableRealtimeBadgeListeners: false,
             ),
             settings: settings,
           );
@@ -238,6 +243,7 @@ Widget _buildTestApp({
               authService: authService,
               dataService: dataService,
               inlineMessage: settings.arguments as String?,
+              enableRealtimeBadgeListeners: false,
             ),
             settings: settings,
           );
@@ -277,6 +283,9 @@ class FakeAdminAuthService extends AdminAuthService {
     }
     return session!;
   }
+
+  @override
+  Future<void> forceTokenRefresh() async {}
 
   @override
   Future<void> signOut() async {}

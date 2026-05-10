@@ -24,6 +24,7 @@ import '../services/call_service.dart';
 import '../services/dispatch_photo_upload_service.dart';
 import '../services/driver_alert_sound_service.dart';
 import '../services/driver_offer_prime_coordinator.dart';
+import '../services/driver_pending_offer_launch_store.dart';
 import '../services/local_backend_simulation_service.dart';
 import '../services/delivery_cloud_functions_service.dart';
 import '../services/ride_cloud_functions_service.dart';
@@ -710,6 +711,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       }
       unawaited(_presentFirstValidQueuedOfferIfIdle());
     });
+    if (DriverPendingOfferLaunchStore.instance.hasPendingOffer) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        DriverOfferPrimeCoordinator.instance.requestPrime();
+      });
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {

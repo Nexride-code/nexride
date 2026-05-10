@@ -27,6 +27,7 @@ void main() {
         startupUri: Uri.parse('http://localhost/'),
         authService: _FakeAdminAuthService(null),
         dataService: _FakeAdminDataService(_emptySnapshot),
+        enableRealtimeBadgeListeners: false,
       ),
     );
 
@@ -48,6 +49,7 @@ void main() {
         startupUri: Uri.parse('http://localhost/dashboard'),
         authService: _FakeAdminAuthService(adminSession),
         dataService: _FakeAdminDataService(_emptySnapshot),
+        enableRealtimeBadgeListeners: false,
       ),
     );
 
@@ -78,6 +80,7 @@ void main() {
           dataService: _FakeAdminDataService(_emptySnapshot),
           loginRoute: '/admin/login',
           dashboardRoute: '/admin',
+          enableRealtimeBadgeListeners: false,
         ),
       ),
     );
@@ -86,7 +89,10 @@ void main() {
     await tester.pump();
 
     expect(find.text('Admin access not authorized'), findsOneWidget);
-    expect(find.textContaining('live Realtime Database'), findsOneWidget);
+    expect(
+      find.textContaining('NexRide system administrator'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('standalone admin routes switch sections without driver flow', (
@@ -101,6 +107,7 @@ void main() {
         startupUri: Uri.parse('http://localhost/dashboard'),
         authService: _FakeAdminAuthService(adminSession),
         dataService: _FakeAdminDataService(_emptySnapshot),
+        enableRealtimeBadgeListeners: false,
       ),
     );
 
@@ -133,6 +140,7 @@ void main() {
         ),
         authService: _FakeAdminAuthService(null),
         dataService: _FakeAdminDataService(_emptySnapshot),
+        enableRealtimeBadgeListeners: false,
       ),
     );
 
@@ -195,6 +203,9 @@ class _FakeAdminAuthService extends AdminAuthService {
     }
     return session!;
   }
+
+  @override
+  Future<void> forceTokenRefresh() async {}
 
   @override
   Future<void> signOut() async {

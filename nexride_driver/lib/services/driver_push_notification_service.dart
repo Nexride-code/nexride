@@ -5,6 +5,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
 import 'driver_offer_prime_coordinator.dart';
+import 'driver_pending_offer_launch_store.dart';
 import 'ride_cloud_functions_service.dart';
 
 @pragma('vm:entry-point')
@@ -37,6 +38,8 @@ class DriverPushNotificationService {
       );
 
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      DriverPendingOfferLaunchStore.instance
+          .captureFromFcmData(Map<String, dynamic>.from(message.data));
       final t = message.data['type'] ?? '';
       debugPrint('DRIVER_PUSH_FOREGROUND type=$t');
       if (t == 'driver_offer') {
@@ -44,6 +47,8 @@ class DriverPushNotificationService {
       }
     });
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+      DriverPendingOfferLaunchStore.instance
+          .captureFromFcmData(Map<String, dynamic>.from(message.data));
       final t = message.data['type'] ?? '';
       debugPrint('DRIVER_PUSH_OPENED type=$t');
       if (t == 'driver_offer') {
@@ -52,6 +57,8 @@ class DriverPushNotificationService {
     });
     final initialMessage = await _messaging.getInitialMessage();
     if (initialMessage != null) {
+      DriverPendingOfferLaunchStore.instance
+          .captureFromFcmData(Map<String, dynamic>.from(initialMessage.data));
       final t = initialMessage.data['type'] ?? '';
       debugPrint('DRIVER_PUSH_INITIAL type=$t');
       if (t == 'driver_offer') {

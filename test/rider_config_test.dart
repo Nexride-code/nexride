@@ -150,17 +150,19 @@ void main() {
     expect(abujaFare.minimumFareApplied, isTrue);
   });
 
-  test('launch markets cover the four supported Nigeria launch states', () {
+  test('launch markets cover the five supported Nigeria launch states', () {
     expect(RiderServiceAreaConfig.supportedCities, <String>[
       'lagos',
       'delta',
       'abuja',
       'anambra',
+      'edo',
     ]);
     expect(RiderLaunchScope.normalizeSupportedCity('Yaba, Lagos'), 'lagos');
     expect(RiderLaunchScope.normalizeSupportedCity('Asaba, Delta'), 'delta');
     expect(RiderLaunchScope.normalizeSupportedCity('Wuse 2, Abuja'), 'abuja');
     expect(RiderLaunchScope.normalizeSupportedCity('Awka, Anambra'), 'anambra');
+    expect(RiderLaunchScope.normalizeSupportedCity('Benin City, Edo'), 'edo');
     expect(RiderLaunchScope.normalizeSupportedCity('Kuala Lumpur'), isNull);
   });
 

@@ -263,7 +263,7 @@ void main() {
     expect(driverServiceCanReceiveRequests(verification, 'ride'), isTrue);
     expect(
       driverServiceCanReceiveRequests(verification, 'dispatch_delivery'),
-      isFalse,
+      isTrue,
     );
     expect(
       driverServiceCanReceiveRequests(verification, 'groceries_mart'),
@@ -278,16 +278,20 @@ void main() {
     expect(DriverAlertSoundConfig.alertAssetPath, 'assets/sounds/ride_request.mp3');
   });
 
-  test('driver launch markets cover the four supported Nigeria states', () {
+  test('driver launch markets cover the five supported Nigeria states', () {
     expect(
       DriverServiceAreaConfig.supportedCities,
-      <String>['lagos', 'delta', 'abuja', 'anambra'],
+      <String>['lagos', 'delta', 'abuja', 'anambra', 'edo'],
     );
     expect(DriverLaunchScope.normalizeSupportedCity('Ikeja, Lagos'), 'lagos');
     expect(DriverLaunchScope.normalizeSupportedCity('Asaba, Delta'), 'delta');
     expect(DriverLaunchScope.normalizeSupportedCity('Maitama, Abuja'), 'abuja');
     expect(
         DriverLaunchScope.normalizeSupportedCity('Awka, Anambra'), 'anambra');
+    expect(
+      DriverLaunchScope.normalizeSupportedCity('Benin City, Edo'),
+      'edo',
+    );
     expect(DriverLaunchScope.normalizeSupportedCity('Penang'), isNull);
   });
 

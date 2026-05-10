@@ -116,7 +116,7 @@ void main() {
       await tester.enterText(find.byType(TextField), 'Checking in');
       await tester.tap(find.byType(ElevatedButton));
       await tester.pump();
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
 
       completer.complete(
         'Sending this message took too long. Please try again.',

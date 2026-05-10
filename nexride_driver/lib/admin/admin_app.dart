@@ -100,12 +100,14 @@ class AdminApp extends StatelessWidget {
     super.key,
     this.authService,
     this.dataService,
+    this.enableRealtimeBadgeListeners = true,
   });
 
   final Future<void> initialization;
   final Uri startupUri;
   final AdminAuthService? authService;
   final AdminDataService? dataService;
+  final bool enableRealtimeBadgeListeners;
 
   @override
   Widget build(BuildContext context) {
@@ -145,6 +147,7 @@ class AdminApp extends StatelessWidget {
               loginRoute: AdminPortalRoutePaths.login,
               dashboardRoute: AdminPortalRoutePaths.dashboard,
               routeForSection: AdminPortalRoutePaths.pathForSection,
+              enableRealtimeBadgeListeners: enableRealtimeBadgeListeners,
             ),
           );
         }
@@ -162,6 +165,7 @@ class AdminApp extends StatelessWidget {
               loginRoute: AdminPortalRoutePaths.login,
               dashboardRoute: AdminPortalRoutePaths.dashboard,
               routeForSection: AdminPortalRoutePaths.pathForSection,
+              enableRealtimeBadgeListeners: enableRealtimeBadgeListeners,
             ),
           );
         }
@@ -175,6 +179,7 @@ class AdminApp extends StatelessWidget {
             loginRoute: AdminPortalRoutePaths.login,
             dashboardRoute: AdminPortalRoutePaths.dashboard,
             routeForSection: AdminPortalRoutePaths.pathForSection,
+            enableRealtimeBadgeListeners: enableRealtimeBadgeListeners,
           ),
         );
       },
@@ -187,6 +192,7 @@ class AdminApp extends StatelessWidget {
           loginRoute: AdminPortalRoutePaths.login,
           dashboardRoute: AdminPortalRoutePaths.dashboard,
           routeForSection: AdminPortalRoutePaths.pathForSection,
+          enableRealtimeBadgeListeners: enableRealtimeBadgeListeners,
         ),
       ),
     );

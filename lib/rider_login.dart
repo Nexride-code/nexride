@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'map_screen.dart';
 import 'ride_type_screen.dart';
 import 'rider_signup.dart';
+import 'services/rider_trip_deep_link_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'support/friendly_firebase_errors.dart';
 import 'support/production_user_messages.dart';
@@ -141,10 +143,27 @@ class _RiderLoginState extends State<RiderLogin> {
       }
       showMessage('Welcome back.');
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const RideTypeScreen()),
-      );
+      final pendingTripRideId =
+          await RiderTripDeepLinkService.instance.consumePendingAfterAuth();
+      if (!mounted) {
+        return;
+      }
+      if (pendingTripRideId != null && pendingTripRideId.isNotEmpty) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute<void>(
+            settings: RouteSettings(name: '/trip_map/$pendingTripRideId'),
+            builder: (context) => MapScreen(
+              initialOpenRideId: pendingTripRideId,
+            ),
+          ),
+        );
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const RideTypeScreen()),
+        );
+      }
     } on FirebaseAuthException catch (e) {
       debugPrint("AUTH ERROR: ${e.code}");
 

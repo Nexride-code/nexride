@@ -28,6 +28,7 @@ class AdminPanelScreen extends StatefulWidget {
     this.loginRoute = AdminRoutePaths.adminLogin,
     this.routeForSection,
     this.snapshotTimeout = const Duration(seconds: 12),
+    this.enableRealtimeBadgeListeners = true,
   });
 
   final AdminSession session;
@@ -37,6 +38,8 @@ class AdminPanelScreen extends StatefulWidget {
   final String loginRoute;
   final String Function(AdminSection section)? routeForSection;
   final Duration snapshotTimeout;
+  /// When false, skips RTDB listeners (widget tests / environments without Firebase).
+  final bool enableRealtimeBadgeListeners;
 
   @override
   State<AdminPanelScreen> createState() => _AdminPanelScreenState();
@@ -85,7 +88,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       '[AdminPanel] init section=${_section.name} adminUid=${widget.session.uid} adminEmail=${widget.session.email} cachedSnapshot=${_snapshot != null}',
     );
     _loadSnapshot();
-    _startRealtimeBadgeListeners();
+    if (widget.enableRealtimeBadgeListeners) {
+      _startRealtimeBadgeListeners();
+    }
   }
 
   @override

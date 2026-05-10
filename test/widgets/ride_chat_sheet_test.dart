@@ -90,44 +90,49 @@ void main() {
     expect(find.byIcon(Icons.send), findsOneWidget);
   });
 
-  testWidgets('ride chat sheet times out a stalled send and unlocks UI', (
-    WidgetTester tester,
-  ) async {
-    final messages = ValueNotifier<List<RideChatMessage>>(
-      const <RideChatMessage>[],
-    );
-    final completer = Completer<String?>();
+  testWidgets(
+    'ride chat sheet does not auto-timeout a stalled send (timeout is enforced upstream)',
+    (WidgetTester tester) async {
+      final messages = ValueNotifier<List<RideChatMessage>>(
+        const <RideChatMessage>[],
+      );
+      final completer = Completer<String?>();
 
-    addTearDown(messages.dispose);
+      addTearDown(messages.dispose);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: RideChatSheet(
-            rideId: 'ride-3',
-            currentUserId: 'rider-1',
-            messagesListenable: messages,
-            onSendMessage: (String rideId, String text) => completer.future,
-            onRetryMessage: (
-              String rideId,
-              RideChatMessage message,
-            ) async => null,
-            onSendImage: (String rideId, RideChatImageSource source) async =>
-                null,
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: RideChatSheet(
+              rideId: 'ride-3',
+              currentUserId: 'rider-1',
+              messagesListenable: messages,
+              onSendMessage: (String rideId, String text) => completer.future,
+              onRetryMessage: (
+                String rideId,
+                RideChatMessage message,
+              ) async => null,
+              onSendImage: (String rideId, RideChatImageSource source) async =>
+                  null,
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    await tester.enterText(find.byType(TextField), 'Still there?');
-    await tester.tap(find.byType(ElevatedButton));
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 11));
+      await tester.enterText(find.byType(TextField), 'Still there?');
+      await tester.tap(find.byType(ElevatedButton));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 2));
 
-    expect(
-      find.text('Sending this message took too long. Please try again.'),
-      findsOneWidget,
-    );
-    expect(find.byIcon(Icons.send), findsOneWidget);
-  });
+      expect(
+        find.text('Sending this message took too long. Please try again.'),
+        findsNothing,
+      );
+      expect(find.byIcon(Icons.send), findsOneWidget);
+
+      completer.complete(null);
+      await tester.pumpAndSettle();
+    },
+  );
 }
+

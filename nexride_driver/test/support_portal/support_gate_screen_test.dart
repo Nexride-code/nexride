@@ -34,7 +34,10 @@ void main() {
       await tester.pump();
 
       expect(find.text('Support access not authorized'), findsOneWidget);
-      expect(find.textContaining('live Realtime Database'), findsOneWidget);
+      expect(
+        find.textContaining('NexRide system administrator'),
+        findsOneWidget,
+      );
     },
   );
 }

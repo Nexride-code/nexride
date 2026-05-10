@@ -24,6 +24,7 @@ class AdminGateScreen extends StatefulWidget {
     this.loginRoute = AdminRoutePaths.adminLogin,
     this.dashboardRoute = AdminRoutePaths.admin,
     this.routeForSection,
+    this.enableRealtimeBadgeListeners = true,
   });
 
   final AdminGateMode mode;
@@ -34,6 +35,7 @@ class AdminGateScreen extends StatefulWidget {
   final String loginRoute;
   final String dashboardRoute;
   final String Function(AdminSection section)? routeForSection;
+  final bool enableRealtimeBadgeListeners;
 
   @override
   State<AdminGateScreen> createState() => _AdminGateScreenState();
@@ -156,6 +158,7 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
             initialSection: widget.initialSection,
             loginRoute: widget.loginRoute,
             routeForSection: widget.routeForSection,
+            enableRealtimeBadgeListeners: widget.enableRealtimeBadgeListeners,
           );
         }
 

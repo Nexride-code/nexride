@@ -62,7 +62,10 @@ void safeShowSnackBar(BuildContext context, String message) {
 }
 
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key});
+  const MapScreen({super.key, this.initialOpenRideId});
+
+  /// When set (e.g. shared-trip deep link), attaches the ride listener after first frame.
+  final String? initialOpenRideId;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -2780,6 +2783,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_runStartupPaymentAndReceiptChecks());
     });
+
+    final deepLinkRideId = widget.initialOpenRideId?.trim() ?? '';
+    if (deepLinkRideId.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        if (!mounted) {
+          return;
+        }
+        listenToRide(deepLinkRideId);
+      });
+    }
   }
 
   int _rideActivityTimestamp(Map<String, dynamic> rideData) {
