@@ -16,6 +16,8 @@ import 'services/rider_active_trip_session_service.dart';
 import 'support/rider_trust_support.dart';
 import 'support/startup_rtdb_support.dart';
 import 'widgets/rider_highlights_carousel.dart';
+import 'services/rider_compliance_service.dart';
+import 'widgets/rider_updated_terms_dialog.dart';
 
 class RideTypeScreen extends StatefulWidget {
   const RideTypeScreen({super.key});
@@ -140,6 +142,25 @@ class _RideTypeScreenState extends State<RideTypeScreen>
       _activeTripSessionService.restoreActiveTripForCurrentUser(
         source: 'ride_type.init',
       ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_maybePromptUpdatedTerms());
+    });
+  }
+
+  Future<void> _maybePromptUpdatedTerms() async {
+    final riderId = _currentRiderId;
+    if (riderId == null || riderId.isEmpty) {
+      return;
+    }
+    final snap =
+        await RiderComplianceService.instance.fetchSnapshot(riderId);
+    if (!mounted || !snap.needsTermsAcceptance) {
+      return;
+    }
+    await showRiderUpdatedTermsDialog(
+      context: context,
+      riderId: riderId,
     );
   }
 

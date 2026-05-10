@@ -5,6 +5,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/admin_models.dart';
+import '../../portal_security/portal_password_service.dart';
 import '../../support/nexride_contact_constants.dart';
 
 class AdminAuthService {
@@ -34,7 +35,7 @@ class AdminAuthService {
     if (user == null) {
       return null;
     }
-    return _sessionForUser(user);
+    return _sessionWithRefreshRetry(user, context: 'currentSession');
   }
 
   Future<AdminSession> signIn({
@@ -61,12 +62,15 @@ class AdminAuthService {
       // Force fresh claims immediately after login.
       await user.getIdToken(true);
 
-      final session = await _sessionForUser(user);
+      final session = await _sessionWithRefreshRetry(user, context: 'signIn');
       if (session == null) {
         debugPrint(
           '[AdminAuth] signIn denied uid=${user.uid} email=${user.email ?? 'none'}',
         );
-        await auth.signOut();
+        // Important: don't sign out here. The gate's
+        // `_scheduleUnauthorizedReset` is the one place that signs the
+        // unauthorized user out — keeping that single chokepoint makes
+        // the deny logs reproducible.
         throw StateError(
           'Your account is signed in but does not have access. '
           'Contact the NexRide system administrator ($kNexRideAdminEmail).',
@@ -81,6 +85,31 @@ class AdminAuthService {
     }
   }
 
+  /// Mirror of the support service's retry helper: evaluate access with
+  /// the cached ID token; if denied, force a token refresh once and try
+  /// again before giving up. Closes the "claims just got granted but the
+  /// browser still has a stale token" race.
+  Future<AdminSession?> _sessionWithRefreshRetry(
+    User user, {
+    required String context,
+  }) async {
+    final firstPass = await _sessionForUser(user, attempt: 'cached');
+    if (firstPass != null) {
+      return firstPass;
+    }
+    debugPrint(
+      'ADMIN_AUTH_DEBUG context=$context attempt=cached uid=${user.uid} '
+      'allow=false reasons=DENY:no_matched_path -> forcing token refresh',
+    );
+    try {
+      await user.getIdToken(true);
+    } catch (error) {
+      debugPrint('[AdminAuth] forced token refresh failed: $error');
+      return null;
+    }
+    return _sessionForUser(user, attempt: 'forced-refresh');
+  }
+
   Future<void> signOut() => auth.signOut();
 
   Future<void> forceTokenRefresh() async {
@@ -91,7 +120,10 @@ class AdminAuthService {
     await user.getIdToken(true);
   }
 
-  Future<AdminSession?> _sessionForUser(User user) async {
+  Future<AdminSession?> _sessionForUser(
+    User user, {
+    String attempt = 'cached',
+  }) async {
     final email = user.email?.trim().toLowerCase() ?? '';
     final displayName = (user.displayName?.trim().isNotEmpty ?? false)
         ? user.displayName!.trim()
@@ -99,26 +131,45 @@ class AdminAuthService {
 
     final claims = await _readClaims(user);
     final claimAdmin = claims['admin'] == true;
+    final claimRoleAdmin = claims['role'] == 'admin';
     final hasDatabaseAccess = await _hasDatabaseAdminAccess(user.uid);
-    final finalAllowed = claimAdmin || hasDatabaseAccess;
+    final finalAllowed = claimAdmin || claimRoleAdmin || hasDatabaseAccess;
+
+    final reasons = <String>[];
+    if (claimAdmin) reasons.add('claim:admin=true');
+    if (claimRoleAdmin) reasons.add('claim:role=admin');
+    if (hasDatabaseAccess) reasons.add('rtdb:/admins/{uid}=true');
+    if (!finalAllowed) reasons.add('DENY:no_matched_path[attempt=$attempt]');
+
     debugPrint(
-      'ADMIN_AUTH_DEBUG uid=${user.uid} email=$email '
-      'claims=$claims rtdbAdmin=$hasDatabaseAccess finalAllowed=$finalAllowed',
+      'ADMIN_AUTH_DEBUG attempt=$attempt uid=${user.uid} email=$email '
+      'allow=$finalAllowed reasons=${reasons.join('|')} '
+      'claims=$claims rtdbAdmin=$hasDatabaseAccess',
     );
     if (!finalAllowed) {
-      debugPrint(
-        '[AdminAuth] no admin access path matched for uid=${user.uid} email=$email',
-      );
       return null;
     }
 
-    final accessMode = claimAdmin ? 'custom_claim_admin' : 'admins_node';
+    final accessMode =
+        claimAdmin || claimRoleAdmin ? 'custom_claim_admin' : 'admins_node';
     debugPrint('[AdminAuth] admin access granted via $accessMode');
+
+    // Probe whether the operator is on a temporary password — drives the
+    // forced-redirect flow in AdminGateScreen.
+    bool mustChangePassword = false;
+    try {
+      final svc = PortalPasswordService(auth: auth, database: database);
+      mustChangePassword = await svc.readMustChangePassword(user: user);
+    } catch (error) {
+      debugPrint('[AdminAuth] mustChangePassword probe failed: $error');
+    }
+
     return AdminSession(
       uid: user.uid,
       email: email,
       displayName: displayName,
       accessMode: accessMode,
+      mustChangePassword: mustChangePassword,
     );
   }
 

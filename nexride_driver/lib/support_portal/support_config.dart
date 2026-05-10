@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../admin/admin_config.dart';
+import '../portal_security/portal_security_theme.dart';
 import 'models/support_models.dart';
 
 class SupportRoutePaths {
@@ -14,6 +15,8 @@ class SupportRoutePaths {
   static const String escalated = '$prefix/escalated';
   static const String resolved = '$prefix/resolved';
   static const String ticketPrefix = '$prefix/tickets';
+  static const String accountSecurity = '$prefix/account/security';
+  static const String changePassword = '$prefix/account/change-password';
 
   static const Set<String> _relativeRoutes = <String>{
     '/login',
@@ -23,6 +26,8 @@ class SupportRoutePaths {
     '/pending-user',
     '/escalated',
     '/resolved',
+    '/account/security',
+    '/account/change-password',
   };
 
   static String normalize(String rawPath) {
@@ -57,7 +62,17 @@ class SupportRoutePaths {
         normalized == pendingUser ||
         normalized == escalated ||
         normalized == resolved ||
+        normalized == accountSecurity ||
+        normalized == changePassword ||
         normalized.startsWith('$ticketPrefix/');
+  }
+
+  /// True when [path] is the change-password or account-security route.
+  /// `support_app.dart` checks this to bypass the regular dashboard
+  /// rendering and render the shared portal_security screens instead.
+  static bool isAccountRoute(String path) {
+    final normalized = normalize(path);
+    return normalized == accountSecurity || normalized == changePassword;
   }
 
   static bool isProtectedRoute(String path) {
@@ -164,6 +179,28 @@ class SupportThemeTokens {
     ],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
+  );
+
+  /// [PortalSecurityTheme] built from the support tokens above so the shared
+  /// account-security screens render with the support brand palette.
+  static const PortalSecurityTheme portalSecurityTheme = PortalSecurityTheme(
+    canvas: AdminThemeTokens.canvas,
+    surface: AdminThemeTokens.surface,
+    border: AdminThemeTokens.border,
+    subtle: Color(0xFF55514A),
+    appBarBackground: heroInk,
+    appBarForeground: Colors.white,
+    primary: AdminThemeTokens.gold,
+    onPrimary: Colors.white,
+    success: AdminThemeTokens.success,
+    successBackground: Color(0xFFE7F6EC),
+    successBorder: Color(0xFFB7E1C1),
+    danger: AdminThemeTokens.danger,
+    dangerBackground: Color(0xFFFDECEE),
+    dangerBorder: Color(0xFFF5C6CB),
+    warningForeground: AdminThemeTokens.warning,
+    warningBackground: Color(0xFFFFF8E1),
+    warningBorder: Color(0xFFF4C430),
   );
 
   static ThemeData buildTheme() {

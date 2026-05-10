@@ -23,6 +23,7 @@ class AdminGateScreen extends StatefulWidget {
     this.initialSection = AdminSection.dashboard,
     this.loginRoute = AdminRoutePaths.adminLogin,
     this.dashboardRoute = AdminRoutePaths.admin,
+    this.changePasswordRoute = AdminPortalRoutePaths.changePassword,
     this.routeForSection,
     this.enableRealtimeBadgeListeners = true,
   });
@@ -34,6 +35,11 @@ class AdminGateScreen extends StatefulWidget {
   final AdminSection initialSection;
   final String loginRoute;
   final String dashboardRoute;
+
+  /// Where to send the user when their account is flagged
+  /// `temporaryPassword=true`. Defaults to the admin portal's change-password
+  /// route. Override for tests or alternate hosts.
+  final String changePasswordRoute;
   final String Function(AdminSection section)? routeForSection;
   final bool enableRealtimeBadgeListeners;
 
@@ -118,6 +124,20 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
         }
 
         if (session != null && widget.mode == AdminGateMode.login) {
+          if (session.mustChangePassword) {
+            _logDecision(
+              'signed-in admin on login route with temp password -> '
+              '${widget.changePasswordRoute}',
+            );
+            _redirectTo(widget.changePasswordRoute);
+            return const AdminFullscreenState(
+              title: 'Password change required',
+              message:
+                  'You\'re using a temporary password. Redirecting to the change-password screen.',
+              icon: Icons.lock_clock_rounded,
+              isLoading: true,
+            );
+          }
           _logDecision(
             'signed-in admin on login route -> redirect ${widget.dashboardRoute}',
           );
@@ -150,6 +170,20 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
         }
 
         if (session != null) {
+          if (session.mustChangePassword) {
+            _logDecision(
+              'admin session ready uid=${session.uid} but mustChangePassword=true '
+              '-> ${widget.changePasswordRoute}',
+            );
+            _redirectTo(widget.changePasswordRoute);
+            return const AdminFullscreenState(
+              title: 'Password change required',
+              message:
+                  'You\'re using a temporary password. Redirecting to the change-password screen.',
+              icon: Icons.lock_clock_rounded,
+              isLoading: true,
+            );
+          }
           _logDecision('admin session ready uid=${session.uid}');
           return AdminPanelScreen(
             session: session,

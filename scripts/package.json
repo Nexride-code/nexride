@@ -1,0 +1,16 @@
+{
+  "name": "nexride-admin-scripts",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Out-of-band operator scripts for NexRide admin/support account management. Not deployed to production; run locally with a service-account credential.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "reset:admin": "node reset_admin_password.js",
+    "create:admin": "node create_admin_user.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  }
+}

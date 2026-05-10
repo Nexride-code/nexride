@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../portal_security/portal_forgot_password_dialog.dart';
 import '../admin_config.dart';
 import '../services/admin_auth_service.dart';
 
@@ -385,8 +386,33 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
                   _isLoading ? 'Signing in...' : 'Open admin control center'),
             ),
           ),
+          const SizedBox(height: 10),
+          Center(
+            child: TextButton(
+              onPressed: _isLoading ? null : _openForgotPassword,
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFFB57A2A),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 8),
+              ),
+              child: const Text(
+                'Forgot password?',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Future<void> _openForgotPassword() async {
+    await showPortalForgotPasswordDialog(
+      context,
+      theme: AdminThemeTokens.portalSecurityTheme,
+      initialEmail: _emailController.text.trim().isEmpty
+          ? null
+          : _emailController.text.trim(),
     );
   }
 

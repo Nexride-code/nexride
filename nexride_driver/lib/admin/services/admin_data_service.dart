@@ -662,6 +662,32 @@ class AdminDataService {
     }
   }
 
+  Future<void> adminReviewRiderFirestoreIdentity({
+    required String riderId,
+    required bool approve,
+    String rejectionReason = '',
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminReviewRiderFirestoreIdentity',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final payload = <String, dynamic>{
+      'riderId': riderId,
+      'decision': approve ? 'approved' : 'rejected',
+      if (!approve && rejectionReason.trim().length >= 8)
+        'rejectionReason': rejectionReason.trim(),
+    };
+    final result = await callable.call(payload);
+    final data = _map(result.data);
+    if (data['success'] != true) {
+      throw StateError(
+        'Identity review failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
+      );
+    }
+  }
+
   Future<void> adminWarnAccount({
     required String uid,
     required String role,

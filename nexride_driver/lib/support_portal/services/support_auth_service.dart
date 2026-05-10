@@ -4,7 +4,33 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../portal_security/portal_password_service.dart';
 import '../models/support_models.dart';
+
+/// Resolved authorization decision for a signed-in support user.
+///
+/// `allow` is true when at least one of the accepted access paths matched
+/// (custom claim, RTDB `/admins`, RTDB `/support_staff`). The reason
+/// strings are emitted by the auth-debug log and are also useful for
+/// post-mortem from the browser console.
+@visibleForTesting
+class SupportAuthDecision {
+  const SupportAuthDecision({
+    required this.allow,
+    required this.session,
+    required this.reasons,
+    required this.claims,
+    required this.supportRecord,
+    required this.rtdbAdmin,
+  });
+
+  final bool allow;
+  final SupportSession? session;
+  final List<String> reasons;
+  final Map<String, dynamic> claims;
+  final Map<String, dynamic> supportRecord;
+  final bool rtdbAdmin;
+}
 
 class SupportAuthService {
   SupportAuthService({
@@ -34,7 +60,7 @@ class SupportAuthService {
     if (user == null) {
       return null;
     }
-    return _sessionForUser(user);
+    return _resolveSessionWithRefreshRetry(user, context: 'currentSession');
   }
 
   Future<SupportSession> signIn({
@@ -58,12 +84,19 @@ class SupportAuthService {
       if (user == null) {
         throw StateError('Signed in but no Firebase user was returned.');
       }
-      // Force fresh claims immediately after login.
+      // Force fresh claims immediately after login so newly granted
+      // support claims are picked up without an extra page reload.
       await user.getIdToken(true);
 
-      final session = await _sessionForUser(user);
+      final session = await _resolveSessionWithRefreshRetry(
+        user,
+        context: 'signIn',
+      );
       if (session == null) {
-        await auth.signOut();
+        // Important: do NOT call signOut here. The gate screen's
+        // `_scheduleUnauthorizedReset` is the single place that signs the
+        // unauthorized user out so the failure log line is emitted before
+        // the auth state flips, making the deny reason debuggable.
         throw StateError(
           'Your account is signed in but does not have access. '
           'Contact the NexRide system administrator.',
@@ -88,16 +121,76 @@ class SupportAuthService {
     await user.getIdToken(true);
   }
 
-  Future<SupportSession?> _sessionForUser(User user) async {
+  /// First evaluates the user's session against the cached ID token. If
+  /// the cached token denies access (e.g. claims haven't propagated yet
+  /// after provisioning), force-refreshes the token once and re-evaluates
+  /// before giving up. This is the surgical fix for the "signed in but no
+  /// access" race that bit support@ on first login.
+  Future<SupportSession?> _resolveSessionWithRefreshRetry(
+    User user, {
+    required String context,
+  }) async {
+    final firstPass = await _evaluateAccess(user, attempt: 'cached');
+    _logDecision(user, context: context, attempt: 'cached', decision: firstPass);
+    if (firstPass.allow) {
+      return _withMustChangePassword(firstPass.session!, user);
+    }
+
+    // Retry once with a forced token refresh. Cheap (one network round
+    // trip) and only happens on the unhappy path.
+    try {
+      await user.getIdToken(true);
+    } catch (error) {
+      debugPrint('[SupportAuth] forced token refresh failed: $error');
+      return null;
+    }
+    final secondPass = await _evaluateAccess(user, attempt: 'forced-refresh');
+    _logDecision(
+      user,
+      context: context,
+      attempt: 'forced-refresh',
+      decision: secondPass,
+    );
+    if (secondPass.allow) {
+      return _withMustChangePassword(secondPass.session!, user);
+    }
+    return null;
+  }
+
+  Future<SupportSession> _withMustChangePassword(
+    SupportSession session,
+    User user,
+  ) async {
+    bool mustChangePassword = false;
+    try {
+      final svc = PortalPasswordService(auth: auth, database: database);
+      mustChangePassword = await svc.readMustChangePassword(user: user);
+    } catch (error) {
+      debugPrint('[SupportAuth] mustChangePassword probe failed: $error');
+    }
+    return session.copyWith(mustChangePassword: mustChangePassword);
+  }
+
+  /// Pure decision function. Reads claims + RTDB `/support_staff` +
+  /// RTDB `/admins`, then returns a structured allow/deny outcome. Does
+  /// NOT mutate any state and does NOT change the auth session.
+  ///
+  /// `attempt` is purely for log differentiation between the cached-token
+  /// pass and the forced-refresh retry.
+  Future<SupportAuthDecision> _evaluateAccess(
+    User user, {
+    required String attempt,
+  }) async {
     final email = user.email?.trim().toLowerCase() ?? '';
     final defaultDisplayName = (user.displayName?.trim().isNotEmpty ?? false)
         ? user.displayName!.trim()
         : (email.isNotEmpty ? email.split('@').first : 'Support');
 
+    final claims = await _readClaims(user);
     final supportRecord = await _loadSupportStaffRecord(user.uid);
+    final rtdbAdmin = await _loadAdminFlag(user.uid);
     final supportRole = _roleFromSupportRecord(supportRecord);
 
-    final claims = await _readClaims(user);
     final claimRole = normalizeSupportRole(
       _firstText(<dynamic>[claims['role']]),
     );
@@ -107,28 +200,29 @@ class SupportAuthService {
     final claimRoleAllowed =
         claimRole == 'support_agent' || claimRole == 'support_manager';
     final claimAllowed = claimSupport || claimSupportStaff || claimRoleAllowed;
-    final rtdbAdmin = await _loadAdminRoleFromDatabase(user.uid);
-    final hasAdminOverride = claimAdmin || rtdbAdmin.isNotEmpty;
+    final hasAdminOverride = claimAdmin || rtdbAdmin;
     final hasRtdbSupport = supportRole.isNotEmpty;
-    final finalAllowed = hasAdminOverride || claimAllowed || hasRtdbSupport;
-    debugPrint(
-      'SUPPORT_AUTH_DEBUG uid=${user.uid} email=$email '
-      'claims=$claims supportRecord=$supportRecord '
-      'rtdbAdmin=${rtdbAdmin.isNotEmpty} finalAllowed=$finalAllowed',
-    );
 
+    final reasons = <String>[];
+    if (claimAdmin) reasons.add('claim:admin=true');
+    if (rtdbAdmin) reasons.add('rtdb:/admins/{uid}=true');
+    if (claimSupport) reasons.add('claim:support=true');
+    if (claimSupportStaff) reasons.add('claim:support_staff=true');
+    if (claimRoleAllowed) reasons.add('claim:role=$claimRole');
+    if (hasRtdbSupport) reasons.add('rtdb:/support_staff/{uid}.role=$supportRole');
+
+    SupportSession? session;
     if (hasAdminOverride) {
-      return SupportSession.adminOverride(
+      session = SupportSession.adminOverride(
         uid: user.uid,
         email: email,
         displayName: defaultDisplayName,
         role: 'admin',
         accessMode: claimAdmin ? 'custom_claim_admin' : 'admins_node',
       );
-    }
-    if (claimAllowed) {
+    } else if (claimAllowed) {
       final resolvedRole = claimRoleAllowed ? claimRole : 'support_agent';
-      return SupportSession(
+      session = SupportSession(
         uid: user.uid,
         email: email,
         displayName: defaultDisplayName,
@@ -136,10 +230,8 @@ class SupportAuthService {
         accessMode: 'custom_claim_support',
         permissions: SupportPermissions.forRole(resolvedRole),
       );
-    }
-
-    if (supportRole.isNotEmpty) {
-      return SupportSession(
+    } else if (hasRtdbSupport) {
+      session = SupportSession(
         uid: user.uid,
         email: email,
         displayName: _recordDisplayName(
@@ -152,10 +244,35 @@ class SupportAuthService {
       );
     }
 
-    debugPrint(
-      '[SupportAuth] no support access for uid=${user.uid} email=$email',
+    final allow = session != null;
+    if (!allow) {
+      reasons.add('DENY:no_matched_path[attempt=$attempt]');
+    }
+    return SupportAuthDecision(
+      allow: allow,
+      session: session,
+      reasons: reasons,
+      claims: claims,
+      supportRecord: supportRecord,
+      rtdbAdmin: rtdbAdmin,
     );
-    return null;
+  }
+
+  void _logDecision(
+    User user, {
+    required String context,
+    required String attempt,
+    required SupportAuthDecision decision,
+  }) {
+    debugPrint(
+      'SUPPORT_AUTH_DEBUG context=$context attempt=$attempt '
+      'uid=${user.uid} email=${user.email ?? 'none'} '
+      'allow=${decision.allow} '
+      'reasons=${decision.reasons.join('|')} '
+      'claims=${decision.claims} '
+      'rtdbAdmin=${decision.rtdbAdmin} '
+      'supportRecordKeys=${decision.supportRecord.keys.toList()}',
+    );
   }
 
   Future<Map<String, dynamic>> _readClaims(User user) async {
@@ -215,17 +332,14 @@ class SupportAuthService {
     }
   }
 
-  Future<String> _loadAdminRoleFromDatabase(String uid) async {
+  Future<bool> _loadAdminFlag(String uid) async {
     try {
       final snapshot = await _rootRef.child('admins/$uid').get();
-      if (snapshot.value == true) {
-        return 'admin';
-      }
-      return '';
+      return snapshot.value == true;
     } catch (error) {
       debugPrint('[SupportAuth] admins lookup failed uid=$uid error=$error');
       if (_isPermissionDenied(error)) {
-        return '';
+        return false;
       }
       rethrow;
     }

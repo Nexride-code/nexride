@@ -2487,6 +2487,46 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             },
           ),
           const SizedBox(height: 18),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: <Widget>[
+              AdminGhostButton(
+                label: 'Approve rider selfie',
+                onPressed: () async {
+                  Navigator.of(context).pop();
+                  await _adminActionSilenced(() async {
+                    await _dataService.adminReviewRiderFirestoreIdentity(
+                      riderId: rider.id,
+                      approve: true,
+                    );
+                  });
+                },
+              ),
+              AdminGhostButton(
+                label: 'Reject rider selfie',
+                onPressed: () async {
+                  final reason = await _promptAdminReason(
+                    title: 'Reject rider selfie',
+                    fieldLabel: 'Reason (audit trail, min 8 chars)',
+                    minLength: 8,
+                  );
+                  if (reason == null || !mounted) {
+                    return;
+                  }
+                  Navigator.of(context).pop();
+                  await _adminActionSilenced(() async {
+                    await _dataService.adminReviewRiderFirestoreIdentity(
+                      riderId: rider.id,
+                      approve: false,
+                      rejectionReason: reason,
+                    );
+                  });
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
           Row(
             children: <Widget>[
               AdminPrimaryButton(

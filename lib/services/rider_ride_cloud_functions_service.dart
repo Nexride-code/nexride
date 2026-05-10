@@ -257,6 +257,12 @@ class RiderRideCloudFunctionsService {
         'app': 'rider',
       });
 
+  Future<Map<String, dynamic>> riderNotifySelfieSubmittedForReview() =>
+      _call(
+        'riderNotifySelfieSubmittedForReview',
+        <String, dynamic>{},
+      );
+
   Future<Map<String, dynamic>> escalateSafetyIncident({
     required String rideId,
     required String riderId,
@@ -283,3 +289,4 @@ String riderRideCallableReason(Map<String, dynamic>? response) {
   final r = response?['reason']?.toString().trim() ?? '';
   return r.isEmpty ? 'unknown' : r;
 }
+

@@ -1,6 +1,16 @@
 node_modules/
 .env
 .env.local
+
+# Firebase service-account JSON keys — NEVER commit
+scripts/serviceAccountKey.json
+scripts/.env
+scripts/.env.*
+scripts/credentials/
+scripts/node_modules/
+**/serviceAccountKey.json
+**/*.serviceAccount.json
+**/firebase-adminsdk-*.json
 firebase-debug.log
 build/
 .dart_tool/
@@ -38,3 +48,7 @@ public/canvaskit/
 # Local Play Store artifact staging (AAB/APK copies); do not commit binaries
 builds/
 playstore_assets/*.aab
+
+# Local tooling (optional) for marketing SVG export
+marketing/instagram_launch/.venv/
+marketing/instagram_launch_v2/.venv/

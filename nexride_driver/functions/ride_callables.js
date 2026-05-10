@@ -18,6 +18,7 @@ const {
 const { ensureRideChatThread } = require("./ride_chat_admin");
 const { sendPushToUser } = require("./push_notifications");
 const { resolveDriverMonetization, resolveCommissionPolicy } = require("./driver_monetization");
+const riderFirestoreIdentity = require("./rider_firestore_identity");
 
 const TRIP_STATE = {
   searching: "searching",
@@ -1056,6 +1057,13 @@ async function createRideRequest(data, context, db) {
   if (!(await riderProfileRequirementOk(db, riderId, riderGates, context.auth))) {
     console.log("RIDER_CREATE_FAIL", riderId, "no_user_profile");
     return { success: false, reason: "rider_profile_required" };
+  }
+
+  const identityGate =
+    await riderFirestoreIdentity.evaluateRiderFirestoreIdentityForBooking(admin.firestore(), riderId);
+  if (!identityGate.ok) {
+    console.log("RIDER_CREATE_FAIL", riderId, identityGate.reason || "identity_denied");
+    return { success: false, reason: identityGate.reason || "identity_denied" };
   }
 
   const supersede = await supersedePriorOpenRideForRider(db, riderId);

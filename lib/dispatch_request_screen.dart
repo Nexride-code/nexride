@@ -12,6 +12,8 @@ import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'compliance/rider_identity_booking_gate.dart';
+import 'onboarding/rider_selfie_verification_screen.dart';
 import 'config/rider_app_config.dart';
 import 'config/rtdb_ride_request_contract.dart';
 import 'services/rider_delivery_cloud_functions_service.dart';
@@ -25,6 +27,8 @@ import 'support/friendly_firebase_errors.dart';
 import 'support/rtdb_flow_debug_log.dart';
 import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
+import 'services/rider_compliance_service.dart';
+import 'widgets/rider_identity_verification_banner.dart';
 
 class DispatchRequestScreen extends StatefulWidget {
   const DispatchRequestScreen({super.key});
@@ -89,12 +93,39 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   bool _submitting = false;
   bool _restoringActiveRequest = false;
   double _packagePhotoUploadProgress = 0;
+  bool _identityComplianceLoaded = false;
+  bool _selfieBlocksBooking = false;
+  RiderComplianceSnapshot? _riderFirestoreCompliance;
+
+  Future<void> _loadIdentityCompliance() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      if (mounted) {
+        setState(() {
+          _identityComplianceLoaded = true;
+          _riderFirestoreCompliance = null;
+          _selfieBlocksBooking = true;
+        });
+      }
+      return;
+    }
+    final snap = await RiderComplianceService.instance.fetchSnapshot(user.uid);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _identityComplianceLoaded = true;
+      _riderFirestoreCompliance = snap;
+      _selfieBlocksBooking = snap.blocksRideBooking;
+    });
+  }
 
   @override
   void initState() {
     super.initState();
     unawaited(_hydrateRiderTrustState(persist: true));
     unawaited(_restoreActiveDispatchRequest());
+    unawaited(_loadIdentityCompliance());
   }
 
   @override
@@ -574,6 +605,13 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         return 'This payment method is not available for delivery yet.';
       case 'payment_failed':
         return 'Payment was not completed. You can try sending your dispatch again.';
+      case 'identity_selfie_missing':
+      case 'identity_pending_review':
+      case 'identity_rejected':
+      case 'identity_gate_unavailable':
+      case 'identity_denied':
+        return riderIdentityServerRejectionUserMessage(reason) ??
+            'Identity verification required before dispatch.';
       default:
         return 'Unable to send your dispatch request right now.';
     }
@@ -1193,6 +1231,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       return;
     }
 
+    if (_selfieBlocksBooking) {
+      final msg = _riderFirestoreCompliance != null
+          ? riderRequestButtonIdentityBlockSubtitle(_riderFirestoreCompliance!)
+          : 'Complete identity verification before sending a delivery request.';
+      _showMessage(msg);
+      return;
+    }
+
     final accessDecision = await _trustRulesService.evaluateForRider(user.uid);
     if (!accessDecision.canRequestTrips) {
       if (!mounted) {
@@ -1789,6 +1835,32 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             : ListView(
                 padding: const EdgeInsets.all(20),
                 children: <Widget>[
+                  if (_identityComplianceLoaded &&
+                      _selfieBlocksBooking &&
+                      _riderFirestoreCompliance != null) ...[
+                    RiderIdentityVerificationBanner(
+                      message: riderMapIdentityBannerPrimaryLine(
+                        _riderFirestoreCompliance!,
+                      ),
+                      actionLabel:
+                          _riderFirestoreCompliance!.identityPhase ==
+                                  RiderIdentityBookingPhase.rejected
+                              ? 'Retake'
+                              : 'Verify',
+                      onOpenVerification: () async {
+                        await Navigator.of(context).push<void>(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                const RiderSelfieVerificationScreen(),
+                          ),
+                        );
+                        if (mounted) {
+                          await _loadIdentityCompliance();
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   Container(
                     padding: const EdgeInsets.all(22),
                     decoration: BoxDecoration(

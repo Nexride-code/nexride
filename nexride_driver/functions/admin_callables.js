@@ -3,6 +3,8 @@
  */
 
 const { logger } = require("firebase-functions");
+const admin = require("firebase-admin");
+const { FieldValue } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 const { isNexRideAdmin, normUid } = require("./admin_auth");
 const withdrawFlow = require("./withdraw_flow");
@@ -809,6 +811,52 @@ async function adminDeleteAccount(data, context, db) {
   return { success: true, uid, role };
 }
 
+async function adminReviewRiderFirestoreIdentity(data, context, db) {
+  if (!(await _requireAdmin("adminReviewRiderFirestoreIdentity", context, db))) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const riderId = normUid(data?.riderId ?? data?.rider_id ?? data?.uid);
+  const decision = String(data?.decision ?? "").trim().toLowerCase();
+  if (!riderId || (decision !== "approved" && decision !== "rejected")) {
+    return { success: false, reason: "invalid_payload" };
+  }
+  const rejectionReason = String(data?.rejectionReason ?? data?.rejection_reason ?? "").trim().slice(0, 2000);
+  if (decision === "rejected" && rejectionReason.length < 8) {
+    return { success: false, reason: "rejection_reason_required" };
+  }
+
+  const fs = admin.firestore();
+  const adminUid = normUid(context.auth.uid);
+
+  /** @type {Record<string, unknown>} */
+  const payload = {
+    verificationStatus: decision === "approved" ? "approved" : "rejected",
+    verificationReviewedAt: FieldValue.serverTimestamp(),
+    verificationReviewedBy: adminUid,
+  };
+
+  if (decision === "approved") {
+    payload.verificationRejected = false;
+    payload.verificationRejectionReason = FieldValue.delete();
+  } else {
+    payload.verificationRejected = true;
+    payload.verificationRejectionReason = rejectionReason;
+  }
+
+  await fs.collection("users").doc(riderId).set(payload, { merge: true });
+
+  await writeAdminAudit(db, {
+    type: "admin_review_rider_firestore_identity",
+    rider_id: riderId,
+    actor_uid: adminUid,
+    decision,
+    rejection_reason: decision === "rejected" ? rejectionReason : "",
+  });
+
+  logger.info("adminReviewRiderFirestoreIdentity", { riderId, decision, admin: adminUid });
+  return { success: true, riderId, decision };
+}
+
 async function adminApproveDriverVerification(data, context, db) {
   if (!(await _requireAdmin("adminApproveDriverVerification", context, db))) {
     return { success: false, reason: "unauthorized" };
@@ -855,5 +903,6 @@ module.exports = {
   adminSuspendAccount,
   adminWarnAccount,
   adminDeleteAccount,
+  adminReviewRiderFirestoreIdentity,
   adminApproveDriverVerification,
 };

@@ -33,8 +33,10 @@ const paymentFlow = require("./payment_flow");
 const withdrawFlow = require("./withdraw_flow");
 const trackPublic = require("./track_public");
 const adminCallables = require("./admin_callables");
+const riderFirestoreIdentity = require("./rider_firestore_identity");
 const supportCallables = require("./support_callables");
 const adminRoles = require("./admin_roles");
+const accountPassword = require("./account_password");
 const { getRideCallRtcToken, generateAgoraToken, clearStaleRideCall } = require("./ride_call_rtc");
 const { resolveDriverMonetization, resolveCommissionPolicy } = require("./driver_monetization");
 const pushNotifications = require("./push_notifications");
@@ -182,6 +184,10 @@ const rideCallOpts = { region: REGION };
 
 exports.createRideRequest = onCall(rideCallOpts, async (request) =>
   ride.createRideRequest(request.data, callableContext(request), db),
+);
+
+exports.riderNotifySelfieSubmittedForReview = onCall(rideCallOpts, async (request) =>
+  riderFirestoreIdentity.riderNotifySelfieSubmittedForReview(request.data, callableContext(request)),
 );
 
 // Single client-facing accept entrypoint: [acceptRide] → ride.acceptRideRequest (implementation).
@@ -400,6 +406,10 @@ exports.adminApproveDriverVerification = onCall(rideCallOpts, async (request) =>
   adminCallables.adminApproveDriverVerification(request.data, callableContext(request), db),
 );
 
+exports.adminReviewRiderFirestoreIdentity = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminReviewRiderFirestoreIdentity(request.data, callableContext(request), db),
+);
+
 exports.supportCreateTicket = onCall(rideCallOpts, async (request) =>
   supportCallables.supportCreateTicket(request.data, callableContext(request), db),
 );
@@ -425,6 +435,19 @@ exports.setUserRole = onCall(rideCallOpts, async (request) =>
 
 exports.bootstrapFirstAdmin = onCall(rideCallOpts, async (request) =>
   adminRoles.bootstrapFirstAdmin(request.data, callableContext(request), db),
+);
+
+/**
+ * Self-service: invoked by /admin and /support after a successful client-side
+ * password change. Clears the `temporaryPassword` claim, revokes refresh tokens
+ * (forces sign-out everywhere), and mirrors the cleared flag into RTDB.
+ */
+exports.rotateAccountAfterPasswordChange = onCall(rideCallOpts, async (request) =>
+  accountPassword.rotateAccountAfterPasswordChange(
+    request.data,
+    callableContext(request),
+    db,
+  ),
 );
 
 exports.registerDevicePushToken = onCall(rideCallOpts, async (request) =>

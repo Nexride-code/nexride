@@ -10,9 +10,11 @@
  * - driver_active_delivery/{driverId}
  */
 
+const admin = require("firebase-admin");
 const { ServerValue } = require("firebase-admin/database");
 const { evaluateDriverForOffer, loadDispatchGates } = require("./driver_dispatch_gates");
 const ride = require("./ride_callables");
+const riderFirestoreIdentity = require("./rider_firestore_identity");
 const { sendPushToUser } = require("./push_notifications");
 
 const MAX_FARE_NGN_DEFAULT = 25_000_000;
@@ -372,6 +374,13 @@ async function createDeliveryRequest(data, context, db) {
   const riderGates = await ride.loadRiderCreateGates(db);
   if (!(await ride.riderProfileRequirementOk(db, customerId, riderGates, context.auth))) {
     return { success: false, reason: "user_profile_required" };
+  }
+
+  const identityGate =
+    await riderFirestoreIdentity.evaluateRiderFirestoreIdentityForBooking(admin.firestore(), customerId);
+  if (!identityGate.ok) {
+    console.log("DELIVERY_CREATE_FAIL", customerId, identityGate.reason || "identity_denied");
+    return { success: false, reason: identityGate.reason || "identity_denied" };
   }
 
   const slot = await assertCustomerDeliverySlot(db, customerId);

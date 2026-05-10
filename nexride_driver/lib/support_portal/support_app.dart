@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../firebase_options.dart';
+import '../portal_security/portal_account_security_screen.dart';
+import '../portal_security/portal_change_password_screen.dart';
 import 'models/support_models.dart';
 import 'screens/support_gate_screen.dart';
 import 'support_config.dart';
@@ -85,6 +87,28 @@ class SupportApp extends StatelessWidget {
             inlineMessage: settings.arguments?.toString(),
             initialView: resolution.initialView,
             initialTicketDocumentId: resolution.ticketDocumentId,
+          );
+        }
+
+        if (resolution.routePath == SupportRoutePaths.changePassword) {
+          return _buildRoute(
+            routeName: resolution.routePath,
+            child: const PortalChangePasswordScreen(
+              theme: SupportThemeTokens.portalSecurityTheme,
+              loginRoute: SupportRoutePaths.login,
+              successRoute: SupportRoutePaths.accountSecurity,
+            ),
+          );
+        }
+
+        if (resolution.routePath == SupportRoutePaths.accountSecurity) {
+          return _buildRoute(
+            routeName: resolution.routePath,
+            child: const PortalAccountSecurityScreen(
+              theme: SupportThemeTokens.portalSecurityTheme,
+              changePasswordRoute: SupportRoutePaths.changePassword,
+              loginRoute: SupportRoutePaths.login,
+            ),
           );
         }
 

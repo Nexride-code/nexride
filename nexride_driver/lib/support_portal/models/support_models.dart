@@ -127,6 +127,7 @@ class SupportSession {
     required this.role,
     required this.accessMode,
     required this.permissions,
+    this.mustChangePassword = false,
   });
 
   final String uid;
@@ -135,6 +136,11 @@ class SupportSession {
   final String role;
   final String accessMode;
   final SupportPermissions permissions;
+
+  /// True when the user's account is flagged with `temporaryPassword=true`
+  /// (custom claim or RTDB `/account_security/{uid}`). Gated routes use
+  /// this to force-redirect the operator to the change-password screen.
+  final bool mustChangePassword;
 
   bool get isAdminOverride =>
       role == 'admin' ||
@@ -147,6 +153,7 @@ class SupportSession {
     required String displayName,
     required String role,
     required String accessMode,
+    bool mustChangePassword = false,
   }) {
     return SupportSession(
       uid: uid,
@@ -155,6 +162,19 @@ class SupportSession {
       role: role,
       accessMode: accessMode,
       permissions: SupportPermissions.forRole(role),
+      mustChangePassword: mustChangePassword,
+    );
+  }
+
+  SupportSession copyWith({bool? mustChangePassword}) {
+    return SupportSession(
+      uid: uid,
+      email: email,
+      displayName: displayName,
+      role: role,
+      accessMode: accessMode,
+      permissions: permissions,
+      mustChangePassword: mustChangePassword ?? this.mustChangePassword,
     );
   }
 }

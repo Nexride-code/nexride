@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../admin/admin_config.dart';
+import '../../portal_security/portal_forgot_password_dialog.dart';
 import '../services/support_auth_service.dart';
+import '../support_config.dart';
 
 class SupportLoginScreen extends StatefulWidget {
   const SupportLoginScreen({
@@ -383,8 +385,33 @@ class _SupportLoginScreenState extends State<SupportLoginScreen>
                   : const Text('Open support portal'),
             ),
           ),
+          const SizedBox(height: 10),
+          Center(
+            child: TextButton(
+              onPressed: _isLoading ? null : _openForgotPassword,
+              style: TextButton.styleFrom(
+                foregroundColor: AdminThemeTokens.gold,
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 8),
+              ),
+              child: const Text(
+                'Forgot password?',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Future<void> _openForgotPassword() async {
+    await showPortalForgotPasswordDialog(
+      context,
+      theme: SupportThemeTokens.portalSecurityTheme,
+      initialEmail: _emailController.text.trim().isEmpty
+          ? null
+          : _emailController.text.trim(),
     );
   }
 

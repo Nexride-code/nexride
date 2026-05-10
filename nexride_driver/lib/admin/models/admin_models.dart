@@ -502,10 +502,26 @@ class AdminSession {
     required this.email,
     required this.displayName,
     required this.accessMode,
+    this.mustChangePassword = false,
   });
 
   final String uid;
   final String email;
   final String displayName;
   final String accessMode;
+
+  /// True when the user's account is flagged with `temporaryPassword=true`
+  /// (custom claim or RTDB `/account_security/{uid}`). Gated routes use
+  /// this to force-redirect the operator to the change-password screen.
+  final bool mustChangePassword;
+
+  AdminSession copyWith({bool? mustChangePassword}) {
+    return AdminSession(
+      uid: uid,
+      email: email,
+      displayName: displayName,
+      accessMode: accessMode,
+      mustChangePassword: mustChangePassword ?? this.mustChangePassword,
+    );
+  }
 }

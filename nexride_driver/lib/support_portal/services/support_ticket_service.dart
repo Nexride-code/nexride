@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/support_models.dart';
 
@@ -145,18 +146,34 @@ class SupportTicketService {
     );
   }
 
+  /// Best-effort presence ping. Writes the four self-managed presence
+  /// fields under `/support_staff/{uid}` (displayName, accessMode,
+  /// lastActiveAt, updatedAt) so the support directory shows fresh
+  /// activity. Intentionally NEVER throws — a permission-denied here is
+  /// purely cosmetic (it only delays the directory's "last active"
+  /// timestamp) and must not block the dashboard from rendering.
+  ///
+  /// The writeable surface is constrained by `database.rules.json` (only
+  /// the four leaf fields above accept self-writes; `role`, `enabled`,
+  /// `disabled`, `email` remain server-only).
   Future<void> touchStaffPresence({
     required SupportSession session,
   }) async {
     if (session.isAdminOverride) {
       return;
     }
-    await _rootRef.update(<String, dynamic>{
-      'support_staff/${session.uid}/displayName': session.displayName,
-      'support_staff/${session.uid}/accessMode': session.accessMode,
-      'support_staff/${session.uid}/lastActiveAt': ServerValue.timestamp,
-      'support_staff/${session.uid}/updatedAt': ServerValue.timestamp,
-    });
+    try {
+      await _rootRef.update(<String, dynamic>{
+        'support_staff/${session.uid}/displayName': session.displayName,
+        'support_staff/${session.uid}/accessMode': session.accessMode,
+        'support_staff/${session.uid}/lastActiveAt': ServerValue.timestamp,
+        'support_staff/${session.uid}/updatedAt': ServerValue.timestamp,
+      });
+    } catch (error) {
+      debugPrint(
+        '[SupportTicketService] touchStaffPresence skipped uid=${session.uid} error=$error',
+      );
+    }
   }
 
   Future<void> markTicketViewed({

@@ -48,6 +48,12 @@ import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
 import 'widgets/native_places_autocomplete_field.dart';
 import 'widgets/ride_chat_sheet.dart';
+import 'onboarding/rider_selfie_verification_screen.dart';
+import 'services/rider_compliance_service.dart';
+import 'widgets/rider_identity_verification_banner.dart';
+import 'widgets/rider_updated_terms_dialog.dart';
+
+import 'compliance/rider_identity_booking_gate.dart';
 
 void safeShowSnackBar(BuildContext context, String message) {
   SchedulerBinding.instance.addPostFrameCallback((_) {
@@ -199,6 +205,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final RiderPrepaidIntentRecoveryStore _prepaidRecoveryStore =
       RiderPrepaidIntentRecoveryStore();
   bool _hostedCheckoutProcessing = false;
+  bool _identityComplianceLoaded = false;
+  bool _selfieBlocksBooking = false;
+  RiderComplianceSnapshot? _riderFirestoreCompliance;
 
   Map<String, dynamic>? _driverData;
   Map<String, dynamic>? _currentRideSnapshot;
@@ -1708,6 +1717,44 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   String? get _currentRiderUid => FirebaseAuth.instance.currentUser?.uid.trim();
 
+  Future<void> _refreshIdentityCompliance() async {
+    final uid = _currentRiderUid;
+    if (uid == null || uid.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _identityComplianceLoaded = true;
+          _riderFirestoreCompliance = null;
+          _selfieBlocksBooking = true;
+        });
+      }
+      return;
+    }
+    final snap = await RiderComplianceService.instance.fetchSnapshot(uid);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _identityComplianceLoaded = true;
+      _riderFirestoreCompliance = snap;
+      _selfieBlocksBooking = snap.blocksRideBooking;
+    });
+  }
+
+  Future<void> _maybePromptUpdatedTermsOnMap() async {
+    final uid = _currentRiderUid;
+    if (uid == null || uid.isEmpty) {
+      return;
+    }
+    final snap = await RiderComplianceService.instance.fetchSnapshot(uid);
+    if (!mounted || !snap.needsTermsAcceptance) {
+      return;
+    }
+    await showRiderUpdatedTermsDialog(context: context, riderId: uid);
+    if (mounted) {
+      await _refreshIdentityCompliance();
+    }
+  }
+
   String get _currentDriverIdForRide => _firstNonEmptyText(<dynamic>[
     _driverData?['id'],
     _currentRideSnapshot?['driver_id'],
@@ -2090,6 +2137,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (riderId == null || riderId.isEmpty) {
       return 'Please log in before requesting a ride.';
     }
+    if (_identityComplianceLoaded &&
+        (_riderFirestoreCompliance?.blocksRideBooking ?? true)) {
+      if (_riderFirestoreCompliance != null) {
+        return riderRequestButtonIdentityBlockSubtitle(_riderFirestoreCompliance!);
+      }
+      return 'Sign in again to verify your identity.';
+    }
     if (_pickupLocation == null || _pickupAddress.trim().isEmpty) {
       return 'Choose your pickup to begin.';
     }
@@ -2126,9 +2180,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (error is TimeoutException) {
       return friendlyFirebaseError(error, debugLabel: 'rideRequest.timeout');
     }
-    if (error is StateError && error.message == 'ride_resume_snapshot_timeout') {
-      return 'We could not load your active trip. Check your connection, then try again '
-          'or open your trip from the home screen.';
+    if (error is StateError) {
+      if (error.message == 'ride_resume_snapshot_timeout') {
+        return 'We could not load your active trip. Check your connection, then try again '
+            'or open your trip from the home screen.';
+      }
+      final mapped = riderIdentityServerRejectionUserMessage(error.message);
+      if (mapped != null) {
+        return mapped;
+      }
     }
     return friendlyFirebaseError(error, debugLabel: 'rideRequest');
   }
@@ -2768,6 +2828,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       if (mounted) {
         await _refreshRiderTrustState(persist: true);
       }
+      await _refreshIdentityCompliance();
+      if (mounted) {
+        await _maybePromptUpdatedTermsOnMap();
+      }
     });
     _loadDrivers();
     _startIncomingCallListener();
@@ -3176,6 +3240,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       unawaited(_handleCallAppBackgrounded());
       return;
     }
+
+    unawaited(_refreshIdentityCompliance());
 
     _startIncomingCallListener();
     unawaited(_resyncIncomingCallState());
@@ -6637,6 +6703,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRideFlow(
         'REQUEST RIDE validation failed reason=trust_validation',
       );
+      return;
+    }
+
+    if (_selfieBlocksBooking) {
+      final msg = _riderFirestoreCompliance != null
+          ? riderRequestButtonIdentityBlockSubtitle(_riderFirestoreCompliance!)
+          : 'Complete identity verification before booking.';
+      _showSnackBar(msg);
+      _logRideFlow('createRideRequest blocked reason=identity_gate');
       return;
     }
 
@@ -10724,6 +10799,31 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             right: 20,
             child: Column(
               children: [
+                if (_identityComplianceLoaded &&
+                    _selfieBlocksBooking &&
+                    _riderFirestoreCompliance != null) ...[
+                  RiderIdentityVerificationBanner(
+                    message: riderMapIdentityBannerPrimaryLine(
+                      _riderFirestoreCompliance!,
+                    ),
+                    actionLabel:
+                        _riderFirestoreCompliance!.identityPhase ==
+                            RiderIdentityBookingPhase.rejected
+                        ? 'Retake'
+                        : 'Verify',
+                    onOpenVerification: () async {
+                      await Navigator.of(context).push<void>(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const RiderSelfieVerificationScreen(),
+                        ),
+                      );
+                      if (mounted) {
+                        await _refreshIdentityCompliance();
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                ],
                 _pickupSearch(),
                 const SizedBox(height: 10),
                 _destinationSearch(),

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../portal_security/portal_security_theme.dart';
+
 class AdminRoutePaths {
   static const String driverHome = '/';
   static const String admin = '/admin';
@@ -21,6 +23,8 @@ class AdminPortalRoutePaths {
   static const String verification = '$adminPrefix/verification';
   static const String support = '$adminPrefix/support';
   static const String settings = '$adminPrefix/settings';
+  static const String accountSecurity = '$adminPrefix/account/security';
+  static const String changePassword = '$adminPrefix/account/change-password';
 
   static const Map<String, String> _relativeAliases = <String, String>{
     '/': root,
@@ -36,6 +40,8 @@ class AdminPortalRoutePaths {
     '/verification': verification,
     '/support': support,
     '/settings': settings,
+    '/account/security': accountSecurity,
+    '/account/change-password': changePassword,
   };
 
   static const List<String> protectedRoutes = <String>[
@@ -50,6 +56,8 @@ class AdminPortalRoutePaths {
     verification,
     support,
     settings,
+    accountSecurity,
+    changePassword,
   ];
 
   static String normalize(String rawPath) {
@@ -203,5 +211,27 @@ class AdminThemeTokens {
     ],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
+  );
+
+  /// [PortalSecurityTheme] built from the admin tokens above so the shared
+  /// account-security screens render with the admin brand palette.
+  static const PortalSecurityTheme portalSecurityTheme = PortalSecurityTheme(
+    canvas: canvas,
+    surface: surface,
+    border: border,
+    subtle: Color(0xFF55514A),
+    appBarBackground: ink,
+    appBarForeground: Colors.white,
+    primary: gold,
+    onPrimary: Colors.white,
+    success: success,
+    successBackground: Color(0xFFE7F6EC),
+    successBorder: Color(0xFFB7E1C1),
+    danger: danger,
+    dangerBackground: Color(0xFFFDECEE),
+    dangerBorder: Color(0xFFF5C6CB),
+    warningForeground: warning,
+    warningBackground: Color(0xFFFFF8E1),
+    warningBorder: Color(0xFFF4C430),
   );
 }

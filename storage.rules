@@ -1,46 +1,70 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
-    function isSignedIn() {
+
+    function signedIn() {
       return request.auth != null;
     }
 
-    function isImageUpload() {
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.admin == true;
+    }
+
+    function isImageUploadMax10MiB() {
       return request.resource != null
         && request.resource.contentType.matches('image/.*')
         && request.resource.size < 10 * 1024 * 1024;
     }
 
+    match /user_verification/{uid}/{allPaths=**} {
+      // Rider uploads own selfies only — no public read (admin/console uses privileged access).
+      allow read: if isAdmin();
+
+      // create/update need metadata; deletes have no request.resource — keep separate from rider image checks.
+      allow create, update: if isOwner(uid)
+        && request.resource != null
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.size < 5 * 1024 * 1024;
+
+      // Preserve audit trail: only admins remove blobs (riders can replace via upload to same object path).
+      allow delete: if isAdmin();
+    }
+
     match /ride_chats/{rideId}/{senderUid}/{fileName} {
-      allow write: if isSignedIn() && request.auth.uid == senderUid && isImageUpload();
-      allow read: if isSignedIn();
+      allow write: if signedIn() && request.auth.uid == senderUid && isImageUploadMax10MiB();
+      allow read: if signedIn();
     }
 
     match /ride_payment_proofs/{rideId}/{uid}/{fileName} {
-      allow write: if isSignedIn() && request.auth.uid == uid && isImageUpload();
-      allow read: if isSignedIn();
+      allow write: if signedIn() && request.auth.uid == uid && isImageUploadMax10MiB();
+      allow read: if signedIn();
     }
 
     match /dispatch_uploads/{rideId}/{category}/{fileName} {
-      allow write: if isSignedIn() && isImageUpload();
-      allow read: if isSignedIn();
+      allow write: if signedIn() && isImageUploadMax10MiB();
+      allow read: if signedIn();
     }
 
     match /driver_documents/{uid}/{fileName} {
-      allow write: if isSignedIn()
+      allow write: if signedIn()
         && request.auth.uid == uid
-        && isImageUpload();
-      allow read: if isSignedIn();
+        && isImageUploadMax10MiB();
+      allow read: if signedIn();
     }
 
-    // Bank transfer receipts: rider uploads under their uid; admin may read via token URL or client with admin claim.
+    // Bank transfer receipts: rider uploads under their uid.
     match /receipts/{uid}/{rideId}/{fileName} {
-      allow write: if isSignedIn()
+      allow write: if signedIn()
         && request.auth.uid == uid
         && fileName == 'bank_transfer_receipt.jpg'
-        && isImageUpload();
-      allow read: if isSignedIn()
-        && (request.auth.uid == uid || request.auth.token.admin == true);
+        && isImageUploadMax10MiB();
+      allow read: if signedIn()
+        && (request.auth.uid == uid || isAdmin());
     }
   }
 }

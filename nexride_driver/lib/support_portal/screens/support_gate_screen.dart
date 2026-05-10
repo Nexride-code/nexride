@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../admin/widgets/admin_components.dart';
 import '../models/support_models.dart';
 import '../services/support_auth_service.dart';
+import '../support_config.dart';
 import 'support_login_screen.dart';
 import '../widgets/support_workspace_screen.dart';
 
@@ -23,6 +24,7 @@ class SupportGateScreen extends StatefulWidget {
     this.initialTicketDocumentId,
     this.routeForView,
     this.routeForTicket,
+    this.changePasswordRoute = SupportRoutePaths.changePassword,
   });
 
   final SupportGateMode mode;
@@ -34,6 +36,11 @@ class SupportGateScreen extends StatefulWidget {
   final String? initialTicketDocumentId;
   final String Function(SupportInboxView view)? routeForView;
   final String Function(String ticketDocumentId)? routeForTicket;
+
+  /// Where to send the user when their account is flagged
+  /// `temporaryPassword=true`. Defaults to the support portal's
+  /// change-password route.
+  final String changePasswordRoute;
 
   @override
   State<SupportGateScreen> createState() => _SupportGateScreenState();
@@ -124,6 +131,20 @@ class _SupportGateScreenState extends State<SupportGateScreen> {
         }
 
         if (session != null && widget.mode == SupportGateMode.login) {
+          if (session.mustChangePassword) {
+            _logDecision(
+              'signed-in support on login route with temp password -> '
+              '${widget.changePasswordRoute}',
+            );
+            _redirectTo(widget.changePasswordRoute);
+            return const AdminFullscreenState(
+              title: 'Password change required',
+              message:
+                  'You\'re using a temporary password. Redirecting to the change-password screen.',
+              icon: Icons.lock_clock_rounded,
+              isLoading: true,
+            );
+          }
           final route = widget.initialTicketDocumentId != null
               ? widget.routeForTicket?.call(widget.initialTicketDocumentId!) ??
                   widget.dashboardRoute
@@ -155,6 +176,20 @@ class _SupportGateScreenState extends State<SupportGateScreen> {
         }
 
         if (session != null) {
+          if (session.mustChangePassword) {
+            _logDecision(
+              'support session ready uid=${session.uid} but mustChangePassword=true -> '
+              '${widget.changePasswordRoute}',
+            );
+            _redirectTo(widget.changePasswordRoute);
+            return const AdminFullscreenState(
+              title: 'Password change required',
+              message:
+                  'You\'re using a temporary password. Redirecting to the change-password screen.',
+              icon: Icons.lock_clock_rounded,
+              isLoading: true,
+            );
+          }
           return SupportWorkspaceScreen(
             session: session,
             authService: _authService,

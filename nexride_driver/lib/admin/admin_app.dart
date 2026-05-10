@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../firebase_options.dart';
+import '../portal_security/portal_account_security_screen.dart';
+import '../portal_security/portal_change_password_screen.dart';
 import 'admin_config.dart';
 import 'screens/admin_gate_screen.dart';
 import 'services/admin_auth_service.dart';
@@ -148,6 +150,28 @@ class AdminApp extends StatelessWidget {
               dashboardRoute: AdminPortalRoutePaths.dashboard,
               routeForSection: AdminPortalRoutePaths.pathForSection,
               enableRealtimeBadgeListeners: enableRealtimeBadgeListeners,
+            ),
+          );
+        }
+
+        if (resolvedRoute == AdminPortalRoutePaths.changePassword) {
+          return _buildAdminRoute(
+            routeName: resolvedRoute,
+            child: const PortalChangePasswordScreen(
+              theme: AdminThemeTokens.portalSecurityTheme,
+              loginRoute: AdminPortalRoutePaths.login,
+              successRoute: AdminPortalRoutePaths.accountSecurity,
+            ),
+          );
+        }
+
+        if (resolvedRoute == AdminPortalRoutePaths.accountSecurity) {
+          return _buildAdminRoute(
+            routeName: resolvedRoute,
+            child: const PortalAccountSecurityScreen(
+              theme: AdminThemeTokens.portalSecurityTheme,
+              changePasswordRoute: AdminPortalRoutePaths.changePassword,
+              loginRoute: AdminPortalRoutePaths.login,
             ),
           );
         }

@@ -51,6 +51,56 @@ service cloud.firestore {
       return isAdmin() || isSupportClaim() || isSupportDocument();
     }
 
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Riders may only PATCH consent / selfie bookkeeping fields — never identity review workflow.
+    function riderUserConsentCreateKeysOk() {
+      return request.resource.data.keys().hasOnly([
+        'termsAccepted',
+        'termsAcceptedAt',
+        'termsVersion',
+        'ageConfirmed',
+        'ageConfirmedAt',
+      ]);
+    }
+
+    function riderUserConsentWriteKeysAllowed() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'termsAccepted',
+        'termsAcceptedAt',
+        'termsVersion',
+        'ageConfirmed',
+        'ageConfirmedAt',
+        'selfieUploaded',
+        'selfieUploadedAt',
+      ]);
+    }
+
+    // Ensures admins can set verificationStatus / review metadata; riders cannot add, change,
+    // or strip these keys on self-service writes.
+    function riderUserPreservesAdminVerificationFields() {
+      return (!('verificationStatus' in resource.data) ||
+          resource.data.verificationStatus ==
+            request.resource.data.verificationStatus) &&
+        (!('verificationReviewedAt' in resource.data) ||
+          resource.data.verificationReviewedAt ==
+            request.resource.data.verificationReviewedAt) &&
+        (!('verificationReviewedBy' in resource.data) ||
+          resource.data.verificationReviewedBy ==
+            request.resource.data.verificationReviewedBy) &&
+        (!('verificationRejectionReason' in resource.data) ||
+          resource.data.verificationRejectionReason ==
+            request.resource.data.verificationRejectionReason) &&
+        (!('verificationRejected' in resource.data) ||
+          resource.data.verificationRejected ==
+            request.resource.data.verificationRejected) &&
+        (!('selfieReviewQueuedAt' in resource.data) ||
+          resource.data.selfieReviewQueuedAt ==
+            request.resource.data.selfieReviewQueuedAt);
+    }
+
     function isTicketOwner() {
       return signedIn() && resource.data.createdByUserId == request.auth.uid;
     }
@@ -154,6 +204,29 @@ service cloud.firestore {
     match /support_logs/{logId} {
       allow read, create: if isAdmin() || isSupport();
       allow update, delete: if isAdmin();
+    }
+
+    // Rider profile compliance (Firestore) — field-level rider restrictions
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin() || isSupport();
+
+      allow create: if isOwner(uid)
+        && riderUserConsentCreateKeysOk();
+
+      allow update: if isAdmin()
+        || (
+          isOwner(uid)
+          && riderUserConsentWriteKeysAllowed()
+          && riderUserPreservesAdminVerificationFields()
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    // Shared trip lookup tokens — tighten write if abused (currently any signed-in user may write).
+    match /shared_trips/{token} {
+      allow read: if true;
+      allow write: if signedIn();
     }
 
     match /{document=**} {
