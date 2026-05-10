@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#A67C00"/>
+      <stop offset="100%" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <circle cx="200" cy="880" r="280" fill="#D4AF37" opacity="0.04"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <path d="M 540 220 L 640 540 L 440 540 Z" fill="none" stroke="#D4AF37" stroke-width="3" opacity="0.4"/>
+  <circle cx="540" cy="400" r="120" fill="none" stroke="#D4AF37" stroke-width="6" opacity="0.5"/>
+  <text x="540" y="420" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="36" fill="#FAFAFA" font-weight="600">YOU</text>
+  <text x="540" y="720" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="64" font-weight="700" fill="#FAFAFA">Driver App</text>
+  <text x="540" y="790" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="28" fill="#D4AF37">Drive with clarity.</text>
+  <text x="540" y="980" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="22" fill="#666">Offers - Navigation - Earnings</text>
+</svg>

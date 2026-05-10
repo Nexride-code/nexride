@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D4AF37"/>
+      <stop offset="100%" stop-color="#6B5210"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <circle cx="540" cy="420" r="140" fill="none" stroke="#D4AF37" stroke-width="8"/>
+  <path d="M 480 420 L 520 468 L 610 362" fill="none" stroke="#FAFAFA" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="540" y="700" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="56" font-weight="700" fill="#FAFAFA">Safety Verified</text>
+  <text x="540" y="770" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="28" fill="#D4AF37">Trust on every trip.</text>
+  <text x="540" y="960" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="24" fill="#666" letter-spacing="4">DRIVERS - RIDERS - ROAD</text>
+</svg>

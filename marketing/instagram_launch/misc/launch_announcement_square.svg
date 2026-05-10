@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs><linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#D4AF37"/><stop offset="100%" stop-color="#4A3910"/></linearGradient></defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <polygon points="0,0 500,0 0,620" fill="#D4AF37" opacity="0.07"/>
+  <rect x="0" y="0" width="1080" height="8" fill="url(#gold)"/>
+  <text x="540" y="440" text-anchor="middle" font-family="system-ui, sans-serif" font-size="36" fill="#D4AF37" letter-spacing="14">NEXRIDE</text>
+  <text x="540" y="600" text-anchor="middle" font-family="system-ui, sans-serif" font-size="72" font-weight="800" fill="#FAFAFA">We're LIVE</text>
+  <text x="540" y="700" text-anchor="middle" font-family="system-ui, sans-serif" font-size="30" fill="#888">Edit copy for your rollout date - Play Store + App Store</text>
+  <text x="540" y="960" text-anchor="middle" font-family="system-ui, sans-serif" font-size="26" fill="#666">Tagline under wordmark optional</text>
+</svg>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#D4AF37"/><stop offset="100%" stop-color="#5C4708"/></linearGradient></defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <circle cx="540" cy="540" r="420" fill="none" stroke="url(#g)" stroke-width="12"/>
+  <text x="540" y="580" text-anchor="middle" font-family="system-ui, sans-serif" font-size="52" font-weight="700" fill="#FAFAFA">LAUNCH</text>
+</svg>

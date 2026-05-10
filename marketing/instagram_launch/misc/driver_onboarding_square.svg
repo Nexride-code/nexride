@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs><linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#E8D48A"/><stop offset="100%" stop-color="#D4AF37"/></linearGradient></defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <g transform="translate(540,440)">
+    <rect x="-200" y="-120" width="400" height="240" rx="20" fill="#141210" stroke="#D4AF37" stroke-width="4"/>
+    <circle cx="-80" cy="-40" r="36" fill="#D4AF37" opacity="0.35"/>
+    <path d="M 20 -20 L 120 -20 L 140 80 L 0 80 Z" fill="none" stroke="#666" stroke-width="3"/>
+  </g>
+  <text x="540" y="720" text-anchor="middle" font-family="system-ui, sans-serif" font-size="52" font-weight="700" fill="#FAFAFA">Driver Onboarding</text>
+  <text x="540" y="790" text-anchor="middle" font-family="system-ui, sans-serif" font-size="28" fill="#D4AF37">Clear steps - Fair expectations</text>
+</svg>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#E8D48A"/>
+      <stop offset="100%" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1920" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <rect x="240" y="560" width="600" height="360" rx="28" fill="#141210" stroke="#D4AF37" stroke-width="4"/>
+  <text x="540" y="1060" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="72" font-weight="700" fill="#FAFAFA">Real Support</text>
+  <text x="540" y="1140" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="32" fill="#D4AF37">Answers when it matters</text>
+</svg>

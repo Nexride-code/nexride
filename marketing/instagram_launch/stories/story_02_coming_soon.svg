@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#E8D48A"/>
+      <stop offset="100%" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1920" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <text x="540" y="520" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="86" font-weight="700" fill="#FAFAFA">Coming Soon</text>
+  <text x="540" y="620" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="32" fill="#D4AF37">NexRide is almost here</text>
+  <text x="540" y="1500" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="28" fill="#888">Turn on post notifications</text>
+</svg>

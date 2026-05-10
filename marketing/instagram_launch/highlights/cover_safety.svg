@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <circle cx="540" cy="540" r="340" fill="none" stroke="#D4AF37" stroke-width="10"/>
+  <path d="M 470 540 L 520 596 L 610 482" fill="none" stroke="#FAFAFA" stroke-width="16" stroke-linecap="round"/>
+  <text x="540" y="940" text-anchor="middle" font-family="system-ui, sans-serif" font-size="40" font-weight="700" fill="#D4AF37">SAFETY</text>
+</svg>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#F0E6C8"/>
+      <stop offset="100%" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <!-- Map grid -->
+  <g stroke="#2A2618" stroke-width="2" opacity="0.6">
+    <line x1="120" y1="200" x2="960" y2="200"/>
+    <line x1="120" y1="360" x2="960" y2="360"/>
+    <line x1="120" y1="520" x2="960" y2="520"/>
+    <line x1="120" y1="680" x2="960" y2="680"/>
+    <line x1="200" y1="140" x2="200" y2="820"/>
+    <line x1="400" y1="140" x2="400" y2="820"/>
+    <line x1="600" y1="140" x2="600" y2="820"/>
+    <line x1="800" y1="140" x2="800" y2="820"/>
+  </g>
+  <path d="M 280 620 Q 540 380 760 460" fill="none" stroke="#D4AF37" stroke-width="10" stroke-linecap="round" stroke-dasharray="24 14"/>
+  <circle cx="760" cy="460" r="22" fill="#D4AF37"/>
+  <circle cx="760" cy="460" r="56" fill="none" stroke="#D4AF37" stroke-width="3" opacity="0.4"/>
+  <text x="540" y="900" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="60" font-weight="700" fill="#FAFAFA">Live Tracking</text>
+  <text x="540" y="960" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="28" fill="#B8962E">See every turn.</text>
+</svg>

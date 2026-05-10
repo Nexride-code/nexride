@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D4AF37"/>
+      <stop offset="100%" stop-color="#8A6914"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <rect x="340" y="300" width="400" height="260" rx="20" fill="#141210" stroke="#D4AF37" stroke-width="4"/>
+  <rect x="380" y="340" width="320" height="48" rx="8" fill="#0A0A0A" stroke="#2A2618" stroke-width="2"/>
+  <text x="400" y="374" font-family="system-ui, -apple-system, sans-serif" font-size="22" fill="#666">"""" """" """" 4242</text>
+  <rect x="380" y="410" width="140" height="36" rx="8" fill="#D4AF37" opacity="0.2"/>
+  <text x="420" y="436" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#D4AF37" font-weight="600">SECURE</text>
+  <path d="M 720 500 L 740 520 L 780 470" fill="none" stroke="#D4AF37" stroke-width="8" stroke-linecap="round"/>
+  <text x="540" y="680" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="56" font-weight="700" fill="#FAFAFA">Secure Payments</text>
+  <text x="540" y="740" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="28" fill="#B8962E">No drama at drop-off.</text>
+</svg>

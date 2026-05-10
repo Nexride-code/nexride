@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="sbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#141210"/>
+      <stop offset="100%" stop-color="#0A0A0A"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F0E6C8"/>
+      <stop offset="100%" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1920" fill="url(#sbg)"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <text x="540" y="200" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="24" fill="#888" letter-spacing="10">NEXRIDE</text>
+  <g transform="translate(540,640)">
+    <path d="M -120 -50 Q -28 -132 72 -74 T 200 36" fill="none" stroke="#D4AF37" stroke-width="12" opacity="0.25"/>
+    <path d="M -100 -112 L -100 112 M -100 -112 L 100 112 M 100 -112 L 100 112" fill="none" stroke="url(#gold)" stroke-width="22" stroke-linecap="round"/>
+  </g>
+  <text x="540" y="940" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="80" font-weight="700" fill="url(#gold)">NexRide</text>
+  <text x="540" y="1040" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="34" fill="#F5F0E6">Mobility, elevated.</text>
+  <text x="540" y="1680" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="26" fill="#666">Swipe up - Follow</text>
+</svg>

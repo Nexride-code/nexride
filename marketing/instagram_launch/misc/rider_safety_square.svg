@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs><linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#F0E6C8"/><stop offset="100%" stop-color="#D4AF37"/></linearGradient></defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <circle cx="540" cy="400" r="120" fill="none" stroke="#D4AF37" stroke-width="10"/>
+  <path d="M 490 402 L 530 446 L 600 362" fill="none" stroke="#FAFAFA" stroke-width="14" stroke-linecap="round"/>
+  <text x="540" y="720" text-anchor="middle" font-family="system-ui, sans-serif" font-size="56" font-weight="700" fill="#FAFAFA">Rider Safety</text>
+  <text x="540" y="800" text-anchor="middle" font-family="system-ui, sans-serif" font-size="28" fill="#D4AF37">Verified trips - Live updates</text>
+  <text x="540" y="960" text-anchor="middle" font-family="system-ui, sans-serif" font-size="22" fill="#666">Campaign / Stories / Carousel</text>
+</svg>

@@ -1,0 +1,16 @@
+=== SHORT BIO (≤150 chars incl. spacing — trim links to fit) ===
+NexRide · Premium rides, built for Africa. Black-car calm, transparent pricing. 🇳🇬
+
+=== PREMIUM BIO ===
+NexRide is a modern mobility platform crafted for discerning riders and professional drivers — live tracking, verified safety, and support you can reach. Elevated everyday travel. Africa-first.
+
+📲 App links in highlights
+🌐 nexride.example
+
+=== NIGERIA-FOCUSED BIO ===
+Your city, your ride — made in Nigeria for Nigeria. NexRide connects you to vetted drivers, live trip tracking, and secure payments. Lagos · Abuja · more cities soon.
+
+🇳🇬 Built for Naija roads
+📲 Download when we launch
+
+Use your real website and city list when live.

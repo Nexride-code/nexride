@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <rect x="290" y="380" width="500" height="320" rx="24" fill="#141210" stroke="#D4AF37" stroke-width="8"/>
+  <text x="540" y="800" text-anchor="middle" font-family="system-ui, sans-serif" font-size="44" font-weight="700" fill="#D4AF37">PAY</text>
+</svg>

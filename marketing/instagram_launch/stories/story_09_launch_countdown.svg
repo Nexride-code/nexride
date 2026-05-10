@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#F0E6C8"/>
+      <stop offset="100%" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1920" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <text x="540" y="640" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="200" font-weight="800" fill="url(#gold)">00</text>
+  <text x="540" y="740" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="40" fill="#FAFAFA">days left</text>
+  <text x="540" y="1200" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="36" fill="#888">Edit number before export</text>
+  <text x="540" y="1600" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="34" font-weight="600" fill="#FAFAFA">NexRide - Launch</text>
+</svg>

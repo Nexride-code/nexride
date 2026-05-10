@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#E8D48A"/>
+      <stop offset="100%" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <rect x="320" y="260" width="440" height="320" rx="24" fill="#141210" stroke="#D4AF37" stroke-width="3" opacity="0.85"/>
+  <circle cx="400" cy="340" r="36" fill="#D4AF37" opacity="0.35"/>
+  <rect x="460" y="320" width="220" height="20" rx="6" fill="#2A2618"/>
+  <rect x="460" y="360" width="180" height="16" rx="6" fill="#1A1612"/>
+  <rect x="360" y="420" width="360" height="14" rx="4" fill="#2A2618"/>
+  <rect x="360" y="450" width="280" height="14" rx="4" fill="#2A2618"/>
+  <rect x="360" y="500" width="160" height="44" rx="10" fill="url(#gold)" opacity="0.9"/>
+  <text x="440" y="530" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#0A0A0A" font-weight="700">HELP</text>
+  <text x="540" y="700" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="60" font-weight="700" fill="#FAFAFA">Real Support</text>
+  <text x="540" y="770" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="28" fill="#D4AF37">Fast. Human. Clear.</text>
+</svg>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="sbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#141210"/>
+      <stop offset="100%" stop-color="#0A0A0A"/>
+    </linearGradient>
+    <linearGradient id="sg" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#D4AF37"/>
+      <stop offset="100%" stop-color="#A67C00"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1920" fill="url(#sbg)"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#sg)"/>
+  <!-- Safe zone hint: Instagram UI -->
+  <rect x="60" y="1650" width="960" height="220" fill="none" stroke="#D4AF37" stroke-width="2" stroke-dasharray="12 12" opacity="0.25"/>
+  <text x="540" y="1760" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#666">Safe zone - keep CTAs above</text>
+  <text x="540" y="720" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="56" fill="#FAFAFA" font-weight="600">HEADLINE</text>
+  <text x="540" y="810" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="30" fill="#D4AF37" opacity="0.9">Supporting line</text>
+  <text x="540" y="220" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="26" fill="#888" letter-spacing="8">NEXRIDE</text>
+</svg>

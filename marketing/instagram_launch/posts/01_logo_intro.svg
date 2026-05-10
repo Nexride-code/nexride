@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="42%" r="55%">
+      <stop offset="0%" stop-color="#2A2418" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0A0A0A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F0E6C8"/>
+      <stop offset="100%" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1080" fill="#0A0A0A"/>
+  <rect width="1080" height="1080" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1080" height="6" fill="url(#gold)"/>
+  <g transform="translate(540,400)">
+    <path d="M -180 -80 Q -40 -200 100 -120 T 300 20" fill="none" stroke="#D4AF37" stroke-width="16" stroke-linecap="round" opacity="0.25"/>
+    <path d="M -140 -160 L -140 160 M -140 -160 L 140 160 M 140 -160 L 140 160" fill="none" stroke="url(#gold)" stroke-width="28" stroke-linecap="round"/>
+  </g>
+  <text x="540" y="620" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="96" font-weight="700" fill="url(#gold)" letter-spacing="-2">NexRide</text>
+  <text x="540" y="700" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="32" fill="#F5F0E6" opacity="0.85">Mobility, elevated.</text>
+  <line x1="340" y1="760" x2="740" y2="760" stroke="#D4AF37" stroke-width="2" opacity="0.4"/>
+  <text x="540" y="980" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="22" fill="#666" letter-spacing="10">AFRICA - MOBILITY</text>
+</svg>
