@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, Route, Routes } from "react-router-dom";
 import { get, initNexRideWeb, ref } from "../../lib/firebaseClient";
 import { DeliveryRegionsAdminPage } from "./DeliveryRegionsAdminPage";
+import { MerchantDetailAdminPage } from "./MerchantDetailAdminPage";
+import { MerchantsAdminListPage } from "./MerchantsAdminListPage";
 
 type LiveRide = {
   ride_id: string;
@@ -538,6 +540,7 @@ export function AdminShell() {
         <Link to="/admin/riders">Riders</Link>
         <Link to="/admin/drivers">Drivers</Link>
         <Link to="/admin/regions">Delivery regions</Link>
+        <Link to="/admin/merchants">Merchants</Link>
         <Link to="/admin/payments">Payments</Link>
         <Link to="/admin/withdrawals">Withdrawals</Link>
         <Link to="/admin/tickets">Support tickets</Link>
@@ -551,6 +554,8 @@ export function AdminShell() {
         <Route path="/riders" element={<RidersPage />} />
         <Route path="/drivers" element={<DriversPage />} />
         <Route path="/regions" element={<DeliveryRegionsAdminPage />} />
+        <Route path="/merchants" element={<MerchantsAdminListPage />} />
+        <Route path="/merchants/:merchantId" element={<MerchantDetailAdminPage />} />
         <Route path="/payments" element={<PaymentsPage />} />
         <Route path="/withdrawals" element={<WithdrawalsPage />} />
         <Route path="/tickets" element={<TicketsPage />} />

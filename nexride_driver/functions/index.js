@@ -215,6 +215,21 @@ exports.backfillUserRolloutRegions = onCall(rideCallOpts, async (request) =>
   rolloutBackfill.adminBackfillUserRolloutRegions(request.data, callableContext(request), db),
 );
 
+// --- Merchant Phase 1 (registration + admin review only; no orders/menus/wallets) ---
+const merchantCallables = require("./merchant/merchant_callables");
+exports.merchantRegister = onCall(rideCallOpts, async (request) =>
+  merchantCallables.merchantRegister(request.data, callableContext(request), db),
+);
+exports.adminListMerchants = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminListMerchants(request.data, callableContext(request), db),
+);
+exports.adminGetMerchant = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminGetMerchant(request.data, callableContext(request), db),
+);
+exports.adminReviewMerchant = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminReviewMerchant(request.data, callableContext(request), db),
+);
+
 // Single client-facing accept entrypoint: [acceptRide] → ride.acceptRideRequest (implementation).
 exports.acceptRide = onCall(rideCallOpts, async (request) =>
   ride.acceptRideRequest(request.data, callableContext(request), db),

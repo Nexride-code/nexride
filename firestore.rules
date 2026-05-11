@@ -234,6 +234,12 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    // Merchants — Phase 1: writes only via Cloud Functions; owners may read their own row.
+    match /merchants/{merchantId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.owner_uid == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+
     // Rider profile compliance (Firestore) — field-level rider restrictions
     match /users/{uid} {
       allow read: if isOwner(uid) || isAdmin() || isSupport();
