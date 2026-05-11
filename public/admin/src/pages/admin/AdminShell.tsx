@@ -3,6 +3,7 @@ import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebas
 import { useCallback, useEffect, useState } from "react";
 import { Link, Route, Routes } from "react-router-dom";
 import { get, initNexRideWeb, ref } from "../../lib/firebaseClient";
+import { DeliveryRegionsAdminPage } from "./DeliveryRegionsAdminPage";
 
 type LiveRide = {
   ride_id: string;
@@ -423,11 +424,11 @@ function LookupPage() {
         Load
       </button>
       {err && <p style={{ color: "#b00020" }}>{err}</p>}
-      {out && (
+      {out != null ? (
         <pre style={{ background: "#f6f6f6", padding: 12, marginTop: 12, fontSize: 12, overflow: "auto" }}>
           {JSON.stringify(out, null, 2)}
         </pre>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -536,6 +537,7 @@ export function AdminShell() {
         <Link to="/admin/rides">Live rides</Link>
         <Link to="/admin/riders">Riders</Link>
         <Link to="/admin/drivers">Drivers</Link>
+        <Link to="/admin/regions">Delivery regions</Link>
         <Link to="/admin/payments">Payments</Link>
         <Link to="/admin/withdrawals">Withdrawals</Link>
         <Link to="/admin/tickets">Support tickets</Link>
@@ -548,6 +550,7 @@ export function AdminShell() {
         <Route path="/rides" element={<LiveRidesPage />} />
         <Route path="/riders" element={<RidersPage />} />
         <Route path="/drivers" element={<DriversPage />} />
+        <Route path="/regions" element={<DeliveryRegionsAdminPage />} />
         <Route path="/payments" element={<PaymentsPage />} />
         <Route path="/withdrawals" element={<WithdrawalsPage />} />
         <Route path="/tickets" element={<TicketsPage />} />

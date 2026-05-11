@@ -66,6 +66,14 @@ service cloud.firestore {
       ]);
     }
 
+    function riderRolloutBootstrapCreateOk() {
+      return request.resource.data.keys().hasOnly([
+        'rollout_region_id',
+        'rollout_city_id',
+        'rollout_dispatch_market_id',
+      ]);
+    }
+
     function riderUserConsentWriteKeysAllowed() {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
         'termsAccepted',
@@ -75,6 +83,9 @@ service cloud.firestore {
         'ageConfirmedAt',
         'selfieUploaded',
         'selfieUploadedAt',
+        'rollout_region_id',
+        'rollout_city_id',
+        'rollout_dispatch_market_id',
       ]);
     }
 
@@ -206,12 +217,29 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
+    // Rollout delivery matrix + per-city bubbles. Writes via Cloud Functions only.
+    match /delivery_regions/{regionId} {
+      allow read: if signedIn();
+      allow create, update, delete: if false;
+
+      match /cities/{cityId} {
+        allow read: if signedIn();
+        allow create, update, delete: if false;
+      }
+    }
+
+    // Reserved for server-owned fare tables (no client writes).
+    match /region_pricing/{regionId} {
+      allow read: if signedIn();
+      allow create, update, delete: if false;
+    }
+
     // Rider profile compliance (Firestore) — field-level rider restrictions
     match /users/{uid} {
       allow read: if isOwner(uid) || isAdmin() || isSupport();
 
       allow create: if isOwner(uid)
-        && riderUserConsentCreateKeysOk();
+        && (riderUserConsentCreateKeysOk() || riderRolloutBootstrapCreateOk());
 
       allow update: if isAdmin()
         || (

@@ -135,11 +135,11 @@ function SearchRidePage() {
         Search
       </button>
       {err && <p style={{ color: "#b00020" }}>{err}</p>}
-      {out && (
+      {out != null ? (
         <pre style={{ background: "#f6f6f6", padding: 12, marginTop: 12, fontSize: 13, overflow: "auto" }}>
           {JSON.stringify(out, null, 2)}
         </pre>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -172,11 +172,11 @@ function SearchUserPage() {
         Lookup
       </button>
       {err && <p style={{ color: "#b00020" }}>{err}</p>}
-      {out && (
+      {out != null ? (
         <pre style={{ background: "#f6f6f6", padding: 12, marginTop: 12, fontSize: 13, overflow: "auto" }}>
           {JSON.stringify(out, null, 2)}
         </pre>
-      )}
+      ) : null}
     </div>
   );
 }

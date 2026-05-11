@@ -16,6 +16,7 @@ const { evaluateDriverForOffer, loadDispatchGates } = require("./driver_dispatch
 const ride = require("./ride_callables");
 const riderFirestoreIdentity = require("./rider_firestore_identity");
 const { sendPushToUser } = require("./push_notifications");
+const deliveryRegions = require("./ecosystem/delivery_regions");
 
 const MAX_FARE_NGN_DEFAULT = 25_000_000;
 const MIN_LAT_NG = 4.2;
@@ -407,6 +408,26 @@ async function createDeliveryRequest(data, context, db) {
   }
   if (riderGates.require_ng_pickup && !coordsInNgBox(dCoord.lat, dCoord.lng)) {
     return { success: false, reason: "dropoff_location_out_of_region" };
+  }
+
+  const rolloutGate = await deliveryRegions.assertRolloutWithHints(
+    admin.firestore(),
+    market,
+    pCoord.lat,
+    pCoord.lng,
+    "package",
+    {
+      region_id: data?.service_region_id ?? data?.rollout_region_id,
+      city_id: data?.service_city_id ?? data?.rollout_city_id,
+    },
+  );
+  if (!rolloutGate.ok) {
+    return {
+      success: false,
+      reason: rolloutGate.reason || "service_area_unsupported",
+      message:
+        rolloutGate.message || "NexRide is not available in your area yet.",
+    };
   }
 
   const pkg = String(data?.package_description ?? data?.packageDescription ?? "").trim();

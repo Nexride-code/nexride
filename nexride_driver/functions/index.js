@@ -190,6 +190,31 @@ exports.riderNotifySelfieSubmittedForReview = onCall(rideCallOpts, async (reques
   riderFirestoreIdentity.riderNotifySelfieSubmittedForReview(request.data, callableContext(request)),
 );
 
+const ecosystemDelivery = require("./ecosystem/delivery_regions");
+const rolloutBackfill = require("./ecosystem/rollout_backfill");
+
+exports.listDeliveryRegions = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.listDeliveryRegions(request.data, callableContext(request)),
+);
+exports.adminUpsertDeliveryRegion = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminUpsertDeliveryRegion(request.data, callableContext(request), db),
+);
+exports.adminSeedRolloutDeliveryRegions = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminSeedRolloutDeliveryRegions(request.data, callableContext(request), db),
+);
+exports.adminUpsertDeliveryCity = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminUpsertDeliveryCity(request.data, callableContext(request), db),
+);
+exports.adminListDeliveryRollout = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminListDeliveryRollout(request.data, callableContext(request), db),
+);
+exports.validateServiceLocation = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.validateServiceLocation(request.data, callableContext(request)),
+);
+exports.backfillUserRolloutRegions = onCall(rideCallOpts, async (request) =>
+  rolloutBackfill.adminBackfillUserRolloutRegions(request.data, callableContext(request), db),
+);
+
 // Single client-facing accept entrypoint: [acceptRide] → ride.acceptRideRequest (implementation).
 exports.acceptRide = onCall(rideCallOpts, async (request) =>
   ride.acceptRideRequest(request.data, callableContext(request), db),

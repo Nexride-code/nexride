@@ -110,6 +110,22 @@ class RiderRideCloudFunctionsService {
         timeout: const Duration(seconds: 45),
       );
 
+  /// Enabled rollout regions + cities (server-filtered).
+  Future<Map<String, dynamic>> listDeliveryRegions() =>
+      _call('listDeliveryRegions', <String, dynamic>{});
+
+  /// Validates state + city + service flags before booking / dispatch.
+  Future<Map<String, dynamic>> validateServiceLocation({
+    required String regionId,
+    required String cityId,
+    required String service,
+  }) =>
+      _call('validateServiceLocation', <String, dynamic>{
+        'region_id': regionId,
+        'city_id': cityId,
+        'service': service,
+      });
+
   Future<Map<String, dynamic>> initiateFlutterwaveRideIntent(
     Map<String, dynamic> body,
   ) =>

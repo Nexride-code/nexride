@@ -19,6 +19,7 @@ const { ensureRideChatThread } = require("./ride_chat_admin");
 const { sendPushToUser } = require("./push_notifications");
 const { resolveDriverMonetization, resolveCommissionPolicy } = require("./driver_monetization");
 const riderFirestoreIdentity = require("./rider_firestore_identity");
+const deliveryRegions = require("./ecosystem/delivery_regions");
 
 const TRIP_STATE = {
   searching: "searching",
@@ -1156,6 +1157,27 @@ async function createRideRequest(data, context, db) {
       console.log("RIDER_CREATE_FAIL", riderId, "dropoff_location_out_of_region");
       return { success: false, reason: "dropoff_location_out_of_region" };
     }
+  }
+
+  const rolloutGate = await deliveryRegions.assertRolloutWithHints(
+    admin.firestore(),
+    market,
+    pCoord.lat,
+    pCoord.lng,
+    "rides",
+    {
+      region_id: data?.service_region_id ?? data?.rollout_region_id,
+      city_id: data?.service_city_id ?? data?.rollout_city_id,
+    },
+  );
+  if (!rolloutGate.ok) {
+    console.log("RIDER_CREATE_FAIL", riderId, rolloutGate.reason || "rollout_denied");
+    return {
+      success: false,
+      reason: rolloutGate.reason || "service_area_unsupported",
+      message:
+        rolloutGate.message || "NexRide is not available in your area yet.",
+    };
   }
 
   const fare = Number(intentMerged?.fare ?? data?.fare ?? 0);
@@ -2490,6 +2512,56 @@ async function setDriverOnline(data, context, db) {
     return { success: false, reason: "unauthorized" };
   }
 
+  const snap = await db.ref(`drivers/${driverId}`).get();
+  const d = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
+  const dmRaw = String(
+    data?.dispatch_market ??
+      data?.dispatchMarket ??
+      d.dispatch_market ??
+      d.market_pool ??
+      d.market ??
+      d.launch_market_city ??
+      "",
+  ).trim();
+  const market = canonicalDispatchMarket(dmRaw);
+  if (!market) {
+    return {
+      success: false,
+      reason: "driver_service_area_unsupported",
+      message: "Select launch city before going online.",
+    };
+  }
+
+  const lat = Number(data?.latitude ?? data?.lat ?? "");
+  const lng = Number(data?.longitude ?? data?.lng ?? "");
+  let onlineRollout = { ok: true };
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    onlineRollout = await deliveryRegions.assertRolloutWithHints(
+      admin.firestore(),
+      market,
+      lat,
+      lng,
+      "rides",
+      {
+        region_id: data?.service_region_id ?? data?.rollout_region_id,
+        city_id: data?.service_city_id ?? data?.rollout_city_id,
+      },
+    );
+  } else if (!deliveryRegions.isRolloutDispatchMarket(market)) {
+    onlineRollout = {
+      ok: false,
+      reason: "driver_service_area_unsupported",
+      message: "NexRide is not available in this launch city yet.",
+    };
+  }
+  if (!onlineRollout.ok) {
+    return {
+      success: false,
+      reason: onlineRollout.reason || "driver_service_area_unsupported",
+      message: onlineRollout.message || "Service area not supported.",
+    };
+  }
+
   const now = nowMs();
   await db.ref(`drivers/${driverId}`).update({
     online: true,
@@ -2500,11 +2572,13 @@ async function setDriverOnline(data, context, db) {
     status: "available",
     dispatch_state: "available",
     online_session_started_at: now,
+    dispatch_market: market,
+    market_pool: market,
     updated_at: now,
   });
 
   const logger = console;
-  logger.info("DRIVER_ONLINE", { driverId });
+  logger.info("DRIVER_ONLINE", { driverId, market });
   return { success: true };
 }
 

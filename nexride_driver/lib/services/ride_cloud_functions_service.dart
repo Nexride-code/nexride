@@ -149,6 +149,20 @@ class RideCloudFunctionsService {
         'app': 'driver',
       });
 
+  Future<Map<String, dynamic>> listDeliveryRegions() =>
+      _call('listDeliveryRegions', <String, dynamic>{});
+
+  Future<Map<String, dynamic>> validateServiceLocation({
+    required String regionId,
+    required String cityId,
+    required String service,
+  }) =>
+      _call('validateServiceLocation', <String, dynamic>{
+        'region_id': regionId,
+        'city_id': cityId,
+        'service': service,
+      });
+
   Future<Map<String, dynamic>> escalateSafetyIncident({
     required String rideId,
     required String riderId,

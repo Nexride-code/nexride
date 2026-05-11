@@ -17,6 +17,12 @@ import 'onboarding/rider_selfie_verification_screen.dart';
 import 'config/rider_app_config.dart';
 import 'config/rtdb_ride_request_contract.dart';
 import 'services/rider_delivery_cloud_functions_service.dart';
+import 'services/rider_ride_cloud_functions_service.dart'
+    show RiderRideCloudFunctionsService, riderRideCallableSucceeded;
+import 'services/rider_rollout_profile_store.dart';
+import 'config/rollout_copy.dart';
+import 'models/rollout_delivery_region_model.dart';
+import 'widgets/rider_rollout_area_sheet.dart';
 import 'services/dispatch_photo_upload_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
@@ -81,6 +87,8 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       const DispatchPhotoUploadService();
   final RiderDeliveryCloudFunctionsService _deliveryCloud =
       RiderDeliveryCloudFunctionsService();
+  final RiderRideCloudFunctionsService _rideCloud =
+      RiderRideCloudFunctionsService.instance;
   final TripSafetyTelemetryService _tripSafetyService =
       TripSafetyTelemetryService();
 
@@ -89,6 +97,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   Map<String, dynamic>? _activeRequest;
   DispatchPhotoSelectedAsset? _packagePhotoAsset;
   String _selectedLaunchCity = RiderLaunchScope.defaultBrowseCity;
+  List<RolloutDeliveryRegionModel> _rolloutCatalog =
+      const <RolloutDeliveryRegionModel>[];
+  bool _rolloutCatalogLoading = false;
+  bool _rolloutCatalogHydrated = false;
+  Object? _rolloutCatalogError;
+  String? _rolloutRegionId;
+  String? _rolloutCityId;
+  String? _rolloutDispatchMarketId;
   bool _loading = true;
   bool _submitting = false;
   bool _restoringActiveRequest = false;
@@ -126,6 +142,137 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     unawaited(_hydrateRiderTrustState(persist: true));
     unawaited(_restoreActiveDispatchRequest());
     unawaited(_loadIdentityCompliance());
+    unawaited(_loadRolloutForDispatch());
+  }
+
+  bool get _rolloutSelectionComplete =>
+      (_rolloutRegionId ?? '').trim().isNotEmpty &&
+      (_rolloutCityId ?? '').trim().isNotEmpty &&
+      (_rolloutDispatchMarketId ?? '').trim().isNotEmpty;
+
+  Future<void> _loadRolloutForDispatch() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid.trim();
+    if (uid == null || uid.isEmpty) {
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _rolloutCatalogLoading = true;
+        _rolloutCatalogError = null;
+      });
+    }
+    try {
+      final raw = await _rideCloud
+          .listDeliveryRegions()
+          .timeout(const Duration(seconds: 22));
+      if (raw['success'] != true) {
+        throw StateError('listDeliveryRegions_failed');
+      }
+      final regions = parseRolloutRegionsResponse(raw);
+      final saved = await RiderRolloutProfileStore.instance.fetchSelection(uid);
+      var rid = saved?[RiderRolloutProfileStore.kRegionId] ?? '';
+      var cid = saved?[RiderRolloutProfileStore.kCityId] ?? '';
+      var dm = saved?[RiderRolloutProfileStore.kDispatchMarketId] ?? '';
+      if (rid.isNotEmpty && regions.any((r) => r.regionId == rid)) {
+        final reg = regions.firstWhere((r) => r.regionId == rid);
+        if (!reg.cities.any((c) => c.cityId == cid)) {
+          cid = '';
+        }
+        if (reg.dispatchMarketId.trim().isNotEmpty) {
+          dm = reg.dispatchMarketId.trim();
+        }
+      } else {
+        rid = '';
+        cid = '';
+        dm = '';
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _rolloutCatalog = regions;
+        _rolloutRegionId = rid.isEmpty ? null : rid;
+        _rolloutCityId = cid.isEmpty ? null : cid;
+        _rolloutDispatchMarketId = dm.isEmpty ? null : dm;
+        _rolloutCatalogLoading = false;
+        _rolloutCatalogHydrated = true;
+        _rolloutCatalogError = null;
+        if (_rolloutSelectionComplete) {
+          _selectedLaunchCity =
+              RiderServiceAreaConfig.marketForCity(_rolloutDispatchMarketId).city;
+        }
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _rolloutCatalogLoading = false;
+          _rolloutCatalogHydrated = true;
+          _rolloutCatalogError = e;
+        });
+      }
+    }
+  }
+
+  Future<void> _openRolloutSheet() async {
+    if (!mounted) {
+      return;
+    }
+    await RiderRolloutAreaSheet.show(
+      context,
+      regions: _rolloutCatalog,
+      initialRegionId: _rolloutRegionId,
+      initialCityId: _rolloutCityId,
+      onReloadCatalog: () async {
+        final raw = await _rideCloud
+            .listDeliveryRegions()
+            .timeout(const Duration(seconds: 22));
+        if (raw['success'] != true) {
+          throw StateError('listDeliveryRegions_failed');
+        }
+        final regions = parseRolloutRegionsResponse(raw);
+        if (mounted) {
+          setState(() {
+            _rolloutCatalog = regions;
+            _rolloutCatalogError = null;
+          });
+        }
+        return regions;
+      },
+    );
+    await _refreshRolloutAfterDispatchSheet();
+  }
+
+  Future<void> _refreshRolloutAfterDispatchSheet() async {
+    await _loadRolloutForDispatch();
+    if (!mounted || !_rolloutSelectionComplete) {
+      return;
+    }
+    try {
+      final vr = await _rideCloud
+          .validateServiceLocation(
+            regionId: _rolloutRegionId!.trim(),
+            cityId: _rolloutCityId!.trim(),
+            service: 'package',
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!mounted) {
+        return;
+      }
+      if (riderRideCallableSucceeded(vr)) {
+        _showMessage('Service area saved.');
+      } else {
+        _showMessage(RolloutCopy.notAvailableInArea);
+      }
+    } catch (_) {
+      if (mounted) {
+        _showMessage(
+          'Could not verify your area yet. Check connection and try again.',
+        );
+      }
+    }
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   @override
@@ -608,6 +755,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       case 'identity_selfie_missing':
       case 'identity_pending_review':
       case 'identity_rejected':
+      case 'identity_phone_not_verified':
       case 'identity_gate_unavailable':
       case 'identity_denied':
         return riderIdentityServerRejectionUserMessage(reason) ??
@@ -1250,6 +1398,40 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
     await _hydrateRiderTrustState();
 
+    if (!_rolloutCatalogHydrated) {
+      await _loadRolloutForDispatch();
+    }
+    if (_rolloutCatalogError != null) {
+      _showMessage('Could not load service areas. Scroll up to retry.');
+      return;
+    }
+    if (_rolloutCatalog.isEmpty) {
+      _showMessage(RolloutCopy.notAvailableInArea);
+      return;
+    }
+    if (!_rolloutSelectionComplete) {
+      _showMessage('Select your service area before sending a request.');
+      return;
+    }
+    try {
+      final vr = await _rideCloud
+          .validateServiceLocation(
+            regionId: _rolloutRegionId!.trim(),
+            cityId: _rolloutCityId!.trim(),
+            service: 'package',
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!riderRideCallableSucceeded(vr)) {
+        _showMessage(RolloutCopy.notAvailableInArea);
+        return;
+      }
+    } catch (e) {
+      _showMessage(
+        'Could not verify your area. Check connection and try again.',
+      );
+      return;
+    }
+
     setState(() {
       _submitting = true;
       _packagePhotoUploadProgress = packagePhotoAsset == null ? 0 : 0.05;
@@ -1271,8 +1453,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         throw const FormatException('unsupported_city');
       }
       final dispatchMarket = RiderServiceAreaConfig.marketForCity(city).city;
-      final dispatchSlug =
+      var dispatchSlug =
           normalizeRideMarketSlug(dispatchMarket) ?? dispatchMarket.trim().toLowerCase();
+      if (_rolloutSelectionComplete &&
+          (_rolloutDispatchMarketId ?? '').trim().isNotEmpty) {
+        final dm =
+            RiderServiceAreaConfig.marketForCity(_rolloutDispatchMarketId).city;
+        dispatchSlug = normalizeRideMarketSlug(dm) ?? dm.trim().toLowerCase();
+      }
 
       final photoUploadKey =
           'pending_${user.uid}_${DateTime.now().millisecondsSinceEpoch}';
@@ -1353,6 +1541,12 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       final createRes = await _deliveryCloud
           .createDeliveryRequest(<String, dynamic>{
             'market': dispatchSlug,
+            if (_rolloutSelectionComplete) ...<String, dynamic>{
+              'service_region_id': _rolloutRegionId!.trim(),
+              'service_city_id': _rolloutCityId!.trim(),
+              'rollout_region_id': _rolloutRegionId!.trim(),
+              'rollout_city_id': _rolloutCityId!.trim(),
+            },
             'pickup': pickupPayload,
             'dropoff': dropoffPayload,
             'fare': fareBreakdown.totalFare,
@@ -1850,14 +2044,108 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                       onOpenVerification: () async {
                         await Navigator.of(context).push<void>(
                           MaterialPageRoute<void>(
-                            builder: (_) =>
-                                const RiderSelfieVerificationScreen(),
+                            builder: (_) => const RiderSelfieVerificationScreen(),
                           ),
                         );
                         if (mounted) {
                           await _loadIdentityCompliance();
                         }
                       },
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                  if (_rolloutCatalogLoading ||
+                      _rolloutCatalogError != null ||
+                      (_rolloutCatalogHydrated &&
+                          _rolloutCatalog.isNotEmpty &&
+                          !_rolloutSelectionComplete)) ...[
+                    Material(
+                      color: const Color(0xFFFFF2E0),
+                      borderRadius: BorderRadius.circular(12),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            InkWell(
+                              borderRadius: BorderRadius.circular(8),
+                              onTap: _rolloutCatalogLoading
+                                  ? null
+                                  : () {
+                                      unawaited(_openRolloutSheet());
+                                    },
+                              child: Row(
+                                children: <Widget>[
+                                  Icon(
+                                    _rolloutCatalogLoading
+                                        ? Icons.hourglass_top
+                                        : Icons.location_on_outlined,
+                                    color: _gold,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: <Widget>[
+                                        Text(
+                                          _rolloutCatalogLoading
+                                              ? 'Loading service areas…'
+                                              : _rolloutCatalogError != null
+                                              ? 'Could not load areas'
+                                              : 'Service area required',
+                                          style: const TextStyle(
+                                            color: Color(0xFF4A3B2A),
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                        if (!_rolloutCatalogLoading &&
+                                            _rolloutCatalogError == null) ...<Widget>[
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            'Pick your state and city for dispatch requests.',
+                                            style: TextStyle(
+                                              color: Colors.brown.shade800,
+                                              fontSize: 12,
+                                              height: 1.25,
+                                            ),
+                                          ),
+                                        ],
+                                        if (_rolloutCatalogError != null) ...<Widget>[
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            'Tap this banner to retry.',
+                                            style: TextStyle(
+                                              color: Colors.brown.shade800,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                  if (!_rolloutCatalogLoading)
+                                    const Icon(
+                                      Icons.chevron_right,
+                                      color: Color(0xFFB57A2A),
+                                    ),
+                                ],
+                              ),
+                            ),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton(
+                                onPressed: _rolloutCatalogLoading
+                                    ? null
+                                    : () {
+                                        unawaited(_openRolloutSheet());
+                                      },
+                                child: const Text('Choose service area'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 16),
                   ],
