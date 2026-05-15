@@ -849,7 +849,15 @@ Map<String, dynamic> buildDriverProfileDefaults({
       effectiveBusinessModel,
       now: effectiveNow,
     ),
-    'verification': normalizedDriverVerification(existing['verification']),
+    'verification': normalizedDriverVerification(
+      mergeDriverVerificationNodeWithAdminIdentity(
+        verificationSubdoc: existing['verification'],
+        identityVerificationStatus: existing['identity_verification_status'] ??
+            existing['identityVerificationStatus'],
+        verificationStatusField:
+            existing['verification_status'] ?? existing['verificationStatus'],
+      ),
+    ),
     'wallet': normalizedDriverWallet(
       existing['wallet'] ?? existing['wallet_data'],
       fallbackRoot: existing,

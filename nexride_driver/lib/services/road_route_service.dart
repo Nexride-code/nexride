@@ -365,6 +365,14 @@ class RoadRouteService {
     String body, {
     required String provider,
   }) {
+    final String trimmed = body.trimLeft();
+    if (trimmed.startsWith('<')) {
+      debugPrint(
+        '[DriverRoadRouteService] $provider expected JSON but got HTML '
+        '(body starts with "<").',
+      );
+      return null;
+    }
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map<String, dynamic>) {

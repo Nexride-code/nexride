@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 
 import '../support/rider_trust_support.dart';
@@ -220,6 +221,34 @@ class RiderVerificationWorkflowService {
       },
       'rider_device_fingerprints/$riderId': nextDeviceFingerprints,
     });
+
+    // Mirror to Firestore so the admin /admin/verification panel can see it.
+    // The adminListVerificationUploads Cloud Function reads identity_verifications/{uid}.
+    await FirebaseFirestore.instance
+        .collection('identity_verifications')
+        .doc(riderId)
+        .set(
+      <String, dynamic>{
+        'uid': riderId,
+        'user_type': 'rider',
+        'status': 'pending',
+        'display_name': riderProfile['displayName'] ??
+            riderProfile['display_name'] ??
+            riderProfile['name'] ??
+            '',
+        'email': riderProfile['email'] ?? '',
+        'phone': riderProfile['phone'] ??
+            riderProfile['phoneNumber'] ??
+            riderProfile['phone_number'] ??
+            '',
+        'selfie_storage_path': uploadedFile.fileReference,
+        'identity_method': identityMethod.key,
+        'updated_at': FieldValue.serverTimestamp(),
+        'reviewed_at': null,
+        'review_note': '',
+      },
+      SetOptions(merge: true),
+    );
 
     return RiderVerificationSubmissionBundle(
       verification: nextVerification,

@@ -79,9 +79,9 @@ Future<DriverLocationCapability> evaluateDriverLocationCapability() async {
       canGoOnline: false,
       locationServiceEnabled: true,
       permission: permission,
-      title: 'Location access required',
+      title: 'Location permission required to go online.',
       message:
-          'Allow location access when you are ready to receive live trips in ${DriverLaunchScope.launchCitiesLabel}.',
+          'Allow location access when you are ready to receive live trips in ${DriverLaunchScope.launchCitiesLabel}. The app stays open while you decide.',
       recommendOpenSettings: false,
     );
   }
@@ -92,9 +92,9 @@ Future<DriverLocationCapability> evaluateDriverLocationCapability() async {
       canGoOnline: false,
       locationServiceEnabled: true,
       permission: permission,
-      title: 'Location access required',
+      title: 'Location permission required to go online.',
       message:
-          'Enable location again from app settings before you go online in ${DriverLaunchScope.launchCitiesLabel}.',
+          'Enable location again from app settings before you go online in ${DriverLaunchScope.launchCitiesLabel}. The app stays open while you update settings.',
       recommendOpenSettings: true,
     );
   }

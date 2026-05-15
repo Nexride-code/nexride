@@ -5,13 +5,13 @@ import 'package:nexride/service_type.dart';
 import 'package:nexride/support/rider_fare_support.dart';
 
 void main() {
-  test('rider app enables ride and dispatch delivery', () {
+  test('rider app enables ride, dispatch delivery, groceries, and food', () {
     final enabledServices = RiderServiceType.values
         .where((RiderServiceType service) => service.isEnabled)
         .map((RiderServiceType service) => service.key)
         .toList();
 
-    expect(enabledServices, <String>['ride', 'dispatch_delivery']);
+    expect(enabledServices, <String>['ride', 'dispatch_delivery', 'groceries_mart', 'restaurants_food']);
   });
 
   test('user verification entry hides once approval is complete', () {
@@ -107,7 +107,8 @@ void main() {
         requestTime: DateTime.utc(2026, 4, 13, 13),
       );
 
-      expect(fareBreakdown.totalFare, 2650);
+      expect(fareBreakdown.totalFare, 2680);
+      expect(fareBreakdown.bookingFeeNgn, 30);
       expect(fareBreakdown.minimumFareApplied, isFalse);
     },
   );
@@ -123,7 +124,7 @@ void main() {
         requestTime: DateTime.utc(2026, 4, 13, 13),
       );
 
-      expect(fareBreakdown.totalFare, 1990);
+      expect(fareBreakdown.totalFare, 2020);
       expect(fareBreakdown.minimumFareApplied, isFalse);
     },
   );
@@ -144,25 +145,27 @@ void main() {
       requestTime: DateTime.utc(2026, 4, 13, 13),
     );
 
-    expect(lagosFare.totalFare, 1400);
+    expect(lagosFare.totalFare, 1430);
     expect(lagosFare.minimumFareApplied, isTrue);
-    expect(abujaFare.totalFare, 1350);
+    expect(abujaFare.totalFare, 1380);
     expect(abujaFare.minimumFareApplied, isTrue);
   });
 
-  test('launch markets cover the five supported Nigeria launch states', () {
+  test('launch markets cover the six supported Nigeria launch states', () {
     expect(RiderServiceAreaConfig.supportedCities, <String>[
       'lagos',
       'delta',
       'abuja',
       'anambra',
       'edo',
+      'imo',
     ]);
     expect(RiderLaunchScope.normalizeSupportedCity('Yaba, Lagos'), 'lagos');
     expect(RiderLaunchScope.normalizeSupportedCity('Asaba, Delta'), 'delta');
     expect(RiderLaunchScope.normalizeSupportedCity('Wuse 2, Abuja'), 'abuja');
     expect(RiderLaunchScope.normalizeSupportedCity('Awka, Anambra'), 'anambra');
     expect(RiderLaunchScope.normalizeSupportedCity('Benin City, Edo'), 'edo');
+    expect(RiderLaunchScope.normalizeSupportedCity('Owerri, Imo'), 'imo');
     expect(RiderLaunchScope.normalizeSupportedCity('Kuala Lumpur'), isNull);
   });
 
@@ -233,10 +236,10 @@ void main() {
 
       expect(lagosTrafficFare.surgeMultiplier, 1.12);
       expect(lagosTrafficFare.trafficWindowLabel, 'lagos_morning_peak');
-      expect(lagosTrafficFare.totalFare, 2968);
+      expect(lagosTrafficFare.totalFare, 2998);
       expect(abujaTrafficFare.surgeMultiplier, 1.08);
       expect(abujaTrafficFare.trafficWindowLabel, 'abuja_morning_peak');
-      expect(abujaTrafficFare.totalFare, 2149.2);
+      expect(abujaTrafficFare.totalFare, 2179.2);
     },
   );
 }

@@ -139,7 +139,9 @@ class SupportAuthService {
     // Retry once with a forced token refresh. Cheap (one network round
     // trip) and only happens on the unhappy path.
     try {
-      await user.getIdToken(true);
+      await user
+          .getIdToken(true)
+          .timeout(const Duration(seconds: 15));
     } catch (error) {
       debugPrint('[SupportAuth] forced token refresh failed: $error');
       return null;
@@ -277,7 +279,9 @@ class SupportAuthService {
 
   Future<Map<String, dynamic>> _readClaims(User user) async {
     try {
-      final token = await user.getIdTokenResult();
+      final token = await user
+          .getIdTokenResult()
+          .timeout(const Duration(seconds: 8));
       final claims = token.claims;
       if (claims == null) {
         return const <String, dynamic>{};
@@ -311,7 +315,11 @@ class SupportAuthService {
       return;
     }
     try {
-      await auth.setPersistence(Persistence.LOCAL);
+      await auth
+          .setPersistence(Persistence.LOCAL)
+          .timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      debugPrint('[SupportAuth] setPersistence timed out — continuing');
     } catch (error) {
       debugPrint('[SupportAuth] unable to set web auth persistence: $error');
     }
@@ -319,8 +327,16 @@ class SupportAuthService {
 
   Future<Map<String, dynamic>> _loadSupportStaffRecord(String uid) async {
     try {
-      final snapshot = await _rootRef.child('support_staff/$uid').get();
+      final snapshot = await _rootRef
+          .child('support_staff/$uid')
+          .get()
+          .timeout(const Duration(seconds: 10));
       return _map(snapshot.value);
+    } on TimeoutException {
+      debugPrint(
+        '[SupportAuth] support_staff lookup timed out uid=$uid — treating as empty',
+      );
+      return const <String, dynamic>{};
     } catch (error) {
       debugPrint(
         '[SupportAuth] support_staff lookup failed uid=$uid error=$error',
@@ -334,8 +350,16 @@ class SupportAuthService {
 
   Future<bool> _loadAdminFlag(String uid) async {
     try {
-      final snapshot = await _rootRef.child('admins/$uid').get();
+      final snapshot = await _rootRef
+          .child('admins/$uid')
+          .get()
+          .timeout(const Duration(seconds: 10));
       return snapshot.value == true;
+    } on TimeoutException {
+      debugPrint(
+        '[SupportAuth] admins lookup timed out uid=$uid — treating as no admin flag',
+      );
+      return false;
     } catch (error) {
       debugPrint('[SupportAuth] admins lookup failed uid=$uid error=$error');
       if (_isPermissionDenied(error)) {

@@ -2,17 +2,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nexride_driver/admin/admin_app.dart';
 import 'package:nexride_driver/admin/admin_config.dart';
+import 'package:nexride_driver/admin/admin_rbac.dart';
 import 'package:nexride_driver/admin/models/admin_models.dart';
 import 'package:nexride_driver/admin/screens/admin_gate_screen.dart';
 import 'package:nexride_driver/admin/services/admin_auth_service.dart';
 import 'package:nexride_driver/admin/services/admin_data_service.dart';
 
 void main() {
-  const adminSession = AdminSession(
+  final adminSession = AdminSession(
     uid: 'admin_uid_001',
     email: 'admin@nexride.africa',
     displayName: 'Ops Admin',
     accessMode: 'database_role',
+    adminRole: 'super_admin',
+    permissions: permissionsForAdminRole('super_admin'),
   );
 
   testWidgets('standalone admin app redirects signed-out root users to login', (
@@ -55,6 +58,11 @@ void main() {
 
     await _pumpRouteTransition(tester);
 
+    expect(find.text('Admin sign in'), findsOneWidget);
+    expect(find.text('Continue to dashboard'), findsOneWidget);
+    await tester.tap(find.text('Continue to dashboard'));
+    await _pumpRouteTransition(tester);
+
     expect(find.text('NexRide Control Center'), findsWidgets);
     expect(find.text('Dashboard'), findsWidgets);
   });
@@ -68,18 +76,18 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         routes: <String, WidgetBuilder>{
-          '/admin/login': (_) => const Scaffold(body: SizedBox.shrink()),
+          AdminRoutePaths.adminLogin: (_) =>
+              const Scaffold(body: SizedBox.shrink()),
         },
         home: AdminGateScreen(
-          mode: AdminGateMode.dashboard,
           authService: _FakeAdminAuthService(
             null,
             authenticatedUserUid: 'unauthorized_uid_001',
             authenticatedUserEmail: 'user@nexride.africa',
           ),
           dataService: _FakeAdminDataService(_emptySnapshot),
-          loginRoute: '/admin/login',
-          dashboardRoute: '/admin',
+          loginRoute: AdminRoutePaths.adminLogin,
+          dashboardRoute: AdminRoutePaths.admin,
           enableRealtimeBadgeListeners: false,
         ),
       ),
@@ -173,7 +181,7 @@ class _FakeAdminAuthService extends AdminAuthService {
     this.session, {
     this.authenticatedUserUid = '',
     this.authenticatedUserEmail = '',
-  });
+  }) : super();
 
   final AdminSession? session;
   String authenticatedUserUid;
@@ -184,7 +192,11 @@ class _FakeAdminAuthService extends AdminAuthService {
       session != null || authenticatedUserUid.trim().isNotEmpty;
 
   @override
-  String get authenticatedUid => session?.uid ?? authenticatedUserUid.trim();
+  String? get authenticatedUid =>
+      session?.uid ??
+      (authenticatedUserUid.trim().isEmpty
+          ? null
+          : authenticatedUserUid.trim());
 
   @override
   String get authenticatedEmail =>
@@ -226,6 +238,167 @@ class _FakeAdminDataService extends AdminDataService {
   }) async {
     return snapshot;
   }
+
+  @override
+  Future<AdminPanelSnapshot> fetchDashboardSnapshot({
+    String adminEmail = '',
+    String adminUid = '',
+  }) async {
+    return snapshot;
+  }
+
+  @override
+  Future<AdminRidersPageResult> fetchRidersPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    return AdminRidersPageResult(
+      riders: snapshot.riders,
+      nextCursor: null,
+      hasMore: false,
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>?> fetchDriverProfileForAdmin(
+    String driverId,
+  ) async {
+    return null;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> fetchDriverEntityTabForAdmin({
+    required String driverId,
+    required String tabId,
+  }) async {
+    if (driverId.isEmpty) {
+      return null;
+    }
+    switch (tabId) {
+      case 'overview':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'driver': <String, dynamic>{'name': 'Test', 'city': 'Lagos'},
+          'document_slot_count': 2,
+        };
+      case 'verification':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'verification': <String, dynamic>{'status': 'pending'},
+          'documents_meta': <String, dynamic>{},
+          'driver_verification': <String, dynamic>{},
+        };
+      case 'wallet':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'wallet': <String, dynamic>{'balance': 0, 'currency': 'NGN'},
+        };
+      case 'trips':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'trips': <Map<String, dynamic>>[],
+        };
+      case 'subscription':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'subscription': <String, dynamic>{
+            'monetization_model': 'commission',
+            'subscription_plan_type': 'monthly',
+            'subscription_status': 'active',
+            'subscription_active': true,
+          },
+        };
+      case 'violations':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'violations': <dynamic>[],
+        };
+      case 'notes':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'notes': <String, dynamic>{},
+        };
+      case 'audit':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'verification_audits': <dynamic>[],
+          'admin_audit_tail': <dynamic>[],
+        };
+      default:
+        return <String, dynamic>{'success': false, 'reason': 'unknown_tab'};
+    }
+  }
+
+  @override
+  Future<AdminWithdrawalsPageResult> fetchWithdrawalsPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    return AdminWithdrawalsPageResult(
+      withdrawals: snapshot.withdrawals,
+      nextCursor: null,
+      hasMore: false,
+    );
+  }
+
+  @override
+  Future<AdminSupportTicketsPageResult> fetchSupportTicketsPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    return const AdminSupportTicketsPageResult(
+      tickets: <AdminSupportTicketListItem>[],
+      nextCursor: null,
+      hasMore: false,
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>?> fetchSupportTicketForAdmin(
+    String ticketId,
+  ) async {
+    return <String, dynamic>{
+      'success': true,
+      'ticket': <String, dynamic>{
+        'id': ticketId,
+        'status': 'open',
+        'subject': 'Test ticket',
+      },
+      'messages': <String, dynamic>{},
+    };
+  }
+
+  @override
+  Future<bool> adminUpdateSupportTicketStatusCallable({
+    required String ticketId,
+    required String status,
+  }) async =>
+      true;
+
+  @override
+  Future<bool> adminReplySupportTicketCallable({
+    required String ticketId,
+    required String message,
+    String visibility = 'public',
+  }) async =>
+      true;
+
+  @override
+  Future<bool> adminEscalateSupportTicketCallable({
+    required String ticketId,
+  }) async =>
+      true;
 
   @override
   Future<void> updateDriverStatus({
@@ -301,6 +474,14 @@ class _FakeAdminDataService extends AdminDataService {
   }) async {}
 
   @override
+  Future<void> adminFlagUserForSupportContact({
+    required String uid,
+    required String role,
+    required String note,
+    String priority = 'normal',
+  }) async {}
+
+  @override
   Future<void> adminApproveDriverVerification({
     required String driverId,
   }) async {}
@@ -310,6 +491,9 @@ final AdminPanelSnapshot _emptySnapshot = AdminPanelSnapshot(
   fetchedAt: DateTime(2026, 4, 12, 10, 30),
   metrics: const AdminDashboardMetrics(
     totalRiders: 0,
+    incompleteRiderRegistrations: 0,
+    pendingOnboarding: 0,
+    totalMerchants: 0,
     totalDrivers: 0,
     activeDriversOnline: 0,
     ongoingTrips: 0,
@@ -360,7 +544,7 @@ final AdminPanelSnapshot _emptySnapshot = AdminPanelSnapshot(
   ),
   settings: const AdminOperationalSettings(
     withdrawalNoticeText:
-        'Withdrawals above ₦300,000 may take 2–3 working days. Withdrawals below ₦300,000 are typically processed within 48 hours. Withdrawals are processed directly by NEXRIDE DYNAMIC JOURNEY LTD.',
+        'Withdrawals above ₦300,000 may take 2–3 working days. Withdrawals below ₦300,000 are typically processed within 48 hours. Withdrawals are processed by NexRide to the driver bank details on file.',
     cityEnablement: <String, bool>{
       'Lagos': true,
       'Abuja': true,

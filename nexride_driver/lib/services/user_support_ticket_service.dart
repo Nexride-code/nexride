@@ -252,7 +252,7 @@ class UserSupportTicketService {
       path:
           'support_tickets[orderByChild=createdByUserId,equalTo=${userId.trim()}]',
     );
-    return _ticketOwnerQuery(userId).onValue.map((rtdb.DatabaseEvent event) {
+    return _ticketOwnerQuery(userId).limitToLast(200).onValue.map((rtdb.DatabaseEvent event) {
       final tickets = _map(event.snapshot.value)
           .entries
           .map(
@@ -332,7 +332,7 @@ class UserSupportTicketService {
       source: 'driver_user_support.fetch_inbox_summary',
       path:
           'support_tickets[orderByChild=createdByUserId,equalTo=${userId.trim()}]',
-      action: () => _ticketOwnerQuery(userId).get(),
+      action: () => _ticketOwnerQuery(userId).limitToLast(400).get(),
     );
     final tickets = _map(snapshot?.value)
         .entries

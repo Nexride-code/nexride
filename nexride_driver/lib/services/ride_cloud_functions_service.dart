@@ -163,6 +163,43 @@ class RideCloudFunctionsService {
         'service': service,
       });
 
+  /// Server-authoritative go-online (availability mode, rollout, verification).
+  Future<Map<String, dynamic>> setDriverOnline({
+    required String availabilityMode,
+    required String dispatchMarket,
+    double? latitude,
+    double? longitude,
+    String? serviceRegionId,
+    String? serviceCityId,
+    String? selectedServiceAreaName,
+  }) =>
+      _call('setDriverOnline', <String, dynamic>{
+        'driver_availability_mode': availabilityMode,
+        'availability_mode': availabilityMode,
+        'dispatch_market': dispatchMarket,
+        if (latitude != null) 'latitude': latitude,
+        if (longitude != null) 'longitude': longitude,
+        if (serviceRegionId != null && serviceRegionId.trim().isNotEmpty)
+          'service_region_id': serviceRegionId.trim(),
+        if (serviceCityId != null && serviceCityId.trim().isNotEmpty)
+          'service_city_id': serviceCityId.trim(),
+        if (selectedServiceAreaName != null &&
+            selectedServiceAreaName.trim().isNotEmpty)
+          'selected_service_area_name': selectedServiceAreaName.trim(),
+      });
+
+  Future<Map<String, dynamic>> setDriverOffline() =>
+      _call('setDriverOffline', <String, dynamic>{});
+
+  Future<Map<String, dynamic>> driverUpdateLiveLocation({
+    required double latitude,
+    required double longitude,
+  }) =>
+      _call('driverUpdateLiveLocation', <String, dynamic>{
+        'latitude': latitude,
+        'longitude': longitude,
+      });
+
   Future<Map<String, dynamic>> escalateSafetyIncident({
     required String rideId,
     required String riderId,
@@ -181,6 +218,9 @@ class RideCloudFunctionsService {
         'details': details,
         if (sourceFlagId.trim().isNotEmpty) 'sourceFlagId': sourceFlagId.trim(),
       });
+
+  Future<Map<String, dynamic>> getNexrideOfficialBankAccount() =>
+      _call('getNexrideOfficialBankAccount', <String, dynamic>{});
 }
 
 bool rideCallableSucceeded(Map<String, dynamic>? response) =>

@@ -254,7 +254,9 @@ class UserSupportTicketService {
         'optional=true',
       );
     }
-    return _ticketOwnerQuery(userId).onValue.map((rtdb.DatabaseEvent event) {
+    return _ticketOwnerQuery(userId).limitToLast(200).onValue.map((
+      rtdb.DatabaseEvent event,
+    ) {
       final tickets =
           _map(event.snapshot.value).entries
               .map(
@@ -347,7 +349,7 @@ class UserSupportTicketService {
       source: 'user_support.fetch_inbox_summary',
       path:
           'support_tickets[orderByChild=createdByUserId,equalTo=${userId.trim()}]',
-      action: () => _ticketOwnerQuery(userId).get(),
+      action: () => _ticketOwnerQuery(userId).limitToLast(400).get(),
     );
     final snapshotValue = snapshot?.value;
     final tickets = _map(snapshotValue).entries
@@ -380,72 +382,94 @@ class UserSupportTicketService {
     int limit = 12,
   }) async {
     final normalizedType = _normalizeCreatedByType(createdByType);
-    final path = normalizedType == 'driver'
-        ? 'driver_trips/${userId.trim()}'
-        : 'rider_trips/${userId.trim()}';
+    final normalizedUserId = userId.trim();
+    final optionLimit = limit < 1 ? 1 : limit;
+    final queryLimit = optionLimit * 4;
+    final primaryPath = normalizedType == 'driver'
+        ? 'driver_trips/$normalizedUserId'
+        : 'rider_trips/$normalizedUserId';
+    final legacyTripsPath = normalizedType == 'driver'
+        ? 'drivers/$normalizedUserId/trips'
+        : 'users/$normalizedUserId/trips';
+    final ownerKey = normalizedType == 'driver' ? 'driver_id' : 'rider_id';
+    final ownerAliasKey =
+        normalizedType == 'driver' ? 'driverId' : 'riderId';
+    final candidates = <String, _UserSupportTripOptionCandidate>{};
+
+    void mergeRaw(dynamic rawValue, {required String source}) {
+      for (final MapEntry<String, dynamic> entry
+          in _userSupportRecordEntries(rawValue)) {
+        final parsed = _userSupportTripOptionFromRecord(
+          entry.value,
+          fallbackTripId: entry.key,
+          source: source,
+        );
+        if (parsed == null) {
+          continue;
+        }
+        final existing = candidates[parsed.option.tripId];
+        if (existing == null || parsed.isBetterThan(existing)) {
+          candidates[parsed.option.tripId] = parsed;
+        }
+      }
+    }
+
     try {
-      final snapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
-        source: 'user_support.fetch_recent_trips',
-        path: path,
-        action: () => _rootRef.child(path).get(),
-      );
-      if (snapshot == null || snapshot.value is! Map) {
-        return const <UserSupportTripOption>[];
+      final snapshots = await Future.wait<rtdb.DataSnapshot?>(<Future<rtdb.DataSnapshot?>>[
+        runOptionalStartupRead<rtdb.DataSnapshot>(
+          source: 'user_support.fetch_recent_trips.primary',
+          path: primaryPath,
+          action: () => _rootRef.child(primaryPath).get(),
+        ),
+        runOptionalStartupRead<rtdb.DataSnapshot>(
+          source: 'user_support.fetch_recent_trips.legacy_trips',
+          path: legacyTripsPath,
+          action: () => _rootRef.child(legacyTripsPath).get(),
+        ),
+        runOptionalStartupRead<rtdb.DataSnapshot>(
+          source: 'user_support.fetch_recent_trips.ride_requests_owner',
+          path:
+              'ride_requests[orderByChild=$ownerKey,equalTo=$normalizedUserId,limitToLast=$queryLimit]',
+          action: () => _rootRef
+              .child('ride_requests')
+              .orderByChild(ownerKey)
+              .equalTo(normalizedUserId)
+              .limitToLast(queryLimit)
+              .get(),
+        ),
+        runOptionalStartupRead<rtdb.DataSnapshot>(
+          source: 'user_support.fetch_recent_trips.ride_requests_owner_alias',
+          path:
+              'ride_requests[orderByChild=$ownerAliasKey,equalTo=$normalizedUserId,limitToLast=$queryLimit]',
+          action: () => _rootRef
+              .child('ride_requests')
+              .orderByChild(ownerAliasKey)
+              .equalTo(normalizedUserId)
+              .limitToLast(queryLimit)
+              .get(),
+        ),
+      ]);
+
+      for (final rtdb.DataSnapshot? snap in snapshots) {
+        mergeRaw(
+          snap?.value,
+          source: snap?.ref.parent?.key ?? snap?.ref.key ?? 'rtdb',
+        );
       }
 
-      final options = <UserSupportTripOption>[];
-      final rawTrips = Map<Object?, Object?>.from(snapshot.value as Map);
-      rawTrips.forEach((Object? rawKey, Object? rawValue) {
-        final trip = _map(rawValue);
-        final tripId = _firstText(<dynamic>[
-          trip['trip_id'],
-          trip['tripId'],
-          trip['rideId'],
-          rawKey,
-        ]);
-        if (tripId.isEmpty) {
-          return;
-        }
-        final updatedAt = _dateTimeFromDynamic(
-          trip['updated_at'] ?? trip['completed_at'] ?? trip['created_at'],
+      final options = candidates.values
+          .map((c) => c.option)
+          .toList(growable: false)
+        ..sort(
+          (UserSupportTripOption a, UserSupportTripOption b) =>
+              (b.updatedAt?.millisecondsSinceEpoch ?? 0).compareTo(
+                a.updatedAt?.millisecondsSinceEpoch ?? 0,
+              ),
         );
-        final pickup = _firstText(<dynamic>[
-          trip['pickup_address'],
-          trip['pickup'],
-        ], fallback: 'Pickup not recorded');
-        final destination = _firstText(<dynamic>[
-          trip['destination_address'],
-          trip['final_destination_address'],
-          trip['destination'],
-        ], fallback: 'Destination not recorded');
-        final status = _firstText(<dynamic>[
-          trip['status'],
-          trip['trip_state'],
-        ], fallback: 'completed');
-        options.add(
-          UserSupportTripOption(
-            tripId: tripId,
-            title: '$pickup -> $destination',
-            subtitle: _firstText(<dynamic>[
-              trip['service_type'],
-              trip['serviceType'],
-            ], fallback: 'trip'),
-            status: status,
-            updatedAt: updatedAt,
-          ),
-        );
-      });
-
-      options.sort(
-        (UserSupportTripOption a, UserSupportTripOption b) =>
-            (b.updatedAt?.millisecondsSinceEpoch ?? 0).compareTo(
-              a.updatedAt?.millisecondsSinceEpoch ?? 0,
-            ),
-      );
-      if (options.length <= limit) {
+      if (options.length <= optionLimit) {
         return options;
       }
-      return options.take(limit).toList(growable: false);
+      return options.take(optionLimit).toList(growable: false);
     } catch (_) {
       return const <UserSupportTripOption>[];
     }
@@ -775,6 +799,176 @@ class UserSupportTicketService {
   }
 
   String _fallbackKey() => DateTime.now().microsecondsSinceEpoch.toString();
+}
+
+class _UserSupportTripOptionCandidate {
+  const _UserSupportTripOptionCandidate({
+    required this.option,
+    required this.richnessScore,
+  });
+
+  final UserSupportTripOption option;
+  final int richnessScore;
+
+  bool isBetterThan(_UserSupportTripOptionCandidate other) {
+    final int myMillis = option.updatedAt?.millisecondsSinceEpoch ?? 0;
+    final int otherMillis = other.option.updatedAt?.millisecondsSinceEpoch ?? 0;
+    if (myMillis != otherMillis) {
+      return myMillis > otherMillis;
+    }
+    return richnessScore > other.richnessScore;
+  }
+}
+
+List<MapEntry<String, dynamic>> _userSupportRecordEntries(dynamic value) {
+  if (value is List) {
+    return <MapEntry<String, dynamic>>[
+      for (var index = 0; index < value.length; index += 1)
+        MapEntry<String, dynamic>(index.toString(), value[index]),
+    ];
+  }
+
+  if (value is Map) {
+    return Map<Object?, Object?>.from(value)
+        .entries
+        .map(
+          (MapEntry<Object?, Object?> entry) => MapEntry<String, dynamic>(
+            entry.key?.toString() ?? '',
+            entry.value,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  return const <MapEntry<String, dynamic>>[];
+}
+
+_UserSupportTripOptionCandidate? _userSupportTripOptionFromRecord(
+  dynamic rawValue, {
+  required String fallbackTripId,
+  required String source,
+}) {
+  final Map<String, dynamic> trip = _map(rawValue);
+  final String tripId = _firstText(<dynamic>[
+    trip['trip_id'],
+    trip['tripId'],
+    trip['rideId'],
+    trip['ride_id'],
+    trip['requestId'],
+    fallbackTripId,
+  ]);
+  if (tripId.isEmpty) {
+    return null;
+  }
+
+  final String pickup = _userSupportTripAddressLabel(
+    <dynamic>[
+      trip['pickup_address'],
+      _map(trip['pickup'])['address'],
+      _map(trip['pickup'])['name'],
+      trip['pickup'],
+      trip['pickupAddress'],
+    ],
+    fallback: 'Pickup not recorded',
+  );
+  final String destination = _userSupportTripAddressLabel(
+    <dynamic>[
+      trip['destination_address'],
+      trip['final_destination_address'],
+      _map(trip['destination'])['address'],
+      _map(trip['final_destination'])['address'],
+      _map(trip['destination'])['name'],
+      trip['destination'],
+      trip['destinationAddress'],
+    ],
+    fallback: 'Destination not recorded',
+  );
+  final String status = _firstText(<dynamic>[
+    trip['status'],
+    trip['trip_state'],
+    trip['tripState'],
+    trip['settlementStatus'],
+  ], fallback: 'completed');
+  final String serviceType = _firstText(<dynamic>[
+    trip['service_type'],
+    trip['serviceType'],
+    trip['service'],
+  ], fallback: 'Trip');
+  final String city = _firstText(<dynamic>[trip['city']]);
+  final DateTime? updatedAt = _dateTimeFromDynamic(
+    trip['updated_at'] ??
+        trip['updatedAt'] ??
+        trip['completed_at'] ??
+        trip['completedAt'] ??
+        trip['requested_at'] ??
+        trip['requestedAt'] ??
+        trip['created_at'] ??
+        trip['createdAt'],
+  );
+  final List<String> subtitleParts = <String>[
+    _userSupportSentenceCase(serviceType),
+    if (city.isNotEmpty) _userSupportSentenceCase(city),
+    _userSupportSentenceCase(status),
+  ];
+  final int richnessScore = <String>[
+    pickup,
+    destination,
+    serviceType,
+    city,
+    status,
+    source,
+  ].where((String value) => value.trim().isNotEmpty).length;
+
+  return _UserSupportTripOptionCandidate(
+    option: UserSupportTripOption(
+      tripId: tripId,
+      title: '$pickup -> $destination',
+      subtitle: subtitleParts.join(' • '),
+      status: status,
+      updatedAt: updatedAt,
+    ),
+    richnessScore: richnessScore,
+  );
+}
+
+String _userSupportTripAddressLabel(
+  Iterable<dynamic> values, {
+  required String fallback,
+}) {
+  for (final dynamic value in values) {
+    if (value is Map) {
+      final Map<String, dynamic> mapped = _map(value);
+      final String text = _firstText(<dynamic>[
+        mapped['address'],
+        mapped['label'],
+        mapped['name'],
+      ]);
+      if (text.isNotEmpty) {
+        return text;
+      }
+      continue;
+    }
+
+    final String text = _text(value);
+    if (text.isNotEmpty) {
+      return text;
+    }
+  }
+
+  return fallback;
+}
+
+String _userSupportSentenceCase(String value) {
+  final String normalized = value.trim();
+  if (normalized.isEmpty) {
+    return '';
+  }
+
+  final String spaced = normalized
+      .replaceAll('_', ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  return '${spaced[0].toUpperCase()}${spaced.substring(1)}';
 }
 
 String sentenceCaseSupportType(String value) {

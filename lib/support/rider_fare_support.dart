@@ -2,6 +2,9 @@ import 'dart:math' as math;
 
 import '../config/rider_app_config.dart';
 
+/// Compulsory platform booking fee (NGN) per trip — aligns with Cloud Functions `platformFeeNgn`.
+const double kRiderCompulsoryBookingFeeNgn = 30;
+
 class RiderFareBreakdown {
   const RiderFareBreakdown({
     required this.serviceKey,
@@ -17,6 +20,8 @@ class RiderFareBreakdown {
     required this.calculatedFare,
     required this.minimumAdjustedFare,
     required this.minimumFareApplied,
+    required this.rideSubtotalBeforeBookingFee,
+    required this.bookingFeeNgn,
     required this.totalFare,
   });
 
@@ -33,6 +38,9 @@ class RiderFareBreakdown {
   final double calculatedFare;
   final double minimumAdjustedFare;
   final bool minimumFareApplied;
+  /// Fare from distance/time/minimum/surge **before** the flat booking fee.
+  final double rideSubtotalBeforeBookingFee;
+  final double bookingFeeNgn;
   final double totalFare;
 
   Map<String, dynamic> toMap() {
@@ -53,6 +61,9 @@ class RiderFareBreakdown {
       'minimumAdjustedFare': minimumAdjustedFare,
       'minimumFareApplied': minimumFareApplied,
       'waitingCharge': 0.0,
+      'rideSubtotalBeforeBookingFee': rideSubtotalBeforeBookingFee,
+      'bookingFeeNgn': bookingFeeNgn,
+      'compulsoryBookingFeeNgn': bookingFeeNgn,
       'finalFare': totalFare,
       'totalFare': totalFare,
     };
@@ -84,6 +95,8 @@ RiderFareBreakdown calculateRiderFare({
   int? durationSeconds,
   DateTime? requestTime,
   double? surgeMultiplier,
+  // Pass a live rule fetched from RegionPricingService to override hardcoded values.
+  RiderFareRule? liveRule,
 }) {
   final safeDistanceKm = distanceKm.isFinite && distanceKm > 0
       ? distanceKm
@@ -113,13 +126,15 @@ RiderFareBreakdown calculateRiderFare({
       resolvedMultiplier.isFinite && resolvedMultiplier > 0
       ? resolvedMultiplier
       : RiderFareSettings.defaultSurgeMultiplier;
-  final rule = RiderFareSettings.forCity(normalizedCity);
+  // Prefer live Firestore rule; fall back to hardcoded.
+  final rule = liveRule ?? RiderFareSettings.forCity(normalizedCity);
   final calculatedFare =
       rule.baseFare +
       (safeDistanceKm * rule.perKmRate) +
       (safeDurationMin * rule.perMinuteRate);
   final minimumAdjustedFare = math.max(calculatedFare, rule.minimumFare);
-  final totalFare = minimumAdjustedFare * safeSurgeMultiplier;
+  final rideSubtotalBeforeBookingFee = minimumAdjustedFare * safeSurgeMultiplier;
+  final totalFare = rideSubtotalBeforeBookingFee + kRiderCompulsoryBookingFeeNgn;
 
   return RiderFareBreakdown(
     serviceKey: serviceKey,
@@ -136,6 +151,9 @@ RiderFareBreakdown calculateRiderFare({
     minimumAdjustedFare: double.parse(minimumAdjustedFare.toStringAsFixed(2)),
     minimumFareApplied:
         minimumAdjustedFare > calculatedFare && safeSurgeMultiplier > 0,
+    rideSubtotalBeforeBookingFee:
+        double.parse(rideSubtotalBeforeBookingFee.toStringAsFixed(2)),
+    bookingFeeNgn: kRiderCompulsoryBookingFeeNgn,
     totalFare: double.parse(totalFare.toStringAsFixed(2)),
   );
 }

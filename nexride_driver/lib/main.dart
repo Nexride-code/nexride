@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import 'admin/admin_config.dart';
 import 'admin/screens/admin_gate_screen.dart';
+import 'admin/screens/admin_login_screen.dart';
 import 'admin/widgets/admin_components.dart';
 import 'firebase_options.dart';
 import 'screens/driver_login_screen.dart';
@@ -25,6 +26,7 @@ Future<void> main() async {
       unawaited(_runDriverApp());
     },
     (Object error, StackTrace stack) {
+      debugPrint('[NEXRIDE_DIAG] zone_uncaught ${DateTime.now().toIso8601String()}');
       debugPrint('[ZONE_ERROR] $error');
       debugPrint('[ZONE_STACK] $stack');
     },
@@ -150,6 +152,14 @@ void _configureGlobalErrorHandling({
     debugPrint('[CRASH] ${details.exception}');
     debugPrint('[CRASH_STACK] ${details.stack}');
     debugPrint('[FLUTTER_ERROR] ${details.exception}\n${details.stack}');
+    final lib = details.library ?? '';
+    if (lib.isNotEmpty) {
+      debugPrint('[FLUTTER_ERROR_LIBRARY] $lib');
+    }
+    final ctx = details.context?.toString();
+    if (ctx != null && ctx.isNotEmpty) {
+      debugPrint('[FLUTTER_ERROR_CONTEXT] $ctx');
+    }
     FlutterError.presentError(details);
     _logStartup('FlutterError caught: ${details.exception}');
     if (details.stack != null) {
@@ -168,7 +178,8 @@ void _configureGlobalErrorHandling({
       label: '[Startup] PlatformDispatcher stack',
       stackTrace: stackTrace,
     );
-    // Same as FlutterError: log only; avoid full-app fatal overlay on runtime errors.
+    // Returning true marks the error as handled for the engine (avoids duplicate
+    // reporting) while still logging above — do not swallow without logs.
     return true;
   };
 
@@ -197,9 +208,12 @@ void _logStartup(String message) {
 
 bool _isAdminRoute(String route) {
   final normalized = route.trim();
+  if (normalized == AdminPortalRoutePaths.adminPrefix ||
+      normalized.startsWith('${AdminPortalRoutePaths.adminPrefix}/')) {
+    return true;
+  }
   return normalized == AdminRoutePaths.admin ||
-      normalized == AdminRoutePaths.adminLogin ||
-      normalized.startsWith('${AdminRoutePaths.admin}/');
+      normalized == AdminRoutePaths.adminLogin;
 }
 
 String _resolveRouteName(String? requestedRoute) {
@@ -349,9 +363,7 @@ class _NexRideDriverState extends State<NexRideDriver> {
                 initializationFactory: widget.initializationFactory,
                 routeName: resolvedRoute,
                 adminRoute: true,
-                child: const AdminGateScreen(
-                  mode: AdminGateMode.dashboard,
-                ),
+                child: const AdminGateScreen(),
               ),
               settings: settings,
             );
@@ -361,10 +373,12 @@ class _NexRideDriverState extends State<NexRideDriver> {
                 initializationFactory: widget.initializationFactory,
                 routeName: resolvedRoute,
                 adminRoute: true,
-                child: AdminGateScreen(
-                  mode: AdminGateMode.login,
-                  key: ValueKey<String?>(settings.arguments?.toString()),
-                  inlineMessage: settings.arguments?.toString(),
+                child: AdminLoginScreen(
+                  key: ValueKey<String?>(
+                    adminLoginBannerFromArguments(settings.arguments),
+                  ),
+                  inlineMessage:
+                      adminLoginBannerFromArguments(settings.arguments),
                 ),
               ),
               settings: settings,
@@ -712,6 +726,8 @@ class _AuthGateState extends State<AuthGate> {
   String? _profileSyncIssueMessage;
   User? _currentUser;
   int _bootstrapAttempt = 0;
+  /// Bumps on every auth event so overlapping async work can bail safely.
+  int _authGateGeneration = 0;
   String _debugStep = 'waiting for auth state';
 
   void _setDebugStep(String step) {
@@ -760,6 +776,7 @@ class _AuthGateState extends State<AuthGate> {
       '[AuthGate] auth state restored user=${user?.uid ?? 'none'}',
     );
     _currentUser = user;
+    final int gate = ++_authGateGeneration;
 
     if (user == null) {
       if (!mounted) {
@@ -775,31 +792,54 @@ class _AuthGateState extends State<AuthGate> {
       return;
     }
 
-    final seededProfile = _profile?.driverId == user.uid
-        ? _profile!
-        : _buildFallbackProfile(user);
-    if (mounted) {
-      setState(() {
-        _stage = _AuthGateStage.ready;
-        _statusMessage = null;
-        _profileSyncIssueMessage = null;
-        _profile = seededProfile;
-      });
-    } else {
-      _stage = _AuthGateStage.ready;
-      _statusMessage = null;
-      _profileSyncIssueMessage = null;
-      _profile = seededProfile;
+    // Duplicate auth emissions (same uid) while already on the map: refresh
+    // push token only — do not re-run bootstrap or remount the map.
+    if (_stage == _AuthGateStage.ready &&
+        _profile?.driverId == user.uid &&
+        _auth.currentUser?.uid == user.uid) {
+      _setDebugStep('auth refresh (map already ready)');
+      unawaited(DriverPushNotificationService.instance.registerCurrentUserToken());
+      return;
     }
-    _setDebugStep('opening driver map');
+
+    if (!mounted || gate != _authGateGeneration) {
+      return;
+    }
+    setState(() {
+      _stage = _AuthGateStage.bootstrapping;
+      _statusMessage =
+          'Loading your profile and preparing the driver map. This is slower on first login.';
+      _profileSyncIssueMessage = null;
+    });
+    _setDebugStep('driver bootstrap queued');
+
     unawaited(DriverPushNotificationService.instance.registerCurrentUserToken());
-    await _bootstrapDriverSession(user);
+    try {
+      await _bootstrapDriverSession(user, gate: gate);
+    } catch (error, stackTrace) {
+      debugPrint('[AuthGate] unexpected bootstrap failure error=$error');
+      debugPrintStack(
+        label: '[AuthGate] unexpected bootstrap stack',
+        stackTrace: stackTrace,
+      );
+      if (!mounted || gate != _authGateGeneration) {
+        return;
+      }
+      setState(() {
+        _stage = _AuthGateStage.failed;
+        _statusMessage =
+            'We could not finish loading your driver workspace. Check your connection and tap Retry.';
+        _profileSyncIssueMessage = null;
+        _profile = _profile ?? _buildFallbackProfile(user);
+      });
+      _setDebugStep('bootstrap unexpected failure');
+    }
   }
 
-  Future<void> _bootstrapDriverSession(User user) async {
+  Future<void> _bootstrapDriverSession(User user, {required int gate}) async {
     final attempt = ++_bootstrapAttempt;
     debugPrint(
-        '[AuthGate] driver bootstrap start uid=${user.uid} attempt=$attempt');
+        '[AuthGate] driver bootstrap start uid=${user.uid} attempt=$attempt gate=$gate');
     _setDebugStep('loading driver profile');
 
     try {
@@ -807,6 +847,7 @@ class _AuthGateState extends State<AuthGate> {
 
       if (!mounted ||
           attempt != _bootstrapAttempt ||
+          gate != _authGateGeneration ||
           _auth.currentUser?.uid != user.uid) {
         return;
       }
@@ -833,6 +874,7 @@ class _AuthGateState extends State<AuthGate> {
       );
       if (!mounted ||
           attempt != _bootstrapAttempt ||
+          gate != _authGateGeneration ||
           _auth.currentUser?.uid != user.uid) {
         return;
       }
@@ -852,6 +894,7 @@ class _AuthGateState extends State<AuthGate> {
       _setDebugStep('driver profile failed');
       if (!mounted ||
           attempt != _bootstrapAttempt ||
+          gate != _authGateGeneration ||
           _auth.currentUser?.uid != user.uid) {
         return;
       }
@@ -951,10 +994,11 @@ class _AuthGateState extends State<AuthGate> {
       _setDebugStep('sign in required');
       return;
     }
+    final int gate = ++_authGateGeneration;
     if (mounted) {
       setState(() {
-        _stage = _AuthGateStage.ready;
-        _statusMessage = null;
+        _stage = _AuthGateStage.bootstrapping;
+        _statusMessage = 'Refreshing your driver profile…';
         _profileSyncIssueMessage = null;
         _profile = _profile?.driverId == user.uid
             ? _profile
@@ -962,7 +1006,7 @@ class _AuthGateState extends State<AuthGate> {
       });
     }
     _setDebugStep('retrying driver profile');
-    await _bootstrapDriverSession(user);
+    await _bootstrapDriverSession(user, gate: gate);
   }
 
   @override

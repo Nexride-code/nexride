@@ -336,8 +336,57 @@ Map<String, dynamic> _buildVerificationSummaryFromDocuments(
   };
 }
 
+dynamic mergeDriverVerificationNodeWithAdminIdentity({
+  dynamic verificationSubdoc,
+  dynamic identityVerificationStatus,
+  dynamic verificationStatusField,
+}) {
+  final primary = _text(identityVerificationStatus);
+  final secondary = _text(verificationStatusField);
+  final st = (primary.isNotEmpty ? primary : secondary).toLowerCase();
+  final cleared = st == 'approved' ||
+      st == 'verified' ||
+      st == 'cleared' ||
+      st == 'complete' ||
+      st == 'completed';
+  if (!cleared) {
+    return verificationSubdoc;
+  }
+  final base = verificationSubdoc is Map
+      ? Map<String, dynamic>.from(verificationSubdoc)
+      : <String, dynamic>{};
+  return <String, dynamic>{
+    ...base,
+    'overallStatus': 'approved',
+    'status': 'approved',
+  };
+}
+
 Map<String, dynamic> normalizedDriverVerification(dynamic rawValue) {
-  final existing = _asStringDynamicMap(rawValue);
+  var existing = _asStringDynamicMap(rawValue);
+  final quickOverall = _text(existing['overallStatus']).toLowerCase();
+  final quickStatus = _text(existing['status']).toLowerCase();
+  if (quickOverall == 'approved' ||
+      quickOverall == 'verified' ||
+      quickStatus == 'approved' ||
+      quickStatus == 'verified') {
+    final seeded = Map<String, dynamic>.from(existing);
+    final docSeed = _asStringDynamicMap(seeded['documents']);
+    final syntheticDocs = <String, dynamic>{};
+    for (final DriverRequiredDocument doc in kDriverRequiredDocuments) {
+      final prior = _asStringDynamicMap(docSeed[doc.key]);
+      syntheticDocs[doc.key] = <String, dynamic>{
+        ...prior,
+        'status': 'approved',
+        'result': 'verified',
+      };
+    }
+    existing = <String, dynamic>{
+      ...seeded,
+      'documents': syntheticDocs,
+    };
+  }
+
   final existingDocuments = _asStringDynamicMap(existing['documents']);
   final normalizedDocuments = <String, dynamic>{
     for (final document in kDriverRequiredDocuments)

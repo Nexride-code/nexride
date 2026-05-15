@@ -1,22 +1,86 @@
 import 'dart:async';
 
-import 'package:firebase_database/firebase_database.dart' as rtdb;
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../admin_config.dart';
+import '../admin_rbac.dart';
+import '../admin_drivers_route_debug.dart';
+import '../models/admin_audit_event.dart';
 import '../models/admin_models.dart';
+import '../platform/admin_cache_invalidation_registry.dart';
+import '../platform/admin_entity_cache_policy.dart';
+import '../services/admin_action_executor.dart';
 import '../services/admin_auth_service.dart';
 import '../services/admin_data_service.dart';
 import '../utils/admin_formatters.dart';
+import '../utils/admin_perf_guard.dart';
 import '../widgets/admin_charts.dart';
 import '../widgets/admin_components.dart';
+import '../widgets/admin_driver_drawer_tabs.dart';
+import '../widgets/admin_entity_drawer.dart';
+import '../widgets/admin_entity_drawer_controller.dart';
+import '../widgets/admin_permission_gate.dart';
 import '../widgets/admin_shell.dart';
+import 'admin_live_operations_screen.dart';
+import 'admin_live_ops_dashboard_screen.dart';
+import 'admin_system_health_screen.dart';
+import 'admin_merchants_screen.dart';
+import 'admin_rollout_regions_screen.dart';
+import 'admin_service_areas_screen.dart';
+import 'admin_verification_center_screen.dart';
+import 'admin_audit_logs_screen.dart';
 import '../support/proof_open.dart';
-import '../../support_portal/models/support_models.dart';
-import '../../support_portal/widgets/support_workspace_screen.dart';
+import '../../services/driver_finance_service.dart';
+
+List<AdminDriverRecord> _adminDebugFakeDrivers() {
+  AdminDriverRecord row(
+    String id,
+    String name,
+    String city,
+    String stateOrRegion,
+  ) {
+    return AdminDriverRecord(
+      id: id,
+      name: name,
+      phone: '+234800000000',
+      email: '$id@example.test',
+      city: city,
+      stateOrRegion: stateOrRegion,
+      accountStatus: 'active',
+      status: 'offline',
+      isOnline: false,
+      verificationStatus: 'pending',
+      vehicleName: 'Test Sedan',
+      plateNumber: 'TST-001',
+      tripCount: 0,
+      completedTripCount: 0,
+      grossEarnings: 0,
+      netEarnings: 0,
+      walletBalance: 0,
+      totalWithdrawn: 0,
+      pendingWithdrawals: 0,
+      monetizationModel: 'commission',
+      subscriptionPlanType: 'monthly',
+      subscriptionStatus: 'not_started',
+      subscriptionActive: false,
+      createdAt: DateTime(2026, 1, 1),
+      updatedAt: DateTime(2026, 5, 1),
+      serviceTypes: const <String>['ride'],
+      rawData: const <String, dynamic>{},
+    );
+  }
+
+  return <AdminDriverRecord>[
+    row('fake_driver_lagos_1', 'Fake Driver Lagos 1', 'Lagos', 'lagos'),
+    row('fake_driver_abuja_1', 'Fake Driver Abuja 1', 'Abuja', 'abuja'),
+    row('fake_driver_delta_1', 'Fake Driver Delta 1', 'Warri', 'delta'),
+    row('fake_driver_imo_1', 'Fake Driver Imo 1', 'Owerri', 'imo'),
+    row('fake_driver_edo_1', 'Fake Driver Edo 1', 'Benin', 'edo'),
+  ];
+}
 
 class AdminPanelScreen extends StatefulWidget {
   const AdminPanelScreen({
@@ -25,9 +89,10 @@ class AdminPanelScreen extends StatefulWidget {
     this.dataService,
     this.authService,
     this.initialSection = AdminSection.dashboard,
+    this.initialDriverDeepLink,
     this.loginRoute = AdminRoutePaths.adminLogin,
     this.routeForSection,
-    this.snapshotTimeout = const Duration(seconds: 12),
+    this.snapshotTimeout = const Duration(seconds: 120),
     this.enableRealtimeBadgeListeners = true,
   });
 
@@ -35,6 +100,7 @@ class AdminPanelScreen extends StatefulWidget {
   final AdminDataService? dataService;
   final AdminAuthService? authService;
   final AdminSection initialSection;
+  final AdminDriverDeepLink? initialDriverDeepLink;
   final String loginRoute;
   final String Function(AdminSection section)? routeForSection;
   final Duration snapshotTimeout;
@@ -51,34 +117,83 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
 
   final TextEditingController _riderSearchController = TextEditingController();
   final TextEditingController _driverSearchController = TextEditingController();
-  final TextEditingController _tripSearchController = TextEditingController();
   final TextEditingController _supportSearchController =
+      TextEditingController();
+  final TextEditingController _withdrawalSearchController =
       TextEditingController();
 
   AdminPanelSnapshot? _snapshot;
+  /// Drivers fetched via the lightweight drivers-only loader (no full snapshot).
+  List<AdminDriverRecord>? _driversOnly;
+  /// Pre-computed filtered+paginated driver list — updated outside build().
+  List<AdminDriverRecord> _cachedFilteredDrivers = <AdminDriverRecord>[];
   AdminSection _section = AdminSection.dashboard;
   bool _isLoading = true;
   String? _errorMessage;
   bool _tokenRefreshedForDashboardLoad = false;
-  final List<StreamSubscription<rtdb.DatabaseEvent>> _badgeSubscriptions =
-      <StreamSubscription<rtdb.DatabaseEvent>>[];
   Map<AdminSection, int> _sidebarBadgeCounts = <AdminSection, int>{};
-  List<_AdminPendingNotification> _pendingNotifications =
-      const <_AdminPendingNotification>[];
+  final List<_AdminPendingNotification> _pendingNotifications =
+      <_AdminPendingNotification>[];
+  Timer? _badgeRefreshTimer;
+  Timer? _driverSearchDebounce;
+  Timer? _riderSearchDebounce;
+  Timer? _withdrawalSearchDebounce;
+  Timer? _supportInboxSearchDebounce;
+  int _driverPageIndex = 0;
+  static const int _driverPageSize = 50;
+  bool _driversOnlyLoading = false;
+  final List<String?> _driversServerCursorStack = <String?>[null];
+  String? _driversServerNextCursor;
+  bool _driversServerHasMore = false;
+
+  List<AdminRiderRecord>? _ridersOnly;
+  bool _ridersOnlyLoading = false;
+  final List<String?> _ridersServerCursorStack = <String?>[null];
+  String? _ridersServerNextCursor;
+  bool _ridersServerHasMore = false;
+
+  List<AdminWithdrawalRecord>? _withdrawalsOnly;
+  bool _withdrawalsOnlyLoading = false;
+  final List<String?> _withdrawalsServerCursorStack = <String?>[null];
+  String? _withdrawalsServerNextCursor;
+  bool _withdrawalsServerHasMore = false;
+
+  List<AdminSupportTicketListItem>? _supportTicketsOnly;
+  bool _supportTicketsOnlyLoading = false;
+  final List<String?> _supportTicketsServerCursorStack = <String?>[null];
+  String? _supportTicketsServerNextCursor;
+  bool _supportTicketsServerHasMore = false;
 
   String _riderCityFilter = 'All';
   String _riderStatusFilter = 'All';
   String _riderSignupFilter = 'All time';
+  String _riderProfileCompletenessFilter = 'Completed profiles';
   String _driverCityFilter = 'All';
+  String _driverStateOrRegionFilter = 'All';
   String _driverStatusFilter = 'All';
   String _driverModelFilter = 'All';
-  String _tripCityFilter = 'All';
-  String _tripStatusFilter = 'All';
   String _supportKindFilter = 'All';
+  String _withdrawalStatusFilter = 'All';
+  String _supportTicketStatusFilter = 'All';
+
+  bool _initialDriverDeepLinkHandled = false;
+  static const List<String> _driverDrawerTabIds = <String>[
+    'overview',
+    'verification',
+    'wallet',
+    'trips',
+    'subscription',
+    'violations',
+    'notes',
+    'audit',
+  ];
+  final AdminActionExecutor _actionExecutor = const AdminActionExecutor();
 
   @override
   void initState() {
     super.initState();
+    final initTs = DateTime.now().toIso8601String();
+    debugPrint('[AdminPanel] initState start t=$initTs initialSection=${widget.initialSection.name}');
     _dataService = widget.dataService ?? AdminDataService();
     _authService = widget.authService ?? AdminAuthService();
     _section = widget.initialSection;
@@ -87,24 +202,107 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     debugPrint(
       '[AdminPanel] init section=${_section.name} adminUid=${widget.session.uid} adminEmail=${widget.session.email} cachedSnapshot=${_snapshot != null}',
     );
-    _loadSnapshot();
+
+    if (_section == AdminSection.dashboard) {
+      _snapshot = null;
+      _isLoading = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_loadDashboardOnly());
+        }
+      });
+    } else if (_section == AdminSection.drivers) {
+      if (AdminDriversRouteDebug.driversRouteFakeLocalDrivers) {
+        _isLoading = false;
+        _driversOnly = _adminDebugFakeDrivers();
+        _driversOnlyLoading = false;
+        _recomputeDriverFilter();
+        debugPrint('[AdminPanel] drivers fake local rows=${_driversOnly!.length}');
+      } else {
+        _isLoading = false;
+        _driversOnlyLoading = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          debugPrint(
+            '[AdminPanel] postFrameCallback scheduling drivers fetch t=${DateTime.now().toIso8601String()}',
+          );
+          if (mounted) {
+            unawaited(_loadDriversOnly());
+          }
+        });
+      }
+    } else if (_section == AdminSection.finance) {
+      _snapshot = null;
+      _isLoading = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_loadDashboardOnly());
+        }
+      });
+    } else if (_section == AdminSection.withdrawals) {
+      _isLoading = false;
+      _withdrawalsOnlyLoading = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_loadWithdrawalsOnly());
+        }
+      });
+    } else if (_section == AdminSection.support) {
+      _isLoading = false;
+      _supportTicketsOnlyLoading = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_loadSupportTicketsOnly());
+        }
+      });
+    } else if (_section == AdminSection.riders) {
+      _isLoading = false;
+      _ridersOnlyLoading = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_loadRidersOnly());
+        }
+      });
+    } else if (_section == AdminSection.trips ||
+        _section == AdminSection.liveOperations ||
+        _section == AdminSection.systemHealth ||
+        _section == AdminSection.auditLogs ||
+        _section == AdminSection.regions ||
+        _section == AdminSection.serviceAreas ||
+        _section == AdminSection.merchants) {
+      _isLoading = false;
+    } else {
+      _loadSnapshot();
+    }
     if (widget.enableRealtimeBadgeListeners) {
       _startRealtimeBadgeListeners();
     }
+    debugPrint(
+      '[AdminPanel] initState end t=${DateTime.now().toIso8601String()}',
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _tryConsumeInitialDriverDeepLink();
+      }
+    });
   }
 
   @override
   void dispose() {
-    for (final subscription in _badgeSubscriptions) {
-      subscription.cancel();
-    }
+    _badgeRefreshTimer?.cancel();
+    _driverSearchDebounce?.cancel();
+    _riderSearchDebounce?.cancel();
     _riderSearchController.dispose();
     _driverSearchController.dispose();
-    _tripSearchController.dispose();
     _supportSearchController.dispose();
+    _withdrawalSearchController.dispose();
+    _withdrawalSearchDebounce?.cancel();
+    _supportInboxSearchDebounce?.cancel();
     super.dispose();
   }
 
+  /// Loads [AdminDataService.fetchSnapshot] — **legacy giant RTDB bundle**.
+  /// Prefer section loaders (`_loadDashboardOnly`, `_loadDriversOnly`, …).
+  /// See `lib/admin/docs/SNAPSHOT_MIGRATION.md`.
   Future<void> _loadSnapshot() async {
     debugPrint(
       '[AdminPanel] loading snapshot for adminUid=${widget.session.uid} adminEmail=${widget.session.email} section=${_section.name} cachedSnapshot=${_snapshot != null}',
@@ -133,7 +331,32 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       setState(() {
         _snapshot = snapshot;
         _isLoading = false;
+        _driversOnly = null;
+        _driversOnlyLoading = false;
+        _driversServerCursorStack
+          ..clear()
+          ..add(null);
+        _driversServerNextCursor = null;
+        _driversServerHasMore = false;
+        _ridersOnly = null;
+        _ridersOnlyLoading = false;
+        _withdrawalsOnly = null;
+        _withdrawalsOnlyLoading = false;
+        _withdrawalsServerCursorStack
+          ..clear()
+          ..add(null);
+        _withdrawalsServerNextCursor = null;
+        _withdrawalsServerHasMore = false;
+        _supportTicketsOnly = null;
+        _supportTicketsOnlyLoading = false;
+        _supportTicketsServerCursorStack
+          ..clear()
+          ..add(null);
+        _supportTicketsServerNextCursor = null;
+        _supportTicketsServerHasMore = false;
       });
+      _syncBadgesFromSnapshot(snapshot);
+      _recomputeDriverFilter();
       debugPrint(
         '[AdminPanel] snapshot loaded riders=${snapshot.riders.length} drivers=${snapshot.drivers.length} trips=${snapshot.trips.length}',
       );
@@ -161,6 +384,641 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
   }
 
+  Future<void> _loadDashboardOnly() async {
+    debugPrint('[AdminPanel] _loadDashboardOnly start');
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    }
+    try {
+      if (!_tokenRefreshedForDashboardLoad) {
+        await _authService.forceTokenRefresh();
+        _tokenRefreshedForDashboardLoad = true;
+      }
+      final snapshot = await _dataService
+          .fetchDashboardSnapshot(
+            adminEmail: widget.session.email,
+            adminUid: widget.session.uid,
+          )
+          .timeout(widget.snapshotTimeout);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _snapshot = snapshot;
+        _isLoading = false;
+        _driversOnly = null;
+        _driversOnlyLoading = false;
+        _ridersOnly = null;
+        _ridersOnlyLoading = false;
+        _withdrawalsOnly = null;
+        _withdrawalsOnlyLoading = false;
+        _withdrawalsServerCursorStack
+          ..clear()
+          ..add(null);
+        _withdrawalsServerNextCursor = null;
+        _withdrawalsServerHasMore = false;
+        _supportTicketsOnly = null;
+        _supportTicketsOnlyLoading = false;
+        _supportTicketsServerCursorStack
+          ..clear()
+          ..add(null);
+        _supportTicketsServerNextCursor = null;
+        _supportTicketsServerHasMore = false;
+      });
+      debugPrint('[AdminPanel] _loadDashboardOnly success');
+    } on TimeoutException catch (error) {
+      debugPrint('[AdminPanel] _loadDashboardOnly timeout $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isLoading = false;
+        _errorMessage =
+            'Unable to load dashboard right now. The request timed out. Try again in a moment.';
+      });
+    } catch (error) {
+      debugPrint('[AdminPanel] _loadDashboardOnly failed: $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isLoading = false;
+        _errorMessage = _buildLoadFailureMessage(error);
+      });
+    }
+  }
+
+  String _riderProfileCompletenessApiValue() {
+    switch (_riderProfileCompletenessFilter) {
+      case 'Incomplete registrations':
+        return 'incomplete';
+      case 'All':
+        return 'all';
+      default:
+        return 'completed';
+    }
+  }
+
+  Future<void> _loadRidersOnly({bool resetServerCursors = true}) async {
+    debugPrint(
+      '[AdminPanel] _loadRidersOnly start resetCursors=$resetServerCursors',
+    );
+    if (resetServerCursors) {
+      _ridersServerCursorStack
+        ..clear()
+        ..add(null);
+    }
+    if (mounted) {
+      setState(() {
+        _ridersOnlyLoading = true;
+        _errorMessage = null;
+      });
+    } else {
+      _ridersOnlyLoading = true;
+    }
+    try {
+      if (!_tokenRefreshedForDashboardLoad) {
+        await _authService.forceTokenRefresh();
+        _tokenRefreshedForDashboardLoad = true;
+      }
+      final cursor = _ridersServerCursorStack.isEmpty
+          ? null
+          : _ridersServerCursorStack.last;
+      final query = AdminListQuery(
+        search: _riderSearchController.text.trim(),
+        city: _riderCityFilter,
+        stateOrRegion: 'All',
+        status: _riderStatusFilter,
+        verificationStatus: 'All',
+        profileCompleteness: _riderProfileCompletenessApiValue(),
+      );
+      final page = await _dataService
+          .fetchRidersPageForAdmin(
+            cursor: cursor,
+            limit: _driverPageSize,
+            query: query,
+          )
+          .timeout(widget.snapshotTimeout);
+      // ignore: avoid_print
+      print(
+        '[AdminRidersDebug] panel load complete riders=${page.riders.length} '
+        'hasMore=${page.hasMore} nextCursor=${page.nextCursor}',
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _ridersOnly = page.riders;
+        _ridersServerNextCursor = page.nextCursor;
+        _ridersServerHasMore = page.hasMore;
+        _ridersOnlyLoading = false;
+      });
+    } on TimeoutException catch (error) {
+      debugPrint('[AdminPanel] _loadRidersOnly timeout $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _ridersOnlyLoading = false;
+        _errorMessage = 'Rider list timed out. Try refreshing.';
+      });
+    } catch (error) {
+      debugPrint('[AdminPanel] _loadRidersOnly failed: $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _ridersOnlyLoading = false;
+        _errorMessage = _buildLoadFailureMessage(error);
+      });
+    }
+  }
+
+  Future<void> _loadWithdrawalsOnly({bool resetServerCursors = true}) async {
+    if (resetServerCursors) {
+      _withdrawalsServerCursorStack
+        ..clear()
+        ..add(null);
+    }
+    if (mounted) {
+      setState(() {
+        _withdrawalsOnlyLoading = true;
+        _errorMessage = null;
+      });
+    } else {
+      _withdrawalsOnlyLoading = true;
+    }
+    try {
+      if (!_tokenRefreshedForDashboardLoad) {
+        await _authService.forceTokenRefresh();
+        _tokenRefreshedForDashboardLoad = true;
+      }
+      final cursor = _withdrawalsServerCursorStack.isEmpty
+          ? null
+          : _withdrawalsServerCursorStack.last;
+      final query = AdminListQuery(
+        search: _withdrawalSearchController.text.trim(),
+        city: 'All',
+        stateOrRegion: 'All',
+        status: _withdrawalStatusFilter,
+        verificationStatus: 'All',
+      );
+      final page = await _dataService
+          .fetchWithdrawalsPageForAdmin(
+            cursor: cursor,
+            limit: _driverPageSize,
+            query: query,
+          )
+          .timeout(widget.snapshotTimeout);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _withdrawalsOnly = page.withdrawals;
+        _withdrawalsServerNextCursor = page.nextCursor;
+        _withdrawalsServerHasMore = page.hasMore;
+        _withdrawalsOnlyLoading = false;
+      });
+    } on TimeoutException catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _withdrawalsOnlyLoading = false;
+        _errorMessage = 'Withdrawals timed out. Try again.';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _withdrawalsOnlyLoading = false;
+        _errorMessage = _buildLoadFailureMessage(error);
+      });
+    }
+  }
+
+  Future<void> _loadSupportTicketsOnly({bool resetServerCursors = true}) async {
+    if (resetServerCursors) {
+      _supportTicketsServerCursorStack
+        ..clear()
+        ..add(null);
+    }
+    if (mounted) {
+      setState(() {
+        _supportTicketsOnlyLoading = true;
+        _errorMessage = null;
+      });
+    } else {
+      _supportTicketsOnlyLoading = true;
+    }
+    try {
+      if (!_tokenRefreshedForDashboardLoad) {
+        await _authService.forceTokenRefresh();
+        _tokenRefreshedForDashboardLoad = true;
+      }
+      final cursor = _supportTicketsServerCursorStack.isEmpty
+          ? null
+          : _supportTicketsServerCursorStack.last;
+      final query = AdminListQuery(
+        search: _supportSearchController.text.trim(),
+        city: 'All',
+        stateOrRegion: 'All',
+        status: _supportTicketStatusFilter,
+        verificationStatus: 'All',
+      );
+      final page = await _dataService
+          .fetchSupportTicketsPageForAdmin(
+            cursor: cursor,
+            limit: _driverPageSize,
+            query: query,
+          )
+          .timeout(widget.snapshotTimeout);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _supportTicketsOnly = page.tickets;
+        _supportTicketsServerNextCursor = page.nextCursor;
+        _supportTicketsServerHasMore = page.hasMore;
+        _supportTicketsOnlyLoading = false;
+      });
+    } on TimeoutException catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _supportTicketsOnlyLoading = false;
+        _errorMessage = 'Support inbox timed out. Try again.';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _supportTicketsOnlyLoading = false;
+        _errorMessage = _buildLoadFailureMessage(error);
+      });
+    }
+  }
+
+  void _beginWithdrawalsSectionLoad() {
+    _withdrawalsServerCursorStack
+      ..clear()
+      ..add(null);
+    if (mounted) {
+      setState(() {
+        _withdrawalsOnly = null;
+        _withdrawalsOnlyLoading = true;
+        _errorMessage = null;
+        _withdrawalsServerNextCursor = null;
+        _withdrawalsServerHasMore = false;
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_loadWithdrawalsOnly());
+      }
+    });
+  }
+
+  void _beginSupportTicketsSectionLoad() {
+    _supportTicketsServerCursorStack
+      ..clear()
+      ..add(null);
+    if (mounted) {
+      setState(() {
+        _supportTicketsOnly = null;
+        _supportTicketsOnlyLoading = true;
+        _errorMessage = null;
+        _supportTicketsServerNextCursor = null;
+        _supportTicketsServerHasMore = false;
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_loadSupportTicketsOnly());
+      }
+    });
+  }
+
+  void _onWithdrawalsServerNextPage() {
+    final c = _withdrawalsServerNextCursor;
+    if (c == null || !_withdrawalsServerHasMore || _withdrawalsOnlyLoading) {
+      return;
+    }
+    setState(() {
+      _withdrawalsServerCursorStack.add(c);
+    });
+    unawaited(_loadWithdrawalsOnly(resetServerCursors: false));
+  }
+
+  void _onWithdrawalsServerPrevPage() {
+    if (_withdrawalsServerCursorStack.length <= 1 || _withdrawalsOnlyLoading) {
+      return;
+    }
+    setState(() {
+      _withdrawalsServerCursorStack.removeLast();
+    });
+    unawaited(_loadWithdrawalsOnly(resetServerCursors: false));
+  }
+
+  void _onSupportTicketsServerNextPage() {
+    final c = _supportTicketsServerNextCursor;
+    if (c == null || !_supportTicketsServerHasMore || _supportTicketsOnlyLoading) {
+      return;
+    }
+    setState(() {
+      _supportTicketsServerCursorStack.add(c);
+    });
+    unawaited(_loadSupportTicketsOnly(resetServerCursors: false));
+  }
+
+  void _onSupportTicketsServerPrevPage() {
+    if (_supportTicketsServerCursorStack.length <= 1 ||
+        _supportTicketsOnlyLoading) {
+      return;
+    }
+    setState(() {
+      _supportTicketsServerCursorStack.removeLast();
+    });
+    unawaited(_loadSupportTicketsOnly(resetServerCursors: false));
+  }
+
+  AdminListQuery _driverListQueryForCallable() {
+    return AdminListQuery(
+      search: _driverSearchController.text.trim(),
+      city: _driverCityFilter,
+      stateOrRegion: _driverStateOrRegionFilter,
+      status: _driverStatusFilter,
+      verificationStatus: 'All',
+      monetizationModel: _driverModelFilter,
+    );
+  }
+
+  /// Lightweight loader for `/admin/drivers` — uses [AdminDataService.fetchDriversPageForAdmin]
+  /// (server-paged) unless debug flags override.
+  Future<void> _loadDriversOnly({bool resetServerCursors = true}) async {
+    final t0 = DateTime.now().millisecondsSinceEpoch;
+    debugPrint(
+      '[AdminPanel] _loadDriversOnly start resetCursors=$resetServerCursors t=$t0',
+    );
+    if (resetServerCursors) {
+      _driversServerCursorStack
+        ..clear()
+        ..add(null);
+    }
+    if (mounted) {
+      setState(() {
+        _driversOnlyLoading = true;
+        _errorMessage = null;
+      });
+    } else {
+      _driversOnlyLoading = true;
+    }
+    try {
+      if (!_tokenRefreshedForDashboardLoad) {
+        final tAuth0 = DateTime.now().millisecondsSinceEpoch;
+        await _authService.forceTokenRefresh();
+        _tokenRefreshedForDashboardLoad = true;
+        debugPrint(
+          '[AdminPanel] _loadDriversOnly forceTokenRefresh done in ${DateTime.now().millisecondsSinceEpoch - tAuth0}ms',
+        );
+      }
+      final cursor = _driversServerCursorStack.isEmpty
+          ? null
+          : _driversServerCursorStack.last;
+      final t1 = DateTime.now().millisecondsSinceEpoch;
+      debugPrint('[AdminPanel] _loadDriversOnly calling fetchDriversPageForAdmin t=$t1');
+      final page = await _dataService
+          .fetchDriversPageForAdmin(
+            cursor: cursor,
+            limit: _driverPageSize,
+            query: _driverListQueryForCallable(),
+          )
+          .timeout(widget.snapshotTimeout);
+      final t2 = DateTime.now().millisecondsSinceEpoch;
+      debugPrint(
+        '[AdminPanel] _loadDriversOnly page received rows=${page.drivers.length} '
+        'hasMore=${page.hasMore} next=${page.nextCursor} in ${t2 - t1}ms total=${t2 - t0}ms',
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _driversOnly = page.drivers;
+        _driversServerNextCursor = page.nextCursor;
+        _driversServerHasMore = page.hasMore;
+        _driversOnlyLoading = false;
+      });
+      _recomputeDriverFilter();
+      debugPrint(
+        '[AdminPanel] _buildDriversSection data ready t=${DateTime.now().toIso8601String()}',
+      );
+      _tryConsumeInitialDriverDeepLink();
+    } on TimeoutException catch (error) {
+      debugPrint('[AdminPanel] _loadDriversOnly timeout error=$error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _driversOnlyLoading = false;
+        _errorMessage = 'Driver list timed out. Try refreshing.';
+      });
+    } catch (error) {
+      debugPrint('[AdminPanel] _loadDriversOnly failed: $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _driversOnlyLoading = false;
+        _errorMessage = _buildLoadFailureMessage(error);
+      });
+    }
+  }
+
+  void _beginRidersSectionLoad() {
+    _ridersServerCursorStack
+      ..clear()
+      ..add(null);
+    if (mounted) {
+      setState(() {
+        _ridersOnly = null;
+        _ridersOnlyLoading = true;
+        _errorMessage = null;
+        _ridersServerNextCursor = null;
+        _ridersServerHasMore = false;
+      });
+    } else {
+      _ridersOnly = null;
+      _ridersOnlyLoading = true;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_loadRidersOnly(resetServerCursors: false));
+      }
+    });
+  }
+
+  void _onRidersServerNextPage() {
+    final String? c = _ridersServerNextCursor;
+    if (c == null || !_ridersServerHasMore || _ridersOnlyLoading) {
+      return;
+    }
+    setState(() {
+      _ridersServerCursorStack.add(c);
+    });
+    unawaited(_loadRidersOnly(resetServerCursors: false));
+  }
+
+  void _onRidersServerPrevPage() {
+    if (_ridersServerCursorStack.length <= 1 || _ridersOnlyLoading) {
+      return;
+    }
+    setState(() {
+      _ridersServerCursorStack.removeLast();
+    });
+    unawaited(_loadRidersOnly(resetServerCursors: false));
+  }
+
+  void _beginDriversSectionLoad() {
+    if (AdminDriversRouteDebug.driversRouteFakeLocalDrivers) {
+      return;
+    }
+    _driversServerCursorStack
+      ..clear()
+      ..add(null);
+    if (mounted) {
+      setState(() {
+        _driversOnly = null;
+        _driversOnlyLoading = true;
+        _errorMessage = null;
+        _driversServerNextCursor = null;
+        _driversServerHasMore = false;
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      debugPrint(
+        '[AdminPanel] _beginDriversSectionLoad postFrame t=${DateTime.now().toIso8601String()}',
+      );
+      if (mounted) {
+        unawaited(_loadDriversOnly(resetServerCursors: false));
+      }
+    });
+  }
+
+  void _onDriversServerNextPage() {
+    final String? c = _driversServerNextCursor;
+    if (c == null || !_driversServerHasMore || _driversOnlyLoading) {
+      return;
+    }
+    setState(() {
+      _driversServerCursorStack.add(c);
+    });
+    unawaited(_loadDriversOnly(resetServerCursors: false));
+  }
+
+  void _onDriversServerPrevPage() {
+    if (_driversServerCursorStack.length <= 1 || _driversOnlyLoading) {
+      return;
+    }
+    setState(() {
+      _driversServerCursorStack.removeLast();
+    });
+    unawaited(_loadDriversOnly(resetServerCursors: false));
+  }
+
+  /// Computes filtered drivers outside build() and stores in [_cachedFilteredDrivers].
+  /// Must be called whenever drivers data, search query, or filter values change.
+  void _recomputeDriverFilter() {
+    final tf0 = DateTime.now().millisecondsSinceEpoch;
+    final drivers = _driversOnly ?? _snapshot?.drivers ?? <AdminDriverRecord>[];
+    final bool serverFilteredDrivers = _driversOnly != null &&
+        _snapshot == null &&
+        _section == AdminSection.drivers;
+    final query = _driverSearchController.text.trim().toLowerCase();
+    final filtered = drivers.where((AdminDriverRecord driver) {
+      if (serverFilteredDrivers) {
+        return true;
+      }
+      final matchesQuery = query.isEmpty ||
+          driver.id.toLowerCase().contains(query) ||
+          driver.name.toLowerCase().contains(query) ||
+          driver.phone.toLowerCase().contains(query) ||
+          driver.city.toLowerCase().contains(query) ||
+          driver.stateOrRegion.toLowerCase().contains(query) ||
+          driver.vehicleName.toLowerCase().contains(query) ||
+          driver.plateNumber.toLowerCase().contains(query);
+      final matchesCity =
+          _driverCityFilter == 'All' || driver.city == _driverCityFilter;
+      final matchesStateOrRegion = _driverStateOrRegionFilter == 'All' ||
+          driver.stateOrRegion == _driverStateOrRegionFilter;
+      final matchesStatus = _driverStatusFilter == 'All' ||
+          driver.accountStatus == _driverStatusFilter;
+      final matchesModel = _driverModelFilter == 'All' ||
+          driver.monetizationModel == _driverModelFilter;
+      return matchesQuery &&
+          matchesCity &&
+          matchesStateOrRegion &&
+          matchesStatus &&
+          matchesModel;
+    }).toList();
+    final tf1 = DateTime.now().millisecondsSinceEpoch;
+    final visible = filtered.length.clamp(0, _driverPageSize);
+    debugPrint('[AdminPanel] _recomputeDriverFilter total=${drivers.length} filtered=${filtered.length} visible=$visible in ${tf1 - tf0}ms');
+    if (mounted) {
+      setState(() {
+        _cachedFilteredDrivers = filtered;
+        _driverPageIndex = 0;
+      });
+    } else {
+      _cachedFilteredDrivers = filtered;
+      _driverPageIndex = 0;
+    }
+  }
+
+  /// Section-aware refresh: drivers section uses the lightweight loader;
+  /// all other sections use the full snapshot loader.
+  Future<void> _refresh() async {
+    if (_section == AdminSection.dashboard) {
+      await _loadDashboardOnly();
+    } else if (_section == AdminSection.drivers) {
+      if (AdminDriversRouteDebug.driversRouteFakeLocalDrivers) {
+        return;
+      }
+      if (_driversOnly != null || _snapshot == null) {
+        await _loadDriversOnly();
+      } else {
+        await _loadSnapshot();
+      }
+    } else if (_section == AdminSection.riders) {
+      if (_ridersOnly != null || _snapshot == null) {
+        await _loadRidersOnly();
+      } else {
+        await _loadSnapshot();
+      }
+    } else if (_section == AdminSection.withdrawals) {
+      await _loadWithdrawalsOnly(resetServerCursors: false);
+    } else if (_section == AdminSection.support) {
+      await _loadSupportTicketsOnly(resetServerCursors: false);
+    } else if (_section == AdminSection.finance) {
+      await _loadDashboardOnly();
+    } else if (_section == AdminSection.auditLogs ||
+        _section == AdminSection.liveOperations ||
+        _section == AdminSection.systemHealth ||
+        _section == AdminSection.trips ||
+        _section == AdminSection.regions ||
+        _section == AdminSection.serviceAreas ||
+        _section == AdminSection.merchants) {
+      return;
+    } else {
+      await _loadSnapshot();
+    }
+  }
+
   Future<void> _logout() async {
     await _authService.signOut();
     if (!mounted) {
@@ -180,7 +1038,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       session: widget.session,
       isLoading: _isLoading,
       lastUpdated: _snapshot?.fetchedAt,
-      onRefresh: _loadSnapshot,
+      onRefresh: _refresh,
       onLogout: _logout,
       liveDataSections: _snapshot?.liveDataSections ?? const <String, bool>{},
       sidebarBadgeCounts: _sidebarBadgeCounts,
@@ -190,7 +1048,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               title: item.title,
               subtitle: item.subtitle,
               section: item.section,
-              updatedAt: item.updatedAt,
             ),
           )
           .toList(growable: false),
@@ -200,128 +1057,103 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   }
 
   void _startRealtimeBadgeListeners() {
-    final root = _dataService.database.ref();
-    _badgeSubscriptions.addAll(<StreamSubscription<rtdb.DatabaseEvent>>[
-      root.child('drivers').onValue.listen(_onDriversBadgeData),
-      root.child('users').onValue.listen(_onUsersBadgeData),
-      root.child('ride_requests').onValue.listen(_onTripsBadgeData),
-      root.child('support_tickets').onValue.listen(_onSupportBadgeData),
-    ]);
+    _badgeRefreshTimer?.cancel();
+    unawaited(_refreshSidebarBadgesFromCallable());
+    _badgeRefreshTimer = Timer.periodic(const Duration(seconds: 45), (_) {
+      unawaited(_refreshSidebarBadgesFromCallable());
+    });
   }
 
-  void _onDriversBadgeData(rtdb.DatabaseEvent event) {
-    final data = _asMap(event.snapshot.value);
-    var subscriptionPending = 0;
-    var verificationPending = 0;
-    final notifications = <_AdminPendingNotification>[];
-    for (final entry in data.entries) {
-      final row = _asMap(entry.value);
-      final verification = _asMap(row['verification']);
-      final verificationStatus = _asText(
-        verification['overallStatus'] ?? row['verification_status'],
-      ).toLowerCase();
-      final subStatus = _asText(row['subscription_status']).toLowerCase();
-      final hasSubscriptionProof =
-          '${row['subscription_proof_url'] ?? ''}'.trim().isNotEmpty;
-      final isSubscriptionPending = _boolish(row['subscription_pending']) ||
-          subStatus == 'pending' ||
-          subStatus == 'pending_review' ||
-          hasSubscriptionProof;
-      if (isSubscriptionPending) {
-        subscriptionPending += 1;
-        final name = _asText(row['name']);
-        notifications.add(
-          _AdminPendingNotification(
-            title: 'Subscription pending',
-            subtitle: name.isNotEmpty ? name : entry.key,
-            section: AdminSection.subscriptions,
-            updatedAt: _asInt(row['subscription_requested_at']),
-          ),
-        );
-      }
-      if (verificationStatus == 'pending' ||
-          verificationStatus == 'submitted' ||
-          verificationStatus == 'in_review') {
-        verificationPending += 1;
-      }
+  Future<void> _refreshSidebarBadgesFromCallable() async {
+    if (!widget.enableRealtimeBadgeListeners || !mounted) {
+      return;
     }
-    _setBadgeCount(AdminSection.subscriptions, subscriptionPending);
-    _setBadgeCount(AdminSection.verification, verificationPending);
-    _mergeNotifications(notifications, kind: AdminSection.subscriptions);
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetSidebarBadgeCounts',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 20)),
+      );
+      final result = await callable.call(<String, dynamic>{});
+      final data = result.data is Map
+          ? Map<String, dynamic>.from(result.data as Map)
+          : <String, dynamic>{};
+      if (data['success'] != true || !mounted) {
+        return;
+      }
+      _setBadgeCount(
+        AdminSection.subscriptions,
+        _badgeInt(data['subscription_drivers_pending']),
+      );
+      _setBadgeCount(
+        AdminSection.trips,
+        _badgeInt(data['trips_payment_pending_confirmation']),
+      );
+      _setBadgeCount(
+        AdminSection.support,
+        _badgeInt(data['support_tickets_open']),
+      );
+    } catch (error) {
+      debugPrint('[AdminPanel] badge refresh failed: $error');
+    }
   }
 
-  void _onUsersBadgeData(rtdb.DatabaseEvent event) {
-    final data = _asMap(event.snapshot.value);
+  int _badgeInt(dynamic value) {
+    if (value is num) {
+      return value.toInt();
+    }
+    return int.tryParse(value?.toString().trim() ?? '') ?? 0;
+  }
+
+  void _syncBadgesFromSnapshot(AdminPanelSnapshot snapshot) {
     var ridersPending = 0;
-    for (final rowValue in data.values) {
-      final row = _asMap(rowValue);
-      final role = _asText(row['role']).toLowerCase();
-      if (role == 'driver') {
-        continue;
-      }
-      final verification = _asMap(row['verification']);
-      final status = _asText(
-        verification['overallStatus'] ??
-            _asMap(row['trustSummary'])['verificationStatus'] ??
-            row['verification_status'],
-      ).toLowerCase();
-      if (status == 'pending' || status == 'submitted' || status == 'in_review') {
+    for (final AdminRiderRecord r in snapshot.riders) {
+      final v = r.verificationStatus.toLowerCase();
+      if (v == 'pending' || v == 'submitted' || v == 'in_review') {
         ridersPending += 1;
       }
     }
     _setBadgeCount(AdminSection.riders, ridersPending);
-  }
 
-  void _onTripsBadgeData(rtdb.DatabaseEvent event) {
-    final data = _asMap(event.snapshot.value);
+    var driverVerificationPending = 0;
+    var subscriptionPending = 0;
+    for (final AdminDriverRecord d in snapshot.drivers) {
+      final v = d.verificationStatus.toLowerCase();
+      if (v == 'pending' || v == 'submitted' || v == 'in_review') {
+        driverVerificationPending += 1;
+      }
+      final sub = d.subscriptionStatus.toLowerCase();
+      final hasProof =
+          '${d.rawData['subscription_proof_url'] ?? ''}'.trim().isNotEmpty;
+      if (d.rawData['subscription_pending'] == true ||
+          sub == 'pending' ||
+          sub == 'pending_review' ||
+          hasProof) {
+        subscriptionPending += 1;
+      }
+    }
+    _setBadgeCount(AdminSection.verification, driverVerificationPending);
+    _setBadgeCount(AdminSection.subscriptions, subscriptionPending);
+
     var tripsPending = 0;
-    final notifications = <_AdminPendingNotification>[];
-    for (final entry in data.entries) {
-      final row = _asMap(entry.value);
-      final paymentStatus = _asText(row['payment_status']).toLowerCase();
-      if (paymentStatus == 'pending_manual_confirmation') {
+    for (final AdminTripRecord t in snapshot.trips) {
+      final p =
+          (t.rawData['payment_status'] as String? ?? '').toLowerCase().replaceAll(RegExp(r'[\s-]+'), '_');
+      if (p == 'pending_manual_confirmation' ||
+          p == 'pending_review' ||
+          p == 'pending') {
         tripsPending += 1;
-        notifications.add(
-          _AdminPendingNotification(
-            title: 'Trip payment pending',
-            subtitle: entry.key,
-            section: AdminSection.trips,
-            updatedAt: _asInt(row['updated_at']),
-          ),
-        );
       }
     }
     _setBadgeCount(AdminSection.trips, tripsPending);
-    _mergeNotifications(notifications, kind: AdminSection.trips);
-  }
-
-  void _onSupportBadgeData(rtdb.DatabaseEvent event) {
-    final data = _asMap(event.snapshot.value);
-    var openSupport = 0;
-    final notifications = <_AdminPendingNotification>[];
-    for (final entry in data.entries) {
-      final row = _asMap(entry.value);
-      final status = _asText(row['status']).toLowerCase();
-      if (status == 'open' || status == 'pending_user' || status == 'escalated') {
-        openSupport += 1;
-        notifications.add(
-          _AdminPendingNotification(
-            title: 'Support ticket',
-            subtitle: _asText(row['subject']).isNotEmpty
-                ? _asText(row['subject'])
-                : entry.key,
-            section: AdminSection.support,
-            updatedAt: _asInt(row['updatedAt'] ?? row['updated_at']),
-          ),
-        );
-      }
-    }
-    _setBadgeCount(AdminSection.support, openSupport);
-    _mergeNotifications(notifications, kind: AdminSection.support);
   }
 
   void _setBadgeCount(AdminSection section, int count) {
     if (!mounted) {
+      return;
+    }
+    if ((_sidebarBadgeCounts[section] ?? -1) == count) {
       return;
     }
     setState(() {
@@ -332,59 +1164,47 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     });
   }
 
-  void _mergeNotifications(
-    List<_AdminPendingNotification> incoming, {
-    required AdminSection kind,
-  }) {
-    if (!mounted) {
-      return;
-    }
-    final preserved = _pendingNotifications
-        .where((item) => item.section != kind)
-        .toList(growable: false);
-    final merged = <_AdminPendingNotification>[...incoming, ...preserved]
-      ..sort((a, b) => (b.updatedAt ?? 0).compareTo(a.updatedAt ?? 0));
-    setState(() {
-      _pendingNotifications = merged.take(12).toList(growable: false);
-    });
-  }
-
-  Map<String, dynamic> _asMap(dynamic value) {
-    if (value is Map) {
-      return value.map<String, dynamic>(
-        (dynamic key, dynamic entry) => MapEntry(key.toString(), entry),
-      );
-    }
-    return <String, dynamic>{};
-  }
-
-  String _asText(dynamic value) => value?.toString().trim() ?? '';
-
-  int? _asInt(dynamic value) {
-    if (value is num) {
-      return value.toInt();
-    }
-    return int.tryParse(_asText(value));
-  }
-
-  bool _boolish(dynamic value) {
-    if (value is bool) {
-      return value;
-    }
-    final normalized = _asText(value).toLowerCase();
-    return normalized == 'true' || normalized == '1' || normalized == 'yes';
-  }
-
   void _handleSectionSelected(AdminSection next) {
     debugPrint('[AdminPanel] section change ${_section.name} -> ${next.name}');
     final routeForSection = widget.routeForSection;
     if (routeForSection != null) {
       final nextRoute = routeForSection(next);
+      if (next == AdminSection.liveOperations) {
+        debugPrint('[LIVE_OPS][ROUTE] resolved section=liveOperations');
+      }
+      if (next == AdminSection.auditLogs) {
+        debugPrint('[AUDIT_LOGS][ROUTE] resolved section=auditLogs');
+      }
       if (kIsWeb) {
         if (_section != next) {
           setState(() {
             _section = next;
           });
+          if (next == AdminSection.drivers &&
+              !AdminDriversRouteDebug.driversRouteFakeLocalDrivers &&
+              _driversOnly == null) {
+            _beginDriversSectionLoad();
+          }
+          if (next == AdminSection.riders && _ridersOnly == null) {
+            _beginRidersSectionLoad();
+          }
+          if (next == AdminSection.withdrawals) {
+            if (_withdrawalsOnly == null) {
+              _beginWithdrawalsSectionLoad();
+            } else {
+              unawaited(_loadWithdrawalsOnly(resetServerCursors: true));
+            }
+          }
+          if (next == AdminSection.support) {
+            if (_supportTicketsOnly == null) {
+              _beginSupportTicketsSectionLoad();
+            } else {
+              unawaited(_loadSupportTicketsOnly(resetServerCursors: true));
+            }
+          }
+          if (next == AdminSection.finance && _snapshot == null) {
+            unawaited(_loadDashboardOnly());
+          }
         }
         SystemNavigator.routeInformationUpdated(uri: Uri.parse(nextRoute));
         return;
@@ -398,9 +1218,324 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     setState(() {
       _section = next;
     });
+    if (next == AdminSection.drivers &&
+        !AdminDriversRouteDebug.driversRouteFakeLocalDrivers &&
+        _driversOnly == null) {
+      _beginDriversSectionLoad();
+    }
+    if (next == AdminSection.riders && _ridersOnly == null) {
+      _beginRidersSectionLoad();
+    }
+    if (next == AdminSection.withdrawals) {
+      if (_withdrawalsOnly == null) {
+        _beginWithdrawalsSectionLoad();
+      } else {
+        unawaited(_loadWithdrawalsOnly(resetServerCursors: true));
+      }
+    }
+    if (next == AdminSection.support) {
+      if (_supportTicketsOnly == null) {
+        _beginSupportTicketsSectionLoad();
+      } else {
+        unawaited(_loadSupportTicketsOnly(resetServerCursors: true));
+      }
+    }
+    if (next == AdminSection.finance && _snapshot == null) {
+      unawaited(_loadDashboardOnly());
+    }
   }
 
   Widget _buildBody() {
+    final String? requiredPerm = requiredPermissionForSection(_section);
+    if (requiredPerm != null && !widget.session.hasPermission(requiredPerm)) {
+      return Align(
+        alignment: Alignment.topLeft,
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: AdminSurfaceCard(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  const Text(
+                    'Access restricted',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      color: AdminThemeTokens.ink,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'You do not have permission for this action.',
+                    style: TextStyle(height: 1.45, color: Color(0xFF5C564D)),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'This section requires “$requiredPerm”.',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: AdminThemeTokens.slate,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  AdminPrimaryButton(
+                    label: 'Go to dashboard',
+                    onPressed: () => _handleSectionSelected(AdminSection.dashboard),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (_section == AdminSection.regions ||
+        _section == AdminSection.serviceAreas ||
+        _section == AdminSection.merchants ||
+        _section == AdminSection.trips ||
+        _section == AdminSection.liveOperations ||
+        _section == AdminSection.systemHealth ||
+        _section == AdminSection.auditLogs) {
+      if (_section == AdminSection.liveOperations) {
+        debugPrint('[LIVE_OPS][AdminPanel] routing to AdminLiveOpsDashboardScreen');
+      }
+      if (_section == AdminSection.auditLogs) {
+        debugPrint('[AUDIT_LOGS][PANEL] routing to AdminAuditLogsScreen');
+      }
+      return AnimatedSwitcher(
+        duration: const Duration(milliseconds: 240),
+        child: SingleChildScrollView(
+          key: ValueKey<AdminSection>(_section),
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: switch (_section) {
+              AdminSection.regions =>
+                  AdminRolloutRegionsScreen(session: widget.session),
+              AdminSection.serviceAreas =>
+                  AdminServiceAreasScreen(
+                    dataService: _dataService,
+                    session: widget.session,
+                  ),
+              AdminSection.merchants =>
+                  AdminMerchantsScreen(session: widget.session),
+              AdminSection.trips => AdminLiveOperationsScreen(
+                    dataService: _dataService,
+                    session: widget.session,
+                  ),
+              AdminSection.liveOperations =>
+                  AdminLiveOpsDashboardScreen(
+                    dataService: _dataService,
+                  ),
+              AdminSection.systemHealth => AdminSystemHealthScreen(
+                    dataService: _dataService,
+                  ),
+              AdminSection.auditLogs => AdminAuditLogsScreen(
+                    dataService: _dataService,
+                  ),
+              _ => const SizedBox.shrink(),
+            },
+          ),
+        ),
+      );
+    }
+
+    // `/admin/drivers` without a full panel snapshot: first frame shows shell + spinner;
+    // drivers load post-frame (see [initState] / [_beginDriversSectionLoad]).
+    if (_section == AdminSection.drivers && _snapshot == null) {
+      if (_driversOnlyLoading && _driversOnly == null) {
+        return const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+      if ((_errorMessage?.trim().isNotEmpty ?? false) &&
+          _driversOnly == null &&
+          !_driversOnlyLoading) {
+        return _buildUnavailableState(
+          title: 'Unable to load drivers right now',
+          message: _errorMessage!.trim(),
+        );
+      }
+      if (_driversOnly != null && !_driversOnlyLoading) {
+        return AnimatedSwitcher(
+          duration: const Duration(milliseconds: 240),
+          child: SingleChildScrollView(
+            key: const ValueKey<AdminSection>(AdminSection.drivers),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (_errorMessage?.trim().isNotEmpty ?? false) ...<Widget>[
+                  _buildRefreshNotice(_errorMessage!),
+                  const SizedBox(height: 16),
+                ],
+                _buildDriversSection(),
+              ],
+            ),
+          ),
+        );
+      }
+    }
+
+    // Drivers section backed by a full snapshot (e.g. opened Dashboard first).
+    final driversReady =
+        _driversOnly != null || (_snapshot?.drivers.isNotEmpty ?? false);
+    if (_section == AdminSection.drivers && !_isLoading && driversReady) {
+      return AnimatedSwitcher(
+        duration: const Duration(milliseconds: 240),
+        child: SingleChildScrollView(
+          key: const ValueKey<AdminSection>(AdminSection.drivers),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              if (_errorMessage?.trim().isNotEmpty ?? false) ...<Widget>[
+                _buildRefreshNotice(_errorMessage!),
+                const SizedBox(height: 16),
+              ],
+              _buildDriversSection(),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_section == AdminSection.riders) {
+      if (_ridersOnlyLoading && _ridersOnly == null) {
+        return const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+      if ((_errorMessage?.trim().isNotEmpty ?? false) &&
+          _ridersOnly == null &&
+          !_ridersOnlyLoading) {
+        return _buildUnavailableState(
+          title: 'Unable to load riders right now',
+          message: _errorMessage!.trim(),
+        );
+      }
+      final ridersDataReady = _ridersOnly != null ||
+          (_snapshot != null && !_ridersOnlyLoading);
+      if (!_isLoading && ridersDataReady) {
+        return AnimatedSwitcher(
+          duration: const Duration(milliseconds: 240),
+          child: SingleChildScrollView(
+            key: const ValueKey<AdminSection>(AdminSection.riders),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (_errorMessage?.trim().isNotEmpty ?? false) ...<Widget>[
+                  _buildRefreshNotice(_errorMessage!),
+                  const SizedBox(height: 16),
+                ],
+                _buildRidersSection(snapshot: _snapshot),
+              ],
+            ),
+          ),
+        );
+      }
+    }
+
+    if (_section == AdminSection.withdrawals) {
+      if (_withdrawalsOnlyLoading && _withdrawalsOnly == null) {
+        return const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+      if ((_errorMessage?.trim().isNotEmpty ?? false) &&
+          _withdrawalsOnly == null &&
+          !_withdrawalsOnlyLoading) {
+        return _buildUnavailableState(
+          title: 'Unable to load withdrawals right now',
+          message: _errorMessage!.trim(),
+        );
+      }
+      if (_withdrawalsOnly != null) {
+        return AnimatedSwitcher(
+          duration: const Duration(milliseconds: 240),
+          child: SingleChildScrollView(
+            key: const ValueKey<AdminSection>(AdminSection.withdrawals),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (_withdrawalsOnlyLoading) ...<Widget>[
+                  const LinearProgressIndicator(minHeight: 3),
+                  const SizedBox(height: 12),
+                ],
+                if (_errorMessage?.trim().isNotEmpty ?? false) ...<Widget>[
+                  _buildRefreshNotice(_errorMessage!),
+                  const SizedBox(height: 16),
+                ],
+                _buildWithdrawalsSection(),
+              ],
+            ),
+          ),
+        );
+      }
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    if (_section == AdminSection.support) {
+      if (_supportTicketsOnlyLoading && _supportTicketsOnly == null) {
+        return const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+      if ((_errorMessage?.trim().isNotEmpty ?? false) &&
+          _supportTicketsOnly == null &&
+          !_supportTicketsOnlyLoading) {
+        return _buildUnavailableState(
+          title: 'Unable to load support inbox right now',
+          message: _errorMessage!.trim(),
+        );
+      }
+      if (_supportTicketsOnly != null) {
+        return AnimatedSwitcher(
+          duration: const Duration(milliseconds: 240),
+          child: SingleChildScrollView(
+            key: const ValueKey<AdminSection>(AdminSection.support),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (_supportTicketsOnlyLoading) ...<Widget>[
+                  const LinearProgressIndicator(minHeight: 3),
+                  const SizedBox(height: 12),
+                ],
+                if (_errorMessage?.trim().isNotEmpty ?? false) ...<Widget>[
+                  _buildRefreshNotice(_errorMessage!),
+                  const SizedBox(height: 16),
+                ],
+                _buildSupportTicketsAdminSection(),
+              ],
+            ),
+          ),
+        );
+      }
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
     if (_snapshot == null && _isLoading) {
       return AdminEmptyState(
         title: 'Loading ${_section.label.toLowerCase()}',
@@ -431,26 +1566,40 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             ],
             switch (_section) {
               AdminSection.dashboard => _buildDashboardSection(_snapshot!),
-              AdminSection.riders => _buildRidersSection(_snapshot!),
-              AdminSection.drivers => _buildDriversSection(_snapshot!),
-              AdminSection.trips => _buildTripsSection(_snapshot!),
+              AdminSection.riders => _buildRidersSection(snapshot: _snapshot!),
+              AdminSection.drivers => _buildDriversSection(),
               AdminSection.finance => _buildFinanceSection(_snapshot!),
-              AdminSection.withdrawals => _buildWithdrawalsSection(_snapshot!),
+              AdminSection.withdrawals =>
+                _withdrawalsOnly != null ? _buildWithdrawalsSection() : const SizedBox.shrink(),
               AdminSection.pricing => _buildPricingSection(_snapshot!),
               AdminSection.subscriptions => _buildSubscriptionsTab(_snapshot!),
               AdminSection.verification =>
-                _buildVerificationSection(_snapshot!),
-              AdminSection.support => SupportWorkspaceScreen(
-                  session: SupportSession.adminOverride(
-                    uid: widget.session.uid,
-                    email: widget.session.email,
-                    displayName: widget.session.displayName,
-                    role: 'admin',
-                    accessMode: widget.session.accessMode,
+                  AdminVerificationCenterScreen(session: widget.session),
+              AdminSection.support =>
+                _supportTicketsOnly != null ? _buildSupportTicketsAdminSection() : const SizedBox.shrink(),
+              AdminSection.regions =>
+                  AdminRolloutRegionsScreen(session: widget.session),
+              AdminSection.serviceAreas =>
+                  AdminServiceAreasScreen(
+                    dataService: _dataService,
+                    session: widget.session,
                   ),
-                  embeddedInAdmin: true,
-                  initialView: SupportInboxView.dashboard,
-                ),
+              AdminSection.merchants =>
+                  AdminMerchantsScreen(session: widget.session),
+              AdminSection.trips => AdminLiveOperationsScreen(
+                    dataService: _dataService,
+                    session: widget.session,
+                  ),
+              AdminSection.liveOperations =>
+                  AdminLiveOpsDashboardScreen(
+                    dataService: _dataService,
+                  ),
+              AdminSection.systemHealth => AdminSystemHealthScreen(
+                    dataService: _dataService,
+                  ),
+              AdminSection.auditLogs => AdminAuditLogsScreen(
+                    dataService: _dataService,
+                  ),
               AdminSection.settings => _buildSettingsSection(_snapshot!),
             },
           ],
@@ -467,7 +1616,34 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         data: AdminMetricCardData(
           label: 'Total riders',
           value: formatAdminCompactNumber(metrics.totalRiders),
-          caption: 'Registered rider accounts across the platform.',
+          caption:
+              'Rider accounts with a usable display identity, a contact channel (phone or email), and a known signup timestamp. Internal, merchant, driver, and test accounts are excluded from this count.',
+        ),
+      ),
+      _MetricCardEntry(
+        icon: Icons.person_off_outlined,
+        data: AdminMetricCardData(
+          label: 'Incomplete registrations',
+          value: formatAdminCompactNumber(metrics.incompleteRiderRegistrations),
+          caption:
+              'Highest sample across directory sources: accounts that look like riders but are still missing minimum profile fields.',
+        ),
+      ),
+      _MetricCardEntry(
+        icon: Icons.flag_outlined,
+        data: AdminMetricCardData(
+          label: 'Pending onboarding',
+          value: formatAdminCompactNumber(metrics.pendingOnboarding),
+          caption:
+              'Completed profile rows where onboarding is explicitly still incomplete, when that signal exists.',
+        ),
+      ),
+      _MetricCardEntry(
+        icon: Icons.storefront_outlined,
+        data: AdminMetricCardData(
+          label: 'Total merchants',
+          value: formatAdminCompactNumber(metrics.totalMerchants),
+          caption: 'Merchant storefront profiles in Firestore.',
         ),
       ),
       _MetricCardEntry(
@@ -623,14 +1799,16 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
   }
 
-  Widget _buildRidersSection(AdminPanelSnapshot snapshot) {
+  Widget _buildRidersSection({AdminPanelSnapshot? snapshot}) {
     debugPrint(
-      '[AdminPanel] riders section entered adminUid=${widget.session.uid} total=${snapshot.riders.length} query="${_riderSearchController.text.trim()}" cityFilter=$_riderCityFilter statusFilter=$_riderStatusFilter signupFilter=$_riderSignupFilter',
+      '[AdminPanel] riders section entered adminUid=${widget.session.uid} query="${_riderSearchController.text.trim()}" cityFilter=$_riderCityFilter statusFilter=$_riderStatusFilter signupFilter=$_riderSignupFilter profileFilter=$_riderProfileCompletenessFilter',
     );
+    final allRiders = _ridersOnly ?? snapshot?.riders ?? <AdminRiderRecord>[];
+    debugPrint('[AdminPanel] riders section total=${allRiders.length}');
     final cities = _cityOptions(
-        snapshot.riders.map((AdminRiderRecord rider) => rider.city));
+        allRiders.map((AdminRiderRecord rider) => rider.city));
     final query = _riderSearchController.text.trim().toLowerCase();
-    final filtered = snapshot.riders.where((AdminRiderRecord rider) {
+    final filtered = allRiders.where((AdminRiderRecord rider) {
       final matchesQuery = query.isEmpty ||
           rider.id.toLowerCase().contains(query) ||
           rider.name.toLowerCase().contains(query) ||
@@ -650,13 +1828,20 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                 .isAfter(DateTime.now().subtract(const Duration(days: 30))),
         _ => true,
       };
+      final bool matchesProfileCompleteness = switch (
+          _riderProfileCompletenessFilter) {
+        'Incomplete registrations' => !rider.profileCompleted,
+        'All' => true,
+        _ => rider.profileCompleted,
+      };
       return matchesQuery &&
           matchesCity &&
           matchesStatus &&
-          matchesSignupWindow;
+          matchesSignupWindow &&
+          matchesProfileCompleteness;
     }).toList();
 
-    if (snapshot.riders.isEmpty) {
+    if (allRiders.isEmpty) {
       debugPrint('[AdminPanel] riders section empty source=users');
       return const AdminEmptyState(
         title: 'No rider records yet',
@@ -672,7 +1857,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         const AdminSectionHeader(
           title: 'Riders management',
           description:
-              'Search riders, review trip activity, inspect payment context, and apply account-level status controls.',
+              'Live rider directory (server-paged). Open a row for full profile context, identity review, account controls, or flag support to contact the rider.',
         ),
         const SizedBox(height: 16),
         _buildFilterBar(
@@ -683,16 +1868,31 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                 controller: _riderSearchController,
                 hintText:
                     'Search riders by name, phone, email, city, or rider ID',
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) {
+                  setState(() {});
+                  if (_ridersOnly != null) {
+                    _riderSearchDebounce?.cancel();
+                    _riderSearchDebounce = Timer(const Duration(milliseconds: 350), () {
+                      if (mounted) {
+                        unawaited(_loadRidersOnly(resetServerCursors: true));
+                      }
+                    });
+                  }
+                },
               ),
             ),
             Expanded(
               child: AdminFilterDropdown<String>(
                 value: _riderCityFilter,
                 items: _dropdownItems(<String>['All', ...cities]),
-                onChanged: (String? value) => setState(() {
-                  _riderCityFilter = value ?? 'All';
-                }),
+                onChanged: (String? value) {
+                  setState(() {
+                    _riderCityFilter = value ?? 'All';
+                  });
+                  if (_ridersOnly != null) {
+                    unawaited(_loadRidersOnly());
+                  }
+                },
               ),
             ),
             Expanded(
@@ -704,9 +1904,33 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   'suspended',
                   'inactive',
                 ]),
-                onChanged: (String? value) => setState(() {
-                  _riderStatusFilter = value ?? 'All';
-                }),
+                onChanged: (String? value) {
+                  setState(() {
+                    _riderStatusFilter = value ?? 'All';
+                  });
+                  if (_ridersOnly != null) {
+                    unawaited(_loadRidersOnly());
+                  }
+                },
+              ),
+            ),
+            Expanded(
+              child: AdminFilterDropdown<String>(
+                value: _riderProfileCompletenessFilter,
+                items: _dropdownItems(<String>[
+                  'Completed profiles',
+                  'Incomplete registrations',
+                  'All',
+                ]),
+                onChanged: (String? value) {
+                  setState(() {
+                    _riderProfileCompletenessFilter =
+                        value ?? 'Completed profiles';
+                  });
+                  if (_ridersOnly != null) {
+                    unawaited(_loadRidersOnly(resetServerCursors: true));
+                  }
+                },
               ),
             ),
             Expanded(
@@ -717,9 +1941,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   'Last 7 days',
                   'Last 30 days',
                 ]),
-                onChanged: (String? value) => setState(() {
-                  _riderSignupFilter = value ?? 'All time';
-                }),
+                onChanged: (String? value) {
+                  setState(() {
+                    _riderSignupFilter = value ?? 'All time';
+                  });
+                  if (_ridersOnly != null) {
+                    unawaited(_loadRidersOnly(resetServerCursors: true));
+                  }
+                },
               ),
             ),
           ],
@@ -738,7 +1967,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               ),
               const SizedBox(width: 10),
               AdminStatusChip(
-                '${snapshot.riders.length} live records',
+                '${allRiders.length} live records',
                 color: AdminThemeTokens.info,
               ),
             ],
@@ -762,9 +1991,23 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: <Widget>[
-                      Text(
-                        rider.name,
-                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              rider.name,
+                              style: const TextStyle(fontWeight: FontWeight.w800),
+                            ),
+                          ),
+                          if (!rider.profileCompleted) ...<Widget>[
+                            const SizedBox(width: 8),
+                            AdminStatusChip(
+                              'Incomplete',
+                              color: AdminThemeTokens.warning,
+                            ),
+                          ],
+                        ],
                       ),
                       Text(rider.phone.isNotEmpty ? rider.phone : rider.id),
                     ],
@@ -778,11 +2021,49 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                 )),
                 DataCell(Text(formatAdminCurrency(rider.walletBalance))),
                 DataCell(Text(formatAdminDateTime(rider.lastActiveAt))),
-                DataCell(_riderAccountActions(rider)),
+                DataCell(
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: _riderAccountActions(rider),
+                  ),
+                ),
               ],
             );
           }).toList(),
         ),
+        if (_ridersOnly != null) ...<Widget>[
+          const SizedBox(height: 12),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  'Server paging: up to $_driverPageSize riders per request '
+                  '(signup date filter applies on this page only).',
+                  style: const TextStyle(
+                    color: AdminThemeTokens.slate,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: (_ridersOnlyLoading ||
+                        _ridersServerCursorStack.length <= 1)
+                    ? null
+                    : _onRidersServerPrevPage,
+                child: const Text('Previous server page'),
+              ),
+              TextButton(
+                onPressed: (!_ridersServerHasMore ||
+                        _ridersOnlyLoading ||
+                        (_ridersServerNextCursor ?? '').isEmpty)
+                    ? null
+                    : _onRidersServerNextPage,
+                child: const Text('Next server page'),
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -834,7 +2115,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             const SizedBox(height: 18),
             AdminPrimaryButton(
               label: 'Retry',
-              onPressed: _loadSnapshot,
+              onPressed: _refresh,
               icon: Icons.refresh_rounded,
             ),
           ],
@@ -889,7 +2170,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           const SizedBox(width: 12),
           AdminGhostButton(
             label: 'Retry',
-            onPressed: _loadSnapshot,
+            onPressed: _refresh,
             icon: Icons.refresh_rounded,
           ),
         ],
@@ -914,28 +2195,44 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         message.contains('permission denied');
   }
 
-  Widget _buildDriversSection(AdminPanelSnapshot snapshot) {
-    final cities = _cityOptions(
-        snapshot.drivers.map((AdminDriverRecord driver) => driver.city));
-    final query = _driverSearchController.text.trim().toLowerCase();
-    final filtered = snapshot.drivers.where((AdminDriverRecord driver) {
-      final matchesQuery = query.isEmpty ||
-          driver.id.toLowerCase().contains(query) ||
-          driver.name.toLowerCase().contains(query) ||
-          driver.phone.toLowerCase().contains(query) ||
-          driver.city.toLowerCase().contains(query) ||
-          driver.vehicleName.toLowerCase().contains(query) ||
-          driver.plateNumber.toLowerCase().contains(query);
-      final matchesCity =
-          _driverCityFilter == 'All' || driver.city == _driverCityFilter;
-      final matchesStatus = _driverStatusFilter == 'All' ||
-          driver.accountStatus == _driverStatusFilter;
-      final matchesModel = _driverModelFilter == 'All' ||
-          driver.monetizationModel == _driverModelFilter;
-      return matchesQuery && matchesCity && matchesStatus && matchesModel;
-    }).toList();
+  Widget _buildDriversSection() {
+    // Use pre-computed cached data — filtering runs in _recomputeDriverFilter(),
+    // not here inside build(), so this method is cheap per frame.
+    final allDrivers = _driversOnly ?? _snapshot?.drivers ?? <AdminDriverRecord>[];
+    final cities = _cityOptions(allDrivers.map((d) => d.city));
+    final stateOrRegions = _cityOptions(allDrivers.map((d) => d.stateOrRegion));
 
-    if (snapshot.drivers.isEmpty) {
+    // Use cached filtered list; fall back to computing inline only on first render
+    // before _recomputeDriverFilter has had a chance to run.
+    final filtered = _cachedFilteredDrivers.isNotEmpty || allDrivers.isEmpty
+        ? _cachedFilteredDrivers
+        : allDrivers;
+
+    final totalFiltered = filtered.length;
+    final pageCount =
+        totalFiltered == 0 ? 1 : ((totalFiltered - 1) ~/ _driverPageSize) + 1;
+    final safePageIndex =
+        pageCount > 0 ? _driverPageIndex.clamp(0, pageCount - 1) : 0;
+    final start = (safePageIndex * _driverPageSize).clamp(0, totalFiltered);
+    final end = (start + _driverPageSize).clamp(0, totalFiltered);
+    // Hard cap: never render more than _driverPageSize rows per frame.
+    final pageSlice =
+        start >= end ? <AdminDriverRecord>[] : filtered.sublist(start, end);
+    adminPerfWarnRowBudget(
+      surface: 'drivers_filtered_materialized',
+      rowCount: filtered.length,
+    );
+    if (safePageIndex != _driverPageIndex) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {
+            _driverPageIndex = safePageIndex;
+          });
+        }
+      });
+    }
+
+    if (allDrivers.isEmpty) {
       return const AdminEmptyState(
         title: 'No driver records yet',
         message:
@@ -950,7 +2247,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         const AdminSectionHeader(
           title: 'Drivers management',
           description:
-              'Review verification, online status, wallets, withdrawals, trip performance, and commission versus subscription monetization from one place.',
+              'Server-paged driver directory. Open a row for the profile drawer (overview, verification, wallet, trips, subscription, violations, notes, audit). Approve verification for go-online; use warn / suspend / delete as needed; Flag for support queues human follow-up.',
         ),
         const SizedBox(height: 16),
         _buildFilterBar(
@@ -960,17 +2257,57 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               child: AdminTextFilterField(
                 controller: _driverSearchController,
                 hintText:
-                    'Search drivers by name, phone, city, vehicle, plate, or driver ID',
-                onChanged: (_) => setState(() {}),
+                    'Search drivers by name, phone, city, state, vehicle, plate, or driver ID',
+                onChanged: (_) {
+                  _driverSearchDebounce?.cancel();
+                  _driverSearchDebounce = Timer(const Duration(milliseconds: 350), () {
+                    if (mounted) {
+                      _recomputeDriverFilter();
+                      if ((_driversOnly != null ||
+                              (_section == AdminSection.drivers &&
+                                  _snapshot == null)) &&
+                          !AdminDriversRouteDebug.driversRouteFakeLocalDrivers) {
+                        unawaited(_loadDriversOnly(resetServerCursors: true));
+                      }
+                    }
+                  });
+                },
               ),
             ),
             Expanded(
               child: AdminFilterDropdown<String>(
                 value: _driverCityFilter,
                 items: _dropdownItems(<String>['All', ...cities]),
-                onChanged: (String? value) => setState(() {
-                  _driverCityFilter = value ?? 'All';
-                }),
+                onChanged: (String? value) {
+                  setState(() {
+                    _driverCityFilter = value ?? 'All';
+                  });
+                  _recomputeDriverFilter();
+                  if ((_driversOnly != null ||
+                          (_section == AdminSection.drivers &&
+                              _snapshot == null)) &&
+                      !AdminDriversRouteDebug.driversRouteFakeLocalDrivers) {
+                    unawaited(_loadDriversOnly(resetServerCursors: true));
+                  }
+                },
+              ),
+            ),
+            Expanded(
+              child: AdminFilterDropdown<String>(
+                value: _driverStateOrRegionFilter,
+                items: _dropdownItems(<String>['All', ...stateOrRegions]),
+                onChanged: (String? value) {
+                  setState(() {
+                    _driverStateOrRegionFilter = value ?? 'All';
+                  });
+                  _recomputeDriverFilter();
+                  if ((_driversOnly != null ||
+                          (_section == AdminSection.drivers &&
+                              _snapshot == null)) &&
+                      !AdminDriversRouteDebug.driversRouteFakeLocalDrivers) {
+                    unawaited(_loadDriversOnly(resetServerCursors: true));
+                  }
+                },
               ),
             ),
             Expanded(
@@ -982,9 +2319,18 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   'deactivated',
                   'suspended',
                 ]),
-                onChanged: (String? value) => setState(() {
-                  _driverStatusFilter = value ?? 'All';
-                }),
+                onChanged: (String? value) {
+                  setState(() {
+                    _driverStatusFilter = value ?? 'All';
+                  });
+                  _recomputeDriverFilter();
+                  if ((_driversOnly != null ||
+                          (_section == AdminSection.drivers &&
+                              _snapshot == null)) &&
+                      !AdminDriversRouteDebug.driversRouteFakeLocalDrivers) {
+                    unawaited(_loadDriversOnly(resetServerCursors: true));
+                  }
+                },
               ),
             ),
             Expanded(
@@ -995,9 +2341,18 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   'commission',
                   'subscription',
                 ]),
-                onChanged: (String? value) => setState(() {
-                  _driverModelFilter = value ?? 'All';
-                }),
+                onChanged: (String? value) {
+                  setState(() {
+                    _driverModelFilter = value ?? 'All';
+                  });
+                  _recomputeDriverFilter();
+                  if ((_driversOnly != null ||
+                          (_section == AdminSection.drivers &&
+                              _snapshot == null)) &&
+                      !AdminDriversRouteDebug.driversRouteFakeLocalDrivers) {
+                    unawaited(_loadDriversOnly(resetServerCursors: true));
+                  }
+                },
               ),
             ),
           ],
@@ -1005,7 +2360,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         const SizedBox(height: 16),
         AdminDataTableCard(
           heading: Text(
-            '${filtered.length} drivers',
+            'Showing ${pageSlice.length} of $totalFiltered matching drivers'
+            '${totalFiltered > _driverPageSize ? ' · page ${safePageIndex + 1}/$pageCount' : ''}',
             style: const TextStyle(
               color: AdminThemeTokens.ink,
               fontSize: 18,
@@ -1015,6 +2371,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           columns: const <DataColumn>[
             DataColumn(label: Text('Driver')),
             DataColumn(label: Text('City')),
+            DataColumn(label: Text('State / region')),
             DataColumn(label: Text('Account')),
             DataColumn(label: Text('Verification')),
             DataColumn(label: Text('Vehicle')),
@@ -1024,7 +2381,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             DataColumn(label: Text('Model')),
             DataColumn(label: Text('Actions')),
           ],
-          rows: filtered.map((AdminDriverRecord driver) {
+          rows: pageSlice.map((AdminDriverRecord driver) {
             return DataRow(
               onSelectChanged: (_) => _showDriverDialog(driver),
               cells: <DataCell>[
@@ -1043,6 +2400,13 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                 ),
                 DataCell(
                     Text(driver.city.isNotEmpty ? driver.city : 'Not set')),
+                DataCell(
+                  Text(
+                    driver.stateOrRegion.isNotEmpty
+                        ? driver.stateOrRegion
+                        : '—',
+                  ),
+                ),
                 DataCell(AdminStatusChip(driver.accountStatus)),
                 DataCell(AdminStatusChip(driver.verificationStatus)),
                 DataCell(Text(
@@ -1068,136 +2432,72 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             );
           }).toList(),
         ),
-      ],
-    );
-  }
-
-  Widget _buildTripsSection(AdminPanelSnapshot snapshot) {
-    final cities =
-        _cityOptions(snapshot.trips.map((AdminTripRecord trip) => trip.city));
-    final query = _tripSearchController.text.trim().toLowerCase();
-    final filtered = snapshot.trips.where((AdminTripRecord trip) {
-      final matchesQuery = query.isEmpty ||
-          trip.id.toLowerCase().contains(query) ||
-          trip.riderName.toLowerCase().contains(query) ||
-          trip.driverName.toLowerCase().contains(query) ||
-          trip.riderPhone.toLowerCase().contains(query) ||
-          trip.driverPhone.toLowerCase().contains(query) ||
-          trip.city.toLowerCase().contains(query);
-      final matchesStatus =
-          _tripStatusFilter == 'All' || trip.status == _tripStatusFilter;
-      final matchesCity =
-          _tripCityFilter == 'All' || trip.city == _tripCityFilter;
-      return matchesQuery && matchesStatus && matchesCity;
-    }).toList();
-
-    if (snapshot.trips.isEmpty) {
-      return const AdminEmptyState(
-        title: 'No trip records yet',
-        message:
-            'Trip management reads live ride data from Realtime Database. When records exist, you will see lifecycle status, settlement details, route logs, and timestamps here.',
-        icon: Icons.route_outlined,
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        const AdminSectionHeader(
-          title: 'Trips management',
-          description:
-              'Search by trip ID, rider, driver, phone number, or city, then inspect lifecycle timestamps, settlement outcomes, and route monitoring records.',
-        ),
-        const SizedBox(height: 16),
-        _buildFilterBar(
-          children: <Widget>[
-            Expanded(
-              flex: 2,
-              child: AdminTextFilterField(
-                controller: _tripSearchController,
-                hintText: 'Search trip ID, rider, driver, phone, or city',
-                onChanged: (_) => setState(() {}),
+        if (totalFiltered > _driverPageSize) ...<Widget>[
+          const SizedBox(height: 12),
+          Row(
+            children: <Widget>[
+              Text(
+                'Showing ${pageSlice.length} rows per page',
+                style: const TextStyle(
+                  color: AdminThemeTokens.slate,
+                  fontSize: 13,
+                ),
               ),
-            ),
-            Expanded(
-              child: AdminFilterDropdown<String>(
-                value: _tripStatusFilter,
-                items: _dropdownItems(<String>[
-                  'All',
-                  'requested',
-                  'assigned',
-                  'accepted',
-                  'arrived',
-                  'started',
-                  'completed',
-                  'cancelled',
-                ]),
-                onChanged: (String? value) => setState(() {
-                  _tripStatusFilter = value ?? 'All';
-                }),
+              const Spacer(),
+              TextButton(
+                onPressed: _driverPageIndex <= 0
+                    ? null
+                    : () => setState(() {
+                          _driverPageIndex -= 1;
+                        }),
+                child: const Text('Previous'),
               ),
-            ),
-            Expanded(
-              child: AdminFilterDropdown<String>(
-                value: _tripCityFilter,
-                items: _dropdownItems(<String>['All', ...cities]),
-                onChanged: (String? value) => setState(() {
-                  _tripCityFilter = value ?? 'All';
-                }),
+              TextButton(
+                onPressed: _driverPageIndex >= pageCount - 1
+                    ? null
+                    : () => setState(() {
+                          _driverPageIndex += 1;
+                        }),
+                child: const Text('Next'),
               ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        AdminDataTableCard(
-          heading: Text(
-            '${filtered.length} trips',
-            style: const TextStyle(
-              color: AdminThemeTokens.ink,
-              fontSize: 18,
-              fontWeight: FontWeight.w800,
-            ),
+            ],
           ),
-          columns: const <DataColumn>[
-            DataColumn(label: Text('Trip')),
-            DataColumn(label: Text('Status')),
-            DataColumn(label: Text('City')),
-            DataColumn(label: Text('Rider')),
-            DataColumn(label: Text('Driver')),
-            DataColumn(label: Text('Fare')),
-            DataColumn(label: Text('Model')),
-            DataColumn(label: Text('Payment')),
-            DataColumn(label: Text('Created')),
-          ],
-          rows: filtered.map((AdminTripRecord trip) {
-            return DataRow(
-              onSelectChanged: (_) => _showTripDialog(trip),
-              cells: <DataCell>[
-                DataCell(
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: <Widget>[
-                      Text(
-                        trip.id,
-                        style: const TextStyle(fontWeight: FontWeight.w800),
-                      ),
-                      Text(sentenceCaseStatus(trip.serviceType)),
-                    ],
+        ],
+        if (_driversOnly != null &&
+            !AdminDriversRouteDebug.driversRouteFakeLocalDrivers &&
+            !AdminDriversRouteDebug.useLegacyFullDriversTreeCallable) ...<Widget>[
+          const SizedBox(height: 12),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  'Server paging: up to $_driverPageSize drivers per request '
+                  '(filters apply to the loaded page only).',
+                  style: const TextStyle(
+                    color: AdminThemeTokens.slate,
+                    fontSize: 12,
+                    height: 1.35,
                   ),
                 ),
-                DataCell(AdminStatusChip(trip.status)),
-                DataCell(Text(trip.city.isNotEmpty ? trip.city : 'Not set')),
-                DataCell(Text(trip.riderName)),
-                DataCell(Text(trip.driverName)),
-                DataCell(Text(formatAdminCurrency(trip.fareAmount))),
-                DataCell(AdminStatusChip(trip.appliedMonetizationModel)),
-                DataCell(Text(trip.paymentMethod)),
-                DataCell(Text(formatAdminDateTime(trip.createdAt))),
-              ],
-            );
-          }).toList(),
-        ),
+              ),
+              TextButton(
+                onPressed: (_driversOnlyLoading ||
+                        _driversServerCursorStack.length <= 1)
+                    ? null
+                    : _onDriversServerPrevPage,
+                child: const Text('Previous server page'),
+              ),
+              TextButton(
+                onPressed: (!_driversServerHasMore ||
+                        _driversOnlyLoading ||
+                        (_driversServerNextCursor ?? '').isEmpty)
+                    ? null
+                    : _onDriversServerNextPage,
+                child: const Text('Next server page'),
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -1282,13 +2582,56 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
   }
 
-  Widget _buildWithdrawalsSection(AdminPanelSnapshot snapshot) {
-    if (snapshot.withdrawals.isEmpty) {
-      return const AdminEmptyState(
-        title: 'No withdrawal requests yet',
-        message:
-            'The withdrawals workflow is live and ready. Once drivers submit payout requests, you can approve, process, pay, fail, and add payout references from this screen.',
-        icon: Icons.account_balance_wallet_outlined,
+  Widget _buildWithdrawalsSection() {
+    final rows = _withdrawalsOnly ?? const <AdminWithdrawalRecord>[];
+    adminPerfWarnRowBudget(surface: 'withdrawals_table', rowCount: rows.length);
+    final configured =
+        (_snapshot?.settings.withdrawalNoticeText ?? '').trim();
+    final noticeText = configured.isNotEmpty
+        ? configured
+        : DriverFinanceService.payoutNoticeText;
+
+    if (rows.isEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const AdminSectionHeader(
+            title: 'Driver withdrawals',
+            description:
+                'Server-paged payout queue (50 per page). Search by driver id or name; filter by status.',
+          ),
+          const SizedBox(height: 16),
+          AdminSurfaceCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Withdrawal policy',
+                  style: TextStyle(
+                    color: AdminThemeTokens.ink,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  noticeText,
+                  style: const TextStyle(
+                    color: Color(0xFF6D675E),
+                    height: 1.55,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          const AdminEmptyState(
+            title: 'No withdrawal requests on this page',
+            message:
+                'Try another status filter, clear search, or use Next page if more requests exist beyond this scan window.',
+            icon: Icons.account_balance_wallet_outlined,
+          ),
+        ],
       );
     }
 
@@ -1298,7 +2641,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         const AdminSectionHeader(
           title: 'Driver withdrawals',
           description:
-              'Review payout requests, bank details, references, and processing states, then update status directly from the admin console.',
+              'Callable-backed queue: 50 rows per request with server-side search and status filters.',
         ),
         const SizedBox(height: 16),
         AdminSurfaceCard(
@@ -1315,7 +2658,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               ),
               const SizedBox(height: 10),
               Text(
-                snapshot.settings.withdrawalNoticeText,
+                noticeText,
                 style: const TextStyle(
                   color: Color(0xFF6D675E),
                   height: 1.55,
@@ -1325,37 +2668,528 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           ),
         ),
         const SizedBox(height: 16),
+        _buildFilterBar(
+          children: <Widget>[
+            Expanded(
+              flex: 2,
+              child: AdminTextFilterField(
+                controller: _withdrawalSearchController,
+                hintText:
+                    'Search withdrawal id, driver uid, merchant id, or name',
+                onChanged: (_) => _scheduleWithdrawalSearchReload(),
+              ),
+            ),
+            Expanded(
+              child: AdminFilterDropdown<String>(
+                value: _withdrawalStatusFilter,
+                items: _dropdownItems(<String>[
+                  'All',
+                  'pending',
+                  'processing',
+                  'paid',
+                  'failed',
+                ]),
+                onChanged: (String? value) {
+                  setState(() {
+                    _withdrawalStatusFilter = value ?? 'All';
+                  });
+                  _beginWithdrawalsSectionLoad();
+                },
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
         AdminDataTableCard(
+          heading: Text(
+            'Withdrawals (${rows.length} on this page)',
+            style: const TextStyle(
+              color: AdminThemeTokens.ink,
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
           columns: const <DataColumn>[
-            DataColumn(label: Text('Driver')),
+            DataColumn(label: Text('Entity')),
+            DataColumn(label: Text('Party')),
             DataColumn(label: Text('Amount')),
-            DataColumn(label: Text('Status')),
+            DataColumn(label: Text('Payout destination')),
             DataColumn(label: Text('Requested')),
-            DataColumn(label: Text('Bank')),
+            DataColumn(label: Text('Status')),
             DataColumn(label: Text('Reference')),
           ],
-          rows: snapshot.withdrawals.map((AdminWithdrawalRecord item) {
+          rows: rows.map((AdminWithdrawalRecord item) {
+            final bool missingDriverDest = item.entityType == 'driver' &&
+                !item.hasPayoutDestination;
+            final String partyLabel = item.entityType == 'merchant'
+                ? (item.merchantId.isNotEmpty ? item.merchantId : 'Merchant')
+                : item.driverName;
+            final String partySub = item.entityType == 'merchant'
+                ? (item.driverName.isNotEmpty ? item.driverName : '')
+                : item.driverId;
             return DataRow(
               onSelectChanged: (_) => _showWithdrawalDialog(item),
               cells: <DataCell>[
-                DataCell(Text(item.driverName)),
+                DataCell(Text(item.entityType)),
+                DataCell(
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[
+                      Text(
+                        partyLabel,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      if (partySub.isNotEmpty)
+                        Text(
+                          partySub,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AdminThemeTokens.slate,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
                 DataCell(Text(formatAdminCurrency(item.amount))),
-                DataCell(AdminStatusChip(item.status)),
+                DataCell(
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[
+                      if (missingDriverDest)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: AdminStatusChip(
+                            'Missing withdrawal destination',
+                            color: AdminThemeTokens.warning,
+                          ),
+                        ),
+                      Text(
+                        item.bankName.isNotEmpty ? item.bankName : '—',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      Text(
+                        item.accountNumber.isNotEmpty
+                            ? item.accountNumber
+                            : '—',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                      Text(
+                        item.accountName.isNotEmpty ? item.accountName : '—',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
                 DataCell(Text(formatAdminDateTime(item.requestDate))),
+                DataCell(AdminStatusChip(item.status)),
                 DataCell(Text(
-                  item.bankName.isNotEmpty
-                      ? '${item.bankName} • ${item.accountNumber}'
-                      : 'Not available',
+                  item.payoutReference.isNotEmpty
+                      ? item.payoutReference
+                      : '—',
                 )),
-                DataCell(Text(item.payoutReference.isNotEmpty
-                    ? item.payoutReference
-                    : 'Awaiting reference')),
               ],
             );
           }).toList(),
         ),
+        const SizedBox(height: 12),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                'Server paging: up to $_driverPageSize withdrawals per request.',
+                style: const TextStyle(
+                  color: AdminThemeTokens.slate,
+                  fontSize: 12,
+                  height: 1.35,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: (_withdrawalsOnlyLoading ||
+                      _withdrawalsServerCursorStack.length <= 1)
+                  ? null
+                  : _onWithdrawalsServerPrevPage,
+              child: const Text('Previous'),
+            ),
+            TextButton(
+              onPressed: (!_withdrawalsServerHasMore ||
+                      _withdrawalsOnlyLoading ||
+                      (_withdrawalsServerNextCursor ?? '').isEmpty)
+                  ? null
+                  : _onWithdrawalsServerNextPage,
+              child: const Text('Next'),
+            ),
+          ],
+        ),
       ],
     );
+  }
+
+  void _scheduleWithdrawalSearchReload() {
+    _withdrawalSearchDebounce?.cancel();
+    _withdrawalSearchDebounce = Timer(const Duration(milliseconds: 450), () {
+      if (!mounted || _section != AdminSection.withdrawals) {
+        return;
+      }
+      _beginWithdrawalsSectionLoad();
+    });
+  }
+
+  void _scheduleSupportInboxSearchReload() {
+    _supportInboxSearchDebounce?.cancel();
+    _supportInboxSearchDebounce = Timer(const Duration(milliseconds: 450), () {
+      if (!mounted || _section != AdminSection.support) {
+        return;
+      }
+      _beginSupportTicketsSectionLoad();
+    });
+  }
+
+  Widget _buildSupportTicketsAdminSection() {
+    final rows = _supportTicketsOnly ?? const <AdminSupportTicketListItem>[];
+    adminPerfWarnRowBudget(surface: 'support_inbox_table', rowCount: rows.length);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        const AdminSectionHeader(
+          title: 'Support tickets',
+          description:
+              'Callable-backed inbox (50 per page). Search ticket id, subject, or creator uid; filter by status.',
+        ),
+        const SizedBox(height: 16),
+        _buildFilterBar(
+          children: <Widget>[
+            Expanded(
+              flex: 2,
+              child: AdminTextFilterField(
+                controller: _supportSearchController,
+                hintText: 'Search ticket id, subject, or user id',
+                onChanged: (_) => _scheduleSupportInboxSearchReload(),
+              ),
+            ),
+            Expanded(
+              child: AdminFilterDropdown<String>(
+                value: _supportTicketStatusFilter,
+                items: _dropdownItems(<String>[
+                  'All',
+                  'open',
+                  'pending',
+                  'in_progress',
+                  'resolved',
+                  'closed',
+                ]),
+                onChanged: (String? value) {
+                  setState(() {
+                    _supportTicketStatusFilter = value ?? 'All';
+                  });
+                  _beginSupportTicketsSectionLoad();
+                },
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        if (rows.isEmpty)
+          const AdminEmptyState(
+            title: 'No tickets on this page',
+            message:
+                'Adjust filters or step through pages — large inboxes are scanned in bounded batches on the server.',
+            icon: Icons.support_agent_outlined,
+          )
+        else
+          AdminDataTableCard(
+            heading: Text(
+              'Tickets (${rows.length} on this page)',
+              style: const TextStyle(
+                color: AdminThemeTokens.ink,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            columns: const <DataColumn>[
+              DataColumn(label: Text('Ticket')),
+              DataColumn(label: Text('Status')),
+              DataColumn(label: Text('Subject')),
+              DataColumn(label: Text('Ride')),
+              DataColumn(label: Text('Created by')),
+              DataColumn(label: Text('Updated')),
+            ],
+            rows: rows.map((AdminSupportTicketListItem t) {
+              return DataRow(
+                onSelectChanged: (_) =>
+                    unawaited(_showSupportTicketAdminDetail(t)),
+                cells: <DataCell>[
+                  DataCell(Text(t.id, style: const TextStyle(fontWeight: FontWeight.w700))),
+                  DataCell(AdminStatusChip(t.status)),
+                  DataCell(Text(
+                    t.subject.isNotEmpty ? t.subject : '—',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  )),
+                  DataCell(Text(t.rideId.isNotEmpty ? t.rideId : '—')),
+                  DataCell(Text(t.createdByUserId.isNotEmpty ? t.createdByUserId : '—')),
+                  DataCell(Text(
+                    t.updatedAtMs > 0
+                        ? formatAdminDateTime(
+                            DateTime.fromMillisecondsSinceEpoch(t.updatedAtMs),
+                          )
+                        : '—',
+                  )),
+                ],
+              );
+            }).toList(),
+          ),
+        const SizedBox(height: 12),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                'Server paging: up to $_driverPageSize tickets per request.',
+                style: const TextStyle(
+                  color: AdminThemeTokens.slate,
+                  fontSize: 12,
+                  height: 1.35,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: (_supportTicketsOnlyLoading ||
+                      _supportTicketsServerCursorStack.length <= 1)
+                  ? null
+                  : _onSupportTicketsServerPrevPage,
+              child: const Text('Previous'),
+            ),
+            TextButton(
+              onPressed: (!_supportTicketsServerHasMore ||
+                      _supportTicketsOnlyLoading ||
+                      (_supportTicketsServerNextCursor ?? '').isEmpty)
+                  ? null
+                  : _onSupportTicketsServerNextPage,
+              child: const Text('Next'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showSupportTicketAdminDetail(
+    AdminSupportTicketListItem item,
+  ) async {
+    if (!mounted) {
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext ctx) {
+        return const AlertDialog(
+          content: SizedBox(
+            width: 360,
+            height: 120,
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        );
+      },
+    );
+
+    final detail = await _dataService.fetchSupportTicketForAdmin(item.id);
+    if (!mounted) {
+      return;
+    }
+    Navigator.of(context, rootNavigator: true).pop();
+
+    if (detail == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load ticket ${item.id}')),
+      );
+      return;
+    }
+
+    final ticket = Map<String, dynamic>.from(
+      _mapStringDynamic(detail['ticket']) ?? const <String, dynamic>{},
+    );
+    final messagesRaw = detail['messages'];
+    final messageEntries = <MapEntry<String, dynamic>>[];
+    if (messagesRaw is Map) {
+      for (final MapEntry<dynamic, dynamic> e in messagesRaw.entries) {
+        messageEntries.add(
+          MapEntry(e.key.toString(), e.value),
+        );
+      }
+      messageEntries.sort((a, b) {
+        final ma = _mapStringDynamic(a.value) ?? const {};
+        final mb = _mapStringDynamic(b.value) ?? const {};
+        final ta = (ma['createdAt'] as num?)?.toInt() ??
+            (ma['created_at'] as num?)?.toInt() ??
+            0;
+        final tb = (mb['createdAt'] as num?)?.toInt() ??
+            (mb['created_at'] as num?)?.toInt() ??
+            0;
+        return ta.compareTo(tb);
+      });
+    }
+
+    final replyController = TextEditingController();
+    final statusController = TextEditingController(
+      text: ticket['status']?.toString() ?? item.status,
+    );
+
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (BuildContext dialogContext) {
+          return AlertDialog(
+            title: Text('Ticket ${item.id}'),
+            content: SizedBox(
+              width: 520,
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    AdminKeyValueWrap(
+                      items: <String, String>{
+                        'Status': ticket['status']?.toString() ?? item.status,
+                        'Subject':
+                            ticket['subject']?.toString() ?? item.subject,
+                        'Ride': ticket['ride_id']?.toString() ?? item.rideId,
+                        'Created by':
+                            ticket['createdByUserId']?.toString() ??
+                                item.createdByUserId,
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Messages (${messageEntries.length})',
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    const SizedBox(height: 8),
+                    ...messageEntries
+                        .take(12)
+                        .map((MapEntry<String, dynamic> e) {
+                      final m = _mapStringDynamic(e.value) ?? const {};
+                      final body = m['message']?.toString() ?? '';
+                      final who = m['senderRole']?.toString() ??
+                          m['sender_role']?.toString() ??
+                          '';
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          '[$who] $body',
+                          style: const TextStyle(height: 1.35),
+                        ),
+                      );
+                    }),
+                    if (messageEntries.length > 12)
+                      const Text(
+                        'Older messages truncated — full history stays in Firebase.',
+                        style: TextStyle(
+                          color: AdminThemeTokens.slate,
+                          fontSize: 12,
+                        ),
+                      ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: statusController,
+                      decoration: _dialogInputDecoration('New status'),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: replyController,
+                      minLines: 2,
+                      maxLines: 5,
+                      decoration:
+                          _dialogInputDecoration('Public reply (optional)'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Close'),
+              ),
+              TextButton(
+                onPressed: () async {
+                  final ok =
+                      await _dataService.adminEscalateSupportTicketCallable(
+                    ticketId: item.id,
+                  );
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content:
+                          Text(ok ? 'Ticket escalated' : 'Escalate failed'),
+                    ),
+                  );
+                  if (ok) {
+                    await _loadSupportTicketsOnly(resetServerCursors: false);
+                  }
+                },
+                child: const Text('Escalate'),
+              ),
+              FilledButton(
+                onPressed: () async {
+                  final status = statusController.text.trim();
+                  if (status.isNotEmpty) {
+                    final ok = await _dataService
+                        .adminUpdateSupportTicketStatusCallable(
+                      ticketId: item.id,
+                      status: status,
+                    );
+                    if (!mounted) return;
+                    if (!ok) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Status update failed')),
+                      );
+                      return;
+                    }
+                  }
+                  final reply = replyController.text.trim();
+                  if (reply.isNotEmpty) {
+                    final ok = await _dataService.adminReplySupportTicketCallable(
+                      ticketId: item.id,
+                      message: reply,
+                      visibility: 'public',
+                    );
+                    if (!mounted) return;
+                    if (!ok) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Reply failed')),
+                      );
+                      return;
+                    }
+                  }
+                  if (!mounted) return;
+                  Navigator.pop(dialogContext);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Ticket updated')),
+                  );
+                  await _loadSupportTicketsOnly(resetServerCursors: false);
+                },
+                child: const Text('Apply'),
+              ),
+            ],
+          );
+        },
+      );
+    } finally {
+      replyController.dispose();
+      statusController.dispose();
+    }
+  }
+
+  Map<String, dynamic>? _mapStringDynamic(Object? raw) {
+    if (raw is Map<String, dynamic>) {
+      return raw;
+    }
+    if (raw is Map) {
+      return Map<String, dynamic>.from(raw);
+    }
+    return null;
   }
 
   Widget _buildSubscriptionsTab(AdminPanelSnapshot snapshot) {
@@ -1394,6 +3228,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     return _PricingEditor(
       pricing: snapshot.pricingConfig,
       settings: snapshot.settings,
+      canEditPricing: widget.session.hasPermission('settings.write'),
       onSave: (List<AdminCityPricing> cities, double commissionRate,
           int weeklySubscriptionNgn, int monthlySubscriptionNgn) async {
         await _dataService.updatePricingConfig(
@@ -1488,7 +3323,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   Row(
                     children: <Widget>[
                       Expanded(
-                        child: ElevatedButton(
+                        child: widget.session.hasPermission('drivers.read')
+                            ? ElevatedButton(
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF198754),
                             foregroundColor: Colors.white,
@@ -1526,11 +3362,23 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                             }
                           },
                           child: const Text('Approve'),
-                        ),
+                        )
+                            : Tooltip(
+                                message: kAdminNoPermissionTooltip,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF198754),
+                                    foregroundColor: Colors.white,
+                                  ),
+                                  onPressed: null,
+                                  child: const Text('Approve'),
+                                ),
+                              ),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: ElevatedButton(
+                        child: widget.session.hasPermission('drivers.read')
+                            ? ElevatedButton(
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFFDC3545),
                             foregroundColor: Colors.white,
@@ -1568,7 +3416,18 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                             }
                           },
                           child: const Text('Reject'),
-                        ),
+                        )
+                            : Tooltip(
+                                message: kAdminNoPermissionTooltip,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFFDC3545),
+                                    foregroundColor: Colors.white,
+                                  ),
+                                  onPressed: null,
+                                  child: const Text('Reject'),
+                                ),
+                              ),
                       ),
                     ],
                   ),
@@ -1652,32 +3511,17 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
   }
 
-  Future<void> _adminActionSilenced(Future<void> Function() run) async {
-    try {
-      await run();
-      if (mounted) {
-        await _loadSnapshot();
-      }
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Action failed: $error')),
-        );
-      }
-    }
-  }
-
   Future<String?> _promptAdminReason({
     required String title,
     required String fieldLabel,
     int minLength = 8,
   }) async {
-    final controller = TextEditingController();
-    final formKey = GlobalKey<FormState>();
+    final TextEditingController controller = TextEditingController();
+    final GlobalKey<FormState> formKey = GlobalKey<FormState>();
     try {
       return await showDialog<String>(
         context: context,
-        builder: (BuildContext ctx) {
+        builder: (BuildContext dialogContext) {
           return AlertDialog(
             title: Text(title),
             content: Form(
@@ -1685,11 +3529,10 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               child: TextFormField(
                 controller: controller,
                 decoration: InputDecoration(labelText: fieldLabel),
-                minLines: 2,
+                minLines: 3,
                 maxLines: 5,
-                autofocus: true,
                 validator: (String? value) {
-                  final trimmed = (value ?? '').trim();
+                  final String trimmed = value?.trim() ?? '';
                   if (trimmed.length < minLength) {
                     return 'Enter at least $minLength characters.';
                   }
@@ -1699,14 +3542,15 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             ),
             actions: <Widget>[
               TextButton(
-                onPressed: () => Navigator.pop(ctx),
+                onPressed: () => Navigator.of(dialogContext).pop(),
                 child: const Text('Cancel'),
               ),
-              TextButton(
+              FilledButton(
                 onPressed: () {
-                  if (formKey.currentState?.validate() ?? false) {
-                    Navigator.pop(ctx, controller.text.trim());
+                  if (formKey.currentState?.validate() != true) {
+                    return;
                   }
+                  Navigator.of(dialogContext).pop(controller.text.trim());
                 },
                 child: const Text('Continue'),
               ),
@@ -1792,14 +3636,100 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
   }
 
-  Future<void> _driverApproveVerification(AdminDriverRecord driver) async {
-    await _adminActionSilenced(() async {
-      await _dataService.adminApproveDriverVerification(driverId: driver.id);
-    });
+  Future<void> _driverApproveVerification(
+    AdminDriverRecord driver, {
+    AdminEntityDrawerController? drawerController,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) {
+        return AlertDialog(
+          title: const Text('Approve driver verification?'),
+          content: Text(
+            'This approves ${driver.name}\'s identity on the driver profile and '
+            'clears the KYC gate so they can go online (subscription and location '
+            'rules still apply). Continue?',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Approve'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    final AdminDriverRecord before = driver;
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'driver_approve_verification',
+      successMessage: 'Verification approved for ${driver.name}.',
+      applyOptimistic: () {
+        _replaceDriverInPagedLists(
+          driver.id,
+          (AdminDriverRecord d) => d.copyWith(
+            verificationStatus: 'approved',
+            rawData: <String, dynamic>{
+              ...d.rawData,
+              'identity_verification_status': 'approved',
+              'verification_status': 'approved',
+              'is_verified': true,
+              'nexride_verified': true,
+            },
+          ),
+        );
+      },
+      rollbackOptimistic: () {
+        _replaceDriverInPagedLists(driver.id, (_) => before);
+      },
+      invoke: () => _dataService.adminApproveDriverVerification(driverId: driver.id),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        if (!success) {
+          return _driverAudit(
+            action: 'driver_approve_verification',
+            driverId: driver.id,
+            before: driver.verificationStatus,
+            after: null,
+            metadata: <String, dynamic>{
+              if (error != null) 'error': error.toString(),
+            },
+            correlationId: correlationId,
+          );
+        }
+        return _driverAudit(
+          action: 'driver_approve_verification',
+          driverId: driver.id,
+          before: driver.verificationStatus,
+          after: 'approved',
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        drawerController?.invalidateTabs(
+          AdminCacheInvalidationRegistry.tabsFor('driver_approve_verification'),
+        );
+        unawaited(_refreshDriverRows());
+      },
+    );
   }
 
-  Future<void> _driverSuspend(AdminDriverRecord driver) async {
-    final reason = await _promptAdminReason(
+  Future<void> _driverSuspend(
+    AdminDriverRecord driver, {
+    AdminEntityDrawerController? drawerController,
+  }) async {
+    final String? reason = await _promptAdminReason(
       title: 'Suspend driver',
       fieldLabel: 'Reason (shown internally)',
       minLength: 8,
@@ -1807,31 +3737,116 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     if (reason == null || !mounted) {
       return;
     }
-    await _adminActionSilenced(() async {
-      await _dataService.adminSuspendAccount(
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'driver_suspend',
+      successMessage: 'Driver suspended.',
+      invoke: () => _dataService.adminSuspendAccount(
         uid: driver.id,
         role: 'driver',
         reason: reason,
-      );
-    });
+      ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        if (!success) {
+          return _driverAudit(
+            action: 'driver_suspend',
+            driverId: driver.id,
+            before: driver.accountStatus,
+            after: null,
+            metadata: <String, dynamic>{
+              'reason': reason,
+              if (error != null) 'error': error.toString(),
+            },
+            correlationId: correlationId,
+          );
+        }
+        return _driverAudit(
+          action: 'driver_suspend',
+          driverId: driver.id,
+          before: driver.accountStatus,
+          after: 'suspended',
+          metadata: <String, dynamic>{'reason': reason},
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        drawerController?.invalidateTabs(
+          AdminCacheInvalidationRegistry.tabsFor('driver_suspend'),
+        );
+        unawaited(_refreshDriverRows());
+      },
+    );
   }
 
-  Future<void> _driverWarn(AdminDriverRecord driver) async {
-    final fields = await _promptAdminWarnDialog(accountLabel: driver.name);
+  Future<void> _driverWarn(
+    AdminDriverRecord driver, {
+    AdminEntityDrawerController? drawerController,
+  }) async {
+    final _AdminWarnFields? fields =
+        await _promptAdminWarnDialog(accountLabel: driver.name);
     if (fields == null || !mounted) {
       return;
     }
-    await _adminActionSilenced(() async {
-      await _dataService.adminWarnAccount(
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'driver_warn',
+      successMessage: 'Warning sent.',
+      invoke: () => _dataService.adminWarnAccount(
         uid: driver.id,
         role: 'driver',
         reason: fields.reason,
         message: fields.message,
-      );
-    });
+      ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        if (!success) {
+          return _driverAudit(
+            action: 'driver_warn',
+            driverId: driver.id,
+            before: null,
+            after: null,
+            metadata: <String, dynamic>{
+              'reason': fields.reason,
+              'message': fields.message,
+              if (error != null) 'error': error.toString(),
+            },
+            correlationId: correlationId,
+          );
+        }
+        return _driverAudit(
+          action: 'driver_warn',
+          driverId: driver.id,
+          before: null,
+          after: 'warned',
+          metadata: <String, dynamic>{
+            'reason': fields.reason,
+            'message': fields.message,
+          },
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        drawerController?.invalidateTabs(
+          AdminCacheInvalidationRegistry.tabsFor('driver_warn'),
+        );
+        unawaited(_refreshDriverRows());
+      },
+    );
   }
 
-  Future<void> _driverDelete(AdminDriverRecord driver) async {
+  Future<void> _driverDelete(
+    AdminDriverRecord driver, {
+    AdminEntityDrawerController? drawerController,
+  }) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (BuildContext ctx) {
@@ -1858,12 +3873,45 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     if (confirmed != true || !mounted) {
       return;
     }
-    await _adminActionSilenced(() async {
-      await _dataService.adminDeleteAccount(
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'driver_delete',
+      successMessage: 'Driver account deleted.',
+      invoke: () => _dataService.adminDeleteAccount(
         uid: driver.id,
         role: 'driver',
-      );
-    });
+      ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        if (!success) {
+          return _driverAudit(
+            action: 'driver_delete',
+            driverId: driver.id,
+            before: driver.accountStatus,
+            after: null,
+            metadata: <String, dynamic>{
+              if (error != null) 'error': error.toString(),
+            },
+            correlationId: correlationId,
+          );
+        }
+        return _driverAudit(
+          action: 'driver_delete',
+          driverId: driver.id,
+          before: driver.accountStatus,
+          after: 'deleted',
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        drawerController?.close();
+        unawaited(_refreshDriverRows());
+      },
+    );
   }
 
   Future<void> _riderWarn(AdminRiderRecord rider) async {
@@ -1871,14 +3919,40 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     if (fields == null || !mounted) {
       return;
     }
-    await _adminActionSilenced(() async {
-      await _dataService.adminWarnAccount(
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'rider_warn',
+      successMessage: 'Warning sent.',
+      useDefaultMutationThrottle: true,
+      invoke: () => _dataService.adminWarnAccount(
         uid: rider.id,
         role: 'rider',
         reason: fields.reason,
         message: fields.message,
-      );
-    });
+      ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        return _riderAudit(
+          action: 'rider_warn',
+          riderId: rider.id,
+          before: null,
+          after: success ? 'warned' : null,
+          metadata: <String, dynamic>{
+            'reason': fields.reason,
+            'message': fields.message,
+            if (!success && error != null) 'error': error.toString(),
+          },
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        unawaited(_refresh());
+      },
+    );
   }
 
   Future<void> _riderSuspend(AdminRiderRecord rider) async {
@@ -1890,13 +3964,38 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     if (reason == null || !mounted) {
       return;
     }
-    await _adminActionSilenced(() async {
-      await _dataService.adminSuspendAccount(
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'rider_suspend',
+      successMessage: 'Rider suspended.',
+      useDefaultMutationThrottle: true,
+      invoke: () => _dataService.adminSuspendAccount(
         uid: rider.id,
         role: 'rider',
         reason: reason,
-      );
-    });
+      ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        return _riderAudit(
+          action: 'rider_suspend',
+          riderId: rider.id,
+          before: rider.status,
+          after: success ? 'suspended' : null,
+          metadata: <String, dynamic>{
+            'reason': reason,
+            if (!success && error != null) 'error': error.toString(),
+          },
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        unawaited(_refresh());
+      },
+    );
   }
 
   Future<void> _riderDelete(AdminRiderRecord rider) async {
@@ -1926,108 +4025,181 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     if (confirmed != true || !mounted) {
       return;
     }
-    await _adminActionSilenced(() async {
-      await _dataService.adminDeleteAccount(
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'rider_delete',
+      successMessage: 'Rider account deleted.',
+      invoke: () => _dataService.adminDeleteAccount(
         uid: rider.id,
         role: 'rider',
-      );
-    });
+      ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        return _riderAudit(
+          action: 'rider_delete',
+          riderId: rider.id,
+          before: rider.status,
+          after: success ? 'deleted' : null,
+          metadata: <String, dynamic>{
+            if (!success && error != null) 'error': error.toString(),
+          },
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        unawaited(_refresh());
+      },
+    );
+  }
+
+  bool _isDriverVerificationApproved(AdminDriverRecord driver) {
+    final String v = driver.verificationStatus.toLowerCase().trim();
+    return v == 'verified' ||
+        v == 'approved' ||
+        v == 'complete' ||
+        v == 'completed' ||
+        v == 'active';
+  }
+
+  Widget _rbacTextButton({
+    required bool allowed,
+    required String label,
+    required VoidCallback onPressed,
+    ButtonStyle? style,
+  }) {
+    final Widget btn = TextButton(
+      style: style,
+      onPressed: allowed ? onPressed : null,
+      child: Text(label),
+    );
+    if (allowed) {
+      return btn;
+    }
+    return Tooltip(message: kAdminNoPermissionTooltip, child: btn);
   }
 
   Widget _driverAccountActions(AdminDriverRecord driver) {
     return Wrap(
-      spacing: 6,
-      runSpacing: 4,
+      spacing: 8,
+      runSpacing: 8,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: <Widget>[
-        TextButton(
-          onPressed: () => unawaited(_driverApproveVerification(driver)),
-          child: const Text('Approve'),
+        if (!_isDriverVerificationApproved(driver))
+          _rbacTextButton(
+            allowed: widget.session.hasPermission('verification.approve'),
+            label: 'Approve verification',
+            onPressed: () => unawaited(
+              _driverApproveVerification(driver, drawerController: null),
+            ),
+          ),
+        _rbacTextButton(
+          allowed: widget.session.hasPermission('drivers.write'),
+          label: 'Suspend',
+          onPressed: () =>
+              unawaited(_driverSuspend(driver, drawerController: null)),
         ),
-        TextButton(
-          onPressed: () => unawaited(_driverSuspend(driver)),
-          child: const Text('Suspend'),
+        _rbacTextButton(
+          allowed: widget.session.hasPermission('drivers.write'),
+          label: 'Warn',
+          onPressed: () =>
+              unawaited(_driverWarn(driver, drawerController: null)),
         ),
-        TextButton(
-          onPressed: () => unawaited(_driverWarn(driver)),
-          child: const Text('Warn'),
+        _rbacTextButton(
+          allowed: widget.session.hasPermission('support.write'),
+          label: 'Support flag',
+          onPressed: () => unawaited(
+            _runSupportContactFlagForUser(
+              uid: driver.id,
+              role: 'driver',
+              displayLabel: driver.name,
+            ),
+          ),
         ),
-        TextButton(
+        const SizedBox(width: 8),
+        _rbacTextButton(
+          allowed: widget.session.hasPermission('settings.write'),
+          label: 'Delete',
           style: TextButton.styleFrom(foregroundColor: Colors.red.shade800),
-          onPressed: () => unawaited(_driverDelete(driver)),
-          child: const Text('Delete'),
+          onPressed: () =>
+              unawaited(_driverDelete(driver, drawerController: null)),
         ),
       ],
     );
+  }
+
+  bool _isRiderIdentityVerified(AdminRiderRecord rider) {
+    final String v = rider.verificationStatus.toLowerCase().trim();
+    return v == 'verified' || v == 'approved';
   }
 
   Widget _riderAccountActions(AdminRiderRecord rider) {
-    return Wrap(
-      spacing: 6,
-      runSpacing: 4,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: <Widget>[
-        TextButton(
-          onPressed: () => unawaited(_riderWarn(rider)),
-          child: const Text('Warn'),
-        ),
-        TextButton(
-          onPressed: () => unawaited(_riderSuspend(rider)),
-          child: const Text('Suspend'),
-        ),
-        TextButton(
-          style: TextButton.styleFrom(foregroundColor: Colors.red.shade800),
-          onPressed: () => unawaited(_riderDelete(rider)),
-          child: const Text('Delete'),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildVerificationSection(AdminPanelSnapshot snapshot) {
-    if (snapshot.verificationCases.isEmpty) {
-      return const AdminEmptyState(
-        title: 'No verification cases yet',
-        message:
-            'Verification and compliance review is fully scaffolded around live driver verification, driver documents, and verification audits. Cases will show up here once drivers submit documents.',
-        icon: Icons.verified_user_outlined,
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        const AdminSectionHeader(
-          title: 'Verification and compliance',
-          description:
-              'Review pending driver verification cases, inspect uploaded documents, and approve, reject, or request resubmission with audit trail updates.',
-        ),
-        const SizedBox(height: 16),
-        AdminDataTableCard(
-          columns: const <DataColumn>[
-            DataColumn(label: Text('Driver')),
-            DataColumn(label: Text('Model')),
-            DataColumn(label: Text('Status')),
-            DataColumn(label: Text('Submitted')),
-            DataColumn(label: Text('Reviewed by')),
-            DataColumn(label: Text('Documents')),
-          ],
-          rows: snapshot.verificationCases.map((AdminVerificationCase item) {
-            return DataRow(
-              onSelectChanged: (_) => _showVerificationDialog(item),
-              cells: <DataCell>[
-                DataCell(Text(item.driverName)),
-                DataCell(AdminStatusChip(item.businessModel)),
-                DataCell(AdminStatusChip(item.overallStatus)),
-                DataCell(Text(formatAdminDateTime(item.submittedAt))),
-                DataCell(Text(
-                    item.reviewedBy.isNotEmpty ? item.reviewedBy : 'Pending')),
-                DataCell(Text('${item.documents.length}')),
-              ],
+    return PopupMenuButton<String>(
+      tooltip: 'Rider actions',
+      padding: EdgeInsets.zero,
+      onSelected: (String value) {
+        switch (value) {
+          case 'warn':
+            unawaited(_riderWarn(rider));
+            break;
+          case 'suspend':
+            unawaited(_riderSuspend(rider));
+            break;
+          case 'flag':
+            unawaited(
+              _runSupportContactFlagForUser(
+                uid: rider.id,
+                role: 'rider',
+                displayLabel: rider.name,
+              ),
             );
-          }).toList(),
+            break;
+          case 'delete':
+            unawaited(_riderDelete(rider));
+            break;
+        }
+      },
+      itemBuilder: (BuildContext context) {
+        final bool rw = widget.session.hasPermission('riders.write');
+        final bool sw = widget.session.hasPermission('support.write');
+        final bool st = widget.session.hasPermission('settings.write');
+        return <PopupMenuEntry<String>>[
+          PopupMenuItem<String>(
+            value: 'warn',
+            enabled: rw,
+            child: const Text('Warn'),
+          ),
+          PopupMenuItem<String>(
+            value: 'suspend',
+            enabled: rw,
+            child: const Text('Suspend'),
+          ),
+          PopupMenuItem<String>(
+            value: 'flag',
+            enabled: sw,
+            child: const Text('Support flag'),
+          ),
+          const PopupMenuDivider(),
+          PopupMenuItem<String>(
+            value: 'delete',
+            enabled: st,
+            child: Text(
+              'Delete',
+              style: TextStyle(color: Colors.red.shade800),
+            ),
+          ),
+        ];
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+        child: Icon(
+          Icons.more_vert_rounded,
+          color: AdminThemeTokens.ink.withValues(alpha: 0.75),
         ),
-      ],
+      ),
     );
   }
 
@@ -2228,7 +4400,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               'Off-route tolerance':
                   '${snapshot.settings.offRouteToleranceMeters} meters',
               'Active request services':
-                  snapshot.settings.activeServiceTypes.join(', '),
+                  formatAdminActiveRequestServiceSummary(
+                    snapshot.settings.activeServiceTypes,
+                  ),
               'Admin profile': widget.session.email,
             },
           ),
@@ -2409,119 +4583,582 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     return options;
   }
 
-  List<Widget> _driverAccountActionButtons(AdminDriverRecord driver) {
+  List<Widget> _driverAccountActionButtons(
+    AdminDriverRecord driver, {
+    AdminEntityDrawerController? drawerController,
+  }) {
+    final List<Widget> verificationActions = <Widget>[
+      if (!_isDriverVerificationApproved(driver))
+        AdminPermissionGate(
+          session: widget.session,
+          permission: 'verification.approve',
+          child: AdminGhostButton(
+            label: 'Approve verification',
+            onPressed: () async {
+              await _driverApproveVerification(
+                driver,
+                drawerController: drawerController,
+              );
+            },
+          ),
+        ),
+      AdminPermissionGate(
+        session: widget.session,
+        permission: 'support.write',
+        child: AdminGhostButton(
+          label: 'Flag for support',
+          onPressed: () async {
+            await _runSupportContactFlagForUser(
+              uid: driver.id,
+              role: 'driver',
+              displayLabel: driver.name,
+            );
+          },
+        ),
+      ),
+    ];
+
     Future<void> applyStatus(String status) async {
-      Navigator.of(context).pop();
-      await _dataService.updateDriverStatus(
-        driver: driver,
-        status: status,
+      final AdminDriverRecord before = driver;
+      await _actionExecutor.run<void>(
+        context: context,
+        actionName: 'driver_update_status',
+        successMessage: 'Driver status updated',
+        applyOptimistic: () {
+          _replaceDriverInPagedLists(
+            driver.id,
+            (AdminDriverRecord d) => d.copyWith(accountStatus: status),
+          );
+        },
+        rollbackOptimistic: () {
+          _replaceDriverInPagedLists(driver.id, (_) => before);
+        },
+        invoke: () => _dataService.updateDriverStatus(
+          driver: driver,
+          status: status,
+        ),
+        emitAudit: ({
+          required bool success,
+          Object? value,
+          Object? error,
+          required String correlationId,
+        }) {
+          if (!success) {
+            return _driverAudit(
+              action: 'driver_update_status',
+              driverId: driver.id,
+              before: before.accountStatus,
+              after: null,
+              metadata: <String, dynamic>{
+                'attemptedStatus': status,
+                if (error != null) 'error': error.toString(),
+              },
+              correlationId: correlationId,
+            );
+          }
+          return _driverAudit(
+            action: 'driver_update_status',
+            driverId: driver.id,
+            before: before.accountStatus,
+            after: status,
+            correlationId: correlationId,
+          );
+        },
+        onSuccess: (_) {
+          drawerController?.invalidateTabs();
+          unawaited(_refreshDriverRows());
+        },
       );
-      await _loadSnapshot();
     }
 
     switch (driver.accountStatus) {
       case 'deactivated':
         return <Widget>[
-          AdminPrimaryButton(
-            label: 'Activate',
-            onPressed: () async {
-              await applyStatus('active');
-            },
+          ...verificationActions,
+          AdminPermissionGate(
+            session: widget.session,
+            permission: 'drivers.write',
+            child: AdminPrimaryButton(
+              label: 'Activate',
+              onPressed: () async {
+                await applyStatus('active');
+              },
+            ),
           ),
         ];
       case 'suspended':
         return <Widget>[
-          AdminPrimaryButton(
-            label: 'Activate',
-            onPressed: () async {
-              await applyStatus('active');
-            },
+          ...verificationActions,
+          AdminPermissionGate(
+            session: widget.session,
+            permission: 'drivers.write',
+            child: AdminPrimaryButton(
+              label: 'Activate',
+              onPressed: () async {
+                await applyStatus('active');
+              },
+            ),
           ),
-          AdminGhostButton(
-            label: 'Deactivate',
-            onPressed: () async {
-              await applyStatus('deactivated');
-            },
+          AdminPermissionGate(
+            session: widget.session,
+            permission: 'drivers.write',
+            child: AdminGhostButton(
+              label: 'Deactivate',
+              onPressed: () async {
+                await applyStatus('deactivated');
+              },
+            ),
           ),
         ];
       default:
         return <Widget>[
+          ...verificationActions,
           const AdminPrimaryButton(
             label: 'Active',
             onPressed: null,
           ),
-          AdminGhostButton(
-            label: 'Deactivate',
-            onPressed: () async {
-              await applyStatus('deactivated');
-            },
+          AdminPermissionGate(
+            session: widget.session,
+            permission: 'drivers.write',
+            child: AdminGhostButton(
+              label: 'Deactivate',
+              onPressed: () async {
+                await applyStatus('deactivated');
+              },
+            ),
           ),
-          AdminGhostButton(
-            label: 'Suspend',
-            onPressed: () async {
-              await applyStatus('suspended');
-            },
+          AdminPermissionGate(
+            session: widget.session,
+            permission: 'drivers.write',
+            child: AdminGhostButton(
+              label: 'Suspend',
+              onPressed: () async {
+                await applyStatus('suspended');
+              },
+            ),
           ),
         ];
     }
   }
 
+  Future<void> _runSupportContactFlagForUser({
+    required String uid,
+    required String role,
+    required String displayLabel,
+  }) async {
+    final String r = role.trim().toLowerCase();
+    if (r != 'driver' && r != 'rider') {
+      return;
+    }
+    final TextEditingController noteController = TextEditingController();
+    String priority = 'normal';
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) {
+        return StatefulBuilder(
+          builder:
+              (BuildContext ctx, void Function(void Function()) setLocal) {
+            return AlertDialog(
+              title: Text('Flag for support: $displayLabel'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    const Text(
+                      'Creates an internal support queue entry and notifies the user that the team may reach out. Minimum 4 characters for the note.',
+                      style: TextStyle(fontSize: 13, height: 1.35),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      key: ValueKey<String>(priority),
+                      initialValue: priority,
+                      decoration: const InputDecoration(
+                        labelText: 'Priority',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const <DropdownMenuItem<String>>[
+                        DropdownMenuItem<String>(
+                          value: 'normal',
+                          child: Text('Normal'),
+                        ),
+                        DropdownMenuItem<String>(
+                          value: 'high',
+                          child: Text('High'),
+                        ),
+                        DropdownMenuItem<String>(
+                          value: 'urgent',
+                          child: Text('Urgent'),
+                        ),
+                      ],
+                      onChanged: (String? v) {
+                        setLocal(() {
+                          priority = v ?? 'normal';
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: noteController,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        labelText: 'Instruction for support team',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    if (noteController.text.trim().length < 4) {
+                      return;
+                    }
+                    Navigator.pop(ctx, true);
+                  },
+                  child: const Text('Submit'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (ok != true || !mounted) {
+      noteController.dispose();
+      return;
+    }
+    final String note = noteController.text.trim();
+    noteController.dispose();
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'support_contact_flag',
+      successMessage: 'Support flag saved. User notified when push delivery succeeds.',
+      useDefaultMutationThrottle: true,
+      invoke: () => _dataService.adminFlagUserForSupportContact(
+            uid: uid,
+            role: r,
+            note: note,
+            priority: priority,
+          ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        final Map<String, dynamic> meta = <String, dynamic>{
+          'targetRole': r,
+          'priority': priority,
+          'note': note,
+          if (!success && error != null) 'error': error.toString(),
+        };
+        if (r == 'driver') {
+          return _driverAudit(
+            action: 'support_contact_flag',
+            driverId: uid,
+            before: null,
+            after: success ? 'flagged' : null,
+            metadata: meta,
+            correlationId: correlationId,
+          );
+        }
+        return _riderAudit(
+          action: 'support_contact_flag',
+          riderId: uid,
+          before: null,
+          after: success ? 'flagged' : null,
+          metadata: meta,
+          correlationId: correlationId,
+        );
+      },
+    );
+  }
+
   Future<void> _showRiderDialog(AdminRiderRecord rider) async {
+    final Map<String, dynamic>? envelope =
+        await _dataService.fetchRiderProfileForAdmin(rider.id);
+    if (!mounted) {
+      return;
+    }
+    final Map<String, dynamic> detailRider = envelope != null &&
+            envelope['rider'] is Map
+        ? Map<String, dynamic>.from(envelope['rider'] as Map)
+        : Map<String, dynamic>.from(rider.rawData);
+    final Map<String, dynamic>? authMeta = envelope != null &&
+            envelope['auth_metadata'] is Map
+        ? Map<String, dynamic>.from(envelope['auth_metadata'] as Map)
+        : null;
+
+    int msFrom(dynamic v) {
+      if (v is num) {
+        return v.toInt();
+      }
+      if (v is String) {
+        return int.tryParse(v) ?? 0;
+      }
+      return 0;
+    }
+
+    String strOf(dynamic v) => '${v ?? ''}'.trim();
+
+    String tryFormatAuthTs(String raw) {
+      if (raw.isEmpty) {
+        return raw;
+      }
+      try {
+        return formatAdminDateTime(DateTime.parse(raw));
+      } catch (_) {
+        return raw;
+      }
+    }
+
+    final int createdMs = msFrom(
+      detailRider['created_at'] ?? detailRider['createdAt'],
+    );
+    final String email = strOf(detailRider['email']).isNotEmpty
+        ? strOf(detailRider['email'])
+        : rider.email;
+    final String phone = strOf(detailRider['phone']).isNotEmpty
+        ? strOf(detailRider['phone'])
+        : rider.phone;
+    final bool profileDone = detailRider.containsKey('profile_completed')
+        ? detailRider['profile_completed'] == true
+        : rider.profileCompleted;
+    final String onboardingLabel = !detailRider.containsKey('onboarding_completed')
+        ? 'Unknown'
+        : (detailRider['onboarding_completed'] == true ? 'Complete' : 'Incomplete');
+    final String lastAuth = strOf(authMeta?['last_sign_in_time']);
+    final String authCreated = strOf(authMeta?['creation_time']);
+    final String authCreatedDisplay = authCreated.isNotEmpty
+        ? tryFormatAuthTs(authCreated)
+        : (createdMs > 0
+            ? formatAdminDateTime(
+                DateTime.fromMillisecondsSinceEpoch(createdMs),
+              )
+            : 'Not set');
+    final String lastAuthDisplay =
+        lastAuth.isNotEmpty ? tryFormatAuthTs(lastAuth) : 'Not set';
+    final String serviceArea = <String>[
+      strOf(detailRider['city']),
+      strOf(detailRider['state']),
+      strOf(detailRider['rollout_city_id']),
+    ].where((String e) => e.isNotEmpty).join(', ');
+    final Map<String, dynamic> walletMap =
+        detailRider['wallet'] is Map
+            ? Map<String, dynamic>.from(detailRider['wallet'] as Map)
+            : <String, dynamic>{};
+    final String walletLine = walletMap['balance'] != null
+        ? formatAdminCurrency(
+            (walletMap['balance'] as num?)?.toDouble() ?? rider.walletBalance,
+          )
+        : formatAdminCurrency(rider.walletBalance);
+    final int? tripHint = envelope != null && envelope['trip_count_hint'] is num
+        ? (envelope['trip_count_hint'] as num).toInt()
+        : null;
+    final String tripsLine = tripHint != null
+        ? 'About $tripHint trip history keys under users (capped count)'
+        : '${rider.tripSummary.completedTrips} completed / ${rider.tripSummary.totalTrips} total (from list row)';
+
+    final List<dynamic> warnRaw = envelope != null &&
+            envelope['warnings_tail'] is List
+        ? envelope['warnings_tail'] as List<dynamic>
+        : const <dynamic>[];
+    final List<dynamic> evtRaw = envelope != null &&
+            envelope['account_events'] is List
+        ? envelope['account_events'] as List<dynamic>
+        : const <dynamic>[];
+    final StringBuffer susp = StringBuffer();
+    for (final dynamic e in evtRaw) {
+      if (e is Map) {
+        final Map<String, dynamic> m = Map<String, dynamic>.from(e);
+        final int at = msFrom(m['at']);
+        susp.writeln(
+          '${m['code']}: ${m['message']}${at > 0 ? ' @ ${formatAdminDateTime(DateTime.fromMillisecondsSinceEpoch(at))}' : ''}',
+        );
+      }
+    }
+    for (final dynamic w in warnRaw) {
+      if (w is Map) {
+        final Map<String, dynamic> m = Map<String, dynamic>.from(w);
+        final int at = msFrom(m['created_at']);
+        susp.writeln(
+          '${m['kind']}: ${m['message']}${at > 0 ? ' @ ${formatAdminDateTime(DateTime.fromMillisecondsSinceEpoch(at))}' : ''}',
+        );
+      }
+    }
+    final String suspText =
+        susp.isEmpty ? 'None in RTDB warning / account-event fields.' : susp.toString().trim();
+
     await _showDetailsDialog(
       title: rider.name,
-      subtitle: rider.phone.isNotEmpty ? rider.phone : rider.id,
+      subtitle: phone.isNotEmpty ? phone : rider.id,
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           AdminKeyValueWrap(
             items: <String, String>{
+              'UID': rider.id,
+              'Auth creation': authCreatedDisplay,
+              'Email': email.isNotEmpty ? email : 'Not set',
+              'Phone': phone.isNotEmpty ? phone : 'Not set',
+              'Profile completed': profileDone ? 'Yes' : 'No',
+              'Onboarding': onboardingLabel,
+              'Last login (Auth)': lastAuthDisplay,
+              'Service area':
+                  serviceArea.isNotEmpty ? serviceArea : 'Not set',
+              'Wallet': walletLine,
+              'Trips': tripsLine,
+              'Suspension / warnings': suspText,
               'City': rider.city.isNotEmpty ? rider.city : 'Not set',
               'Status': sentenceCaseStatus(rider.status),
               'Verification': sentenceCaseStatus(rider.verificationStatus),
               'Risk': sentenceCaseStatus(rider.riskStatus),
               'Payment': sentenceCaseStatus(rider.paymentStatus),
-              'Trip history':
+              'Trip history (list)':
                   '${rider.tripSummary.completedTrips} completed / ${rider.tripSummary.totalTrips} total',
-              'Wallet / payment info': formatAdminCurrency(rider.walletBalance),
               'Outstanding fees': formatAdminCurrency(rider.outstandingFeesNgn),
             },
           ),
           const SizedBox(height: 18),
+          if (_isRiderIdentityVerified(rider))
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Icon(
+                    Icons.verified_user_rounded,
+                    size: 22,
+                    color: Colors.green.shade700,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Rider identity is verified. Approve / reject selfie actions are hidden.',
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.35,
+                        color: Colors.grey.shade800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: <Widget>[
+                AdminGhostButton(
+                  label: 'Approve rider selfie',
+                  onPressed: () async {
+                    Navigator.of(context).pop();
+                    if (!mounted) {
+                      return;
+                    }
+                    await _actionExecutor.run<void>(
+                      context: context,
+                      actionName: 'rider_review_selfie_approve',
+                      successMessage: 'Selfie approved.',
+                      useDefaultMutationThrottle: true,
+                      invoke: () => _dataService.adminReviewRiderFirestoreIdentity(
+                        riderId: rider.id,
+                        approve: true,
+                      ),
+                      emitAudit: ({
+                        required bool success,
+                        Object? value,
+                        Object? error,
+                        required String correlationId,
+                      }) {
+                        return _riderAudit(
+                          action: 'rider_review_selfie_approve',
+                          riderId: rider.id,
+                          before: rider.verificationStatus,
+                          after: success ? 'approved' : null,
+                          metadata: <String, dynamic>{
+                            if (!success && error != null) 'error': error.toString(),
+                          },
+                          correlationId: correlationId,
+                        );
+                      },
+                      onSuccess: (_) {
+                        unawaited(_refresh());
+                      },
+                    );
+                  },
+                ),
+                AdminGhostButton(
+                  label: 'Reject rider selfie',
+                  onPressed: () async {
+                    final reason = await _promptAdminReason(
+                      title: 'Reject rider selfie',
+                      fieldLabel: 'Reason (audit trail, min 8 chars)',
+                      minLength: 8,
+                    );
+                    if (reason == null || !mounted) {
+                      return;
+                    }
+                    Navigator.of(context).pop();
+                    if (!mounted) {
+                      return;
+                    }
+                    await _actionExecutor.run<void>(
+                      context: context,
+                      actionName: 'rider_review_selfie_reject',
+                      successMessage: 'Selfie rejected.',
+                      useDefaultMutationThrottle: true,
+                      invoke: () => _dataService.adminReviewRiderFirestoreIdentity(
+                        riderId: rider.id,
+                        approve: false,
+                        rejectionReason: reason,
+                      ),
+                      emitAudit: ({
+                        required bool success,
+                        Object? value,
+                        Object? error,
+                        required String correlationId,
+                      }) {
+                        return _riderAudit(
+                          action: 'rider_review_selfie_reject',
+                          riderId: rider.id,
+                          before: rider.verificationStatus,
+                          after: success ? 'rejected' : null,
+                          metadata: <String, dynamic>{
+                            'rejectionReason': reason,
+                            if (!success && error != null) 'error': error.toString(),
+                          },
+                          correlationId: correlationId,
+                        );
+                      },
+                      onSuccess: (_) {
+                        unawaited(_refresh());
+                      },
+                    );
+                  },
+                ),
+              ],
+            ),
+          const SizedBox(height: 14),
           Wrap(
             spacing: 10,
             runSpacing: 10,
             children: <Widget>[
               AdminGhostButton(
-                label: 'Approve rider selfie',
+                label: 'Tell support to contact rider',
                 onPressed: () async {
-                  Navigator.of(context).pop();
-                  await _adminActionSilenced(() async {
-                    await _dataService.adminReviewRiderFirestoreIdentity(
-                      riderId: rider.id,
-                      approve: true,
-                    );
-                  });
-                },
-              ),
-              AdminGhostButton(
-                label: 'Reject rider selfie',
-                onPressed: () async {
-                  final reason = await _promptAdminReason(
-                    title: 'Reject rider selfie',
-                    fieldLabel: 'Reason (audit trail, min 8 chars)',
-                    minLength: 8,
+                  await _runSupportContactFlagForUser(
+                    uid: rider.id,
+                    role: 'rider',
+                    displayLabel: rider.name,
                   );
-                  if (reason == null || !mounted) {
-                    return;
-                  }
-                  Navigator.of(context).pop();
-                  await _adminActionSilenced(() async {
-                    await _dataService.adminReviewRiderFirestoreIdentity(
-                      riderId: rider.id,
-                      approve: false,
-                      rejectionReason: reason,
-                    );
-                  });
                 },
               ),
             ],
@@ -2536,12 +5173,39 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                 onPressed: () async {
                   if (rider.status == 'suspended') {
                     Navigator.of(context).pop();
-                    await _adminActionSilenced(() async {
-                      await _dataService.updateRiderStatus(
+                    if (!mounted) {
+                      return;
+                    }
+                    await _actionExecutor.run<void>(
+                      context: context,
+                      actionName: 'rider_reactivate',
+                      successMessage: 'Rider reactivated.',
+                      useDefaultMutationThrottle: true,
+                      invoke: () => _dataService.updateRiderStatus(
                         riderId: rider.id,
                         status: 'active',
-                      );
-                    });
+                      ),
+                      emitAudit: ({
+                        required bool success,
+                        Object? value,
+                        Object? error,
+                        required String correlationId,
+                      }) {
+                        return _riderAudit(
+                          action: 'rider_reactivate',
+                          riderId: rider.id,
+                          before: rider.status,
+                          after: success ? 'active' : null,
+                          metadata: <String, dynamic>{
+                            if (!success && error != null) 'error': error.toString(),
+                          },
+                          correlationId: correlationId,
+                        );
+                      },
+                      onSuccess: (_) {
+                        unawaited(_refresh());
+                      },
+                    );
                     return;
                   }
                   final reason = await _promptAdminReason(
@@ -2553,13 +5217,41 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                     return;
                   }
                   Navigator.of(context).pop();
-                  await _adminActionSilenced(() async {
-                    await _dataService.adminSuspendAccount(
+                  if (!mounted) {
+                    return;
+                  }
+                  await _actionExecutor.run<void>(
+                    context: context,
+                    actionName: 'rider_suspend',
+                    successMessage: 'Rider suspended.',
+                    useDefaultMutationThrottle: true,
+                    invoke: () => _dataService.adminSuspendAccount(
                       uid: rider.id,
                       role: 'rider',
                       reason: reason,
-                    );
-                  });
+                    ),
+                    emitAudit: ({
+                      required bool success,
+                      Object? value,
+                      Object? error,
+                      required String correlationId,
+                    }) {
+                      return _riderAudit(
+                        action: 'rider_suspend',
+                        riderId: rider.id,
+                        before: rider.status,
+                        after: success ? 'suspended' : null,
+                        metadata: <String, dynamic>{
+                          'reason': reason,
+                          if (!success && error != null) 'error': error.toString(),
+                        },
+                        correlationId: correlationId,
+                      );
+                    },
+                    onSuccess: (_) {
+                      unawaited(_refresh());
+                    },
+                  );
                 },
               ),
             ],
@@ -2569,108 +5261,337 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
   }
 
-  Future<void> _showDriverDialog(AdminDriverRecord driver) async {
-    await _showDetailsDialog(
-      title: driver.name,
-      subtitle: driver.phone.isNotEmpty ? driver.phone : driver.id,
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          AdminStatusChip(driver.accountStatus),
-          const SizedBox(height: 16),
-          AdminKeyValueWrap(
-            items: <String, String>{
-              'City': driver.city.isNotEmpty ? driver.city : 'Not set',
-              'Account status': sentenceCaseStatus(driver.accountStatus),
-              'Online state': driver.isOnline ? 'Online' : 'Offline',
-              'Driver state': sentenceCaseStatus(driver.status),
-              'Verification': sentenceCaseStatus(driver.verificationStatus),
-              'Vehicle': driver.vehicleName.isNotEmpty
-                  ? '${driver.vehicleName} • ${driver.plateNumber}'
-                  : 'Vehicle not added',
-              'Trip count':
-                  '${driver.completedTripCount} completed / ${driver.tripCount} total',
-              'Earnings': formatAdminCurrency(driver.netEarnings),
-              'Wallet balance': formatAdminCurrency(driver.walletBalance),
-              'Total withdrawn': formatAdminCurrency(driver.totalWithdrawn),
-              'Pending withdrawals':
-                  formatAdminCurrency(driver.pendingWithdrawals),
-              'Monetization': driverMonetizationStatusLabel(
-                monetizationModel: driver.monetizationModel,
-                subscriptionPlanType: driver.subscriptionPlanType,
-                subscriptionActive: driver.subscriptionActive,
-              ),
-              'Subscription plan':
-                  '${sentenceCaseStatus(driver.subscriptionPlanType)} • ${sentenceCaseStatus(driver.subscriptionStatus)}',
-            },
-          ),
-          const SizedBox(height: 18),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: _driverAccountActionButtons(driver),
-          ),
-        ],
-      ),
+  int _driverDrawerTabIndex(String? tabId) {
+    if (tabId == null || tabId.trim().isEmpty) {
+      return 0;
+    }
+    final int i = _driverDrawerTabIds.indexOf(tabId.trim());
+    return i >= 0 ? i : 0;
+  }
+
+  void _tryConsumeInitialDriverDeepLink() {
+    if (_initialDriverDeepLinkHandled) {
+      return;
+    }
+    final AdminDriverDeepLink? link = widget.initialDriverDeepLink;
+    if (link == null || _section != AdminSection.drivers) {
+      return;
+    }
+    if (_driversOnlyLoading && _driversOnly == null) {
+      return;
+    }
+    _initialDriverDeepLinkHandled = true;
+    unawaited(_openDriverDrawerForDeepLink(link));
+  }
+
+  Future<void> _openDriverDrawerForDeepLink(AdminDriverDeepLink link) async {
+    final AdminDriverRecord? row = await _resolveDriverForDrawer(link.driverId);
+    if (!mounted || row == null) {
+      return;
+    }
+    await _showDriverDialog(row, initialTabId: link.tab, syncUrl: false);
+  }
+
+  Future<AdminDriverRecord?> _resolveDriverForDrawer(String driverId) async {
+    final List<AdminDriverRecord> pool =
+        _driversOnly ?? _snapshot?.drivers ?? const <AdminDriverRecord>[];
+    for (final AdminDriverRecord d in pool) {
+      if (d.id == driverId) {
+        return d;
+      }
+    }
+    final Map<String, dynamic>? overview =
+        await _dataService.fetchDriverEntityTabForAdmin(
+      driverId: driverId,
+      tabId: 'overview',
+    );
+    if (overview == null || overview['success'] != true) {
+      return null;
+    }
+    final Object? raw = overview['driver'];
+    if (raw is! Map) {
+      return _minimalDriverPlaceholder(driverId);
+    }
+    return _driverFromOverviewMap(driverId, Map<String, dynamic>.from(raw));
+  }
+
+  AdminDriverRecord _minimalDriverPlaceholder(String driverId) {
+    return AdminDriverRecord(
+      id: driverId,
+      name: driverId,
+      phone: '',
+      email: '',
+      city: '',
+      stateOrRegion: '',
+      accountStatus: 'active',
+      status: 'offline',
+      isOnline: false,
+      verificationStatus: 'incomplete',
+      vehicleName: '',
+      plateNumber: '',
+      tripCount: 0,
+      completedTripCount: 0,
+      grossEarnings: 0,
+      netEarnings: 0,
+      walletBalance: 0,
+      totalWithdrawn: 0,
+      pendingWithdrawals: 0,
+      monetizationModel: 'commission',
+      subscriptionPlanType: 'monthly',
+      subscriptionStatus: 'not_started',
+      subscriptionActive: false,
+      createdAt: null,
+      updatedAt: null,
+      serviceTypes: const <String>['ride'],
+      rawData: const <String, dynamic>{},
     );
   }
 
-  Future<void> _showTripDialog(AdminTripRecord trip) async {
-    final routeLog = trip.routeLog;
-    final checkpoints = _map(routeLog['checkpoints']).length;
-    final settlement = _map(routeLog['settlement']);
-    final isCancelled = trip.status == 'cancelled';
-    final hasValidSettlement = trip.status == 'completed' &&
-        (trip.settlementStatus == 'completed' ||
-            trip.settlementStatus == 'payment_review');
-    final detailItems = <String, String>{
-      'Status': sentenceCaseStatus(trip.status),
-      'Service type': sentenceCaseStatus(trip.serviceType),
-      'City': trip.city.isNotEmpty ? trip.city : 'Not set',
-      'Pickup':
-          trip.pickupAddress.isNotEmpty ? trip.pickupAddress : 'Not available',
-      'Destination': trip.destinationAddress.isNotEmpty
-          ? trip.destinationAddress
-          : 'Not available',
-      'Payment method': trip.paymentMethod,
-      'Requested at': formatAdminDateTime(trip.createdAt),
-      if (trip.acceptedAt != null)
-        'Accepted at': formatAdminDateTime(trip.acceptedAt),
-      if (isCancelled) 'Cancelled at': formatAdminDateTime(trip.cancelledAt),
-      if (isCancelled)
-        'Cancellation reason':
-            _tripCancellationReasonLabel(trip.cancellationReason),
-      if (!isCancelled && trip.arrivedAt != null)
-        'Arrived at': formatAdminDateTime(trip.arrivedAt),
-      if (!isCancelled && trip.startedAt != null)
-        'Started at': formatAdminDateTime(trip.startedAt),
-      if (!isCancelled && trip.completedAt != null)
-        'Completed at': formatAdminDateTime(trip.completedAt),
-      'Settlement result': trip.settlementStatus.isNotEmpty
-          ? sentenceCaseStatus(trip.settlementStatus)
-          : 'No settlement status',
-      if (hasValidSettlement)
-        'Fare breakdown':
-            'Gross ${formatAdminCurrency(trip.fareAmount)} • Commission ${formatAdminCurrency(trip.commissionAmount)} • Driver ${formatAdminCurrency(trip.driverPayout)}',
-      if (!isCancelled)
-        'Route data': checkpoints > 0
-            ? '$checkpoints checkpoint logs available'
-            : 'No checkpoint logs yet',
-      if (!isCancelled)
-        'Route settlement': settlement.isNotEmpty
-            ? sentenceCaseStatus(_text(settlement['settlementStatus']))
-            : 'No route settlement log',
-    };
-    await _showDetailsDialog(
-      title: 'Trip ${trip.id}',
-      subtitle: '${trip.riderName} • ${trip.driverName}',
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          AdminKeyValueWrap(
-            items: detailItems,
-          ),
-        ],
+  AdminDriverRecord _driverFromOverviewMap(
+    String driverId,
+    Map<String, dynamic> m,
+  ) {
+    String s(dynamic v) => '${v ?? ''}'.trim();
+    final Map<String, dynamic> ver = m['verification'] is Map
+        ? Map<String, dynamic>.from(m['verification'] as Map)
+        : <String, dynamic>{};
+    final Map<String, dynamic> veh = m['vehicle'] is Map
+        ? Map<String, dynamic>.from(m['vehicle'] as Map)
+        : <String, dynamic>{};
+    return AdminDriverRecord(
+      id: driverId,
+      name: s(m['name']).isEmpty ? 'Driver' : s(m['name']),
+      phone: s(m['phone']),
+      email: s(m['email']),
+      city: s(m['city']),
+      stateOrRegion: s(m['state'] ?? m['region']),
+      accountStatus: s(m['accountStatus'] ?? m['account_status']).isEmpty
+          ? 'active'
+          : s(m['accountStatus'] ?? m['account_status']),
+      status: s(m['status']).isEmpty ? 'offline' : s(m['status']),
+      isOnline: m['isOnline'] == true || m['is_online'] == true,
+      verificationStatus:
+          s(ver['overallStatus'] ?? m['verification_status']).isEmpty
+              ? 'incomplete'
+              : s(ver['overallStatus'] ?? m['verification_status']),
+      vehicleName: s(m['car'] ?? veh['model']),
+      plateNumber: s(m['plate'] ?? veh['plate']),
+      tripCount: int.tryParse('${m['tripCount'] ?? m['trip_count'] ?? 0}') ?? 0,
+      completedTripCount: int.tryParse(
+            '${m['completedTripCount'] ?? m['completed_trip_count'] ?? 0}',
+          ) ??
+          0,
+      grossEarnings: (num.tryParse(
+                '${m['grossEarnings'] ?? m['gross_earnings'] ?? 0}',
+              ) ??
+              0)
+          .toDouble(),
+      netEarnings: (num.tryParse(
+                '${m['netEarnings'] ?? m['net_earnings'] ?? 0}',
+              ) ??
+              0)
+          .toDouble(),
+      walletBalance: (num.tryParse(
+                '${m['walletBalance'] ?? m['wallet_balance'] ?? 0}',
+              ) ??
+              0)
+          .toDouble(),
+      totalWithdrawn: (num.tryParse(
+                '${m['totalWithdrawn'] ?? m['total_withdrawn'] ?? 0}',
+              ) ??
+              0)
+          .toDouble(),
+      pendingWithdrawals: (num.tryParse(
+                '${m['pendingWithdrawals'] ?? m['pending_withdrawals'] ?? 0}',
+              ) ??
+              0)
+          .toDouble(),
+      monetizationModel:
+          s(m['monetization_model'] ?? m['monetizationModel']).isEmpty
+              ? 'commission'
+              : s(m['monetization_model'] ?? m['monetizationModel']),
+      subscriptionPlanType:
+          s(m['subscription_plan_type'] ?? m['subscriptionPlanType']).isEmpty
+              ? 'monthly'
+              : s(m['subscription_plan_type'] ?? m['subscriptionPlanType']),
+      subscriptionStatus:
+          s(m['subscription_status'] ?? m['subscriptionStatus']).isEmpty
+              ? 'not_started'
+              : s(m['subscription_status'] ?? m['subscriptionStatus']),
+      subscriptionActive:
+          m['subscription_active'] == true || m['subscriptionActive'] == true,
+      createdAt: null,
+      updatedAt: null,
+      serviceTypes: const <String>['ride'],
+      rawData: m,
+    );
+  }
+
+  void _replaceDriverInPagedLists(
+    String driverId,
+    AdminDriverRecord Function(AdminDriverRecord current) map,
+  ) {
+    final AdminPanelSnapshot? snap = _snapshot;
+    final bool inPaged =
+        _driversOnly != null && _driversOnly!.any((AdminDriverRecord d) => d.id == driverId);
+    final bool inSnapshot =
+        snap != null && snap.drivers.any((AdminDriverRecord d) => d.id == driverId);
+    if (!inPaged && !inSnapshot) {
+      return;
+    }
+    setState(() {
+      if (inPaged) {
+        _driversOnly = _driversOnly!
+            .map(
+              (AdminDriverRecord d) => d.id == driverId ? map(d) : d,
+            )
+            .toList(growable: false);
+      }
+      if (inSnapshot) {
+        final AdminPanelSnapshot s = snap;
+        _snapshot = s.copyWith(
+          drivers: s.drivers
+              .map(
+                (AdminDriverRecord d) => d.id == driverId ? map(d) : d,
+              )
+              .toList(growable: false),
+        );
+      }
+    });
+    _recomputeDriverFilter();
+  }
+
+  AdminAuditEvent _driverAudit({
+    required String action,
+    required String driverId,
+    Object? before,
+    Object? after,
+    Map<String, dynamic> metadata = const <String, dynamic>{},
+    String? correlationId,
+    int? entityRevision,
+    DateTime? entityUpdatedAt,
+  }) {
+    return AdminAuditEvent(
+      actorUid: widget.session.uid,
+      actorEmail: widget.session.email,
+      entityType: 'driver',
+      entityId: driverId,
+      action: action,
+      before: before,
+      after: after,
+      metadata: metadata,
+      correlationId: correlationId,
+      entityRevision: entityRevision,
+      entityUpdatedAt: entityUpdatedAt,
+    );
+  }
+
+  AdminAuditEvent _riderAudit({
+    required String action,
+    required String riderId,
+    Object? before,
+    Object? after,
+    Map<String, dynamic> metadata = const <String, dynamic>{},
+    String? correlationId,
+  }) {
+    return AdminAuditEvent(
+      actorUid: widget.session.uid,
+      actorEmail: widget.session.email,
+      entityType: 'rider',
+      entityId: riderId,
+      action: action,
+      before: before,
+      after: after,
+      metadata: metadata,
+      correlationId: correlationId,
+    );
+  }
+
+  AdminAuditEvent _withdrawalAudit({
+    required String action,
+    required String withdrawalId,
+    Object? before,
+    Object? after,
+    Map<String, dynamic> metadata = const <String, dynamic>{},
+    String? correlationId,
+  }) {
+    return AdminAuditEvent(
+      actorUid: widget.session.uid,
+      actorEmail: widget.session.email,
+      entityType: 'withdrawal',
+      entityId: withdrawalId,
+      action: action,
+      before: before,
+      after: after,
+      metadata: metadata,
+      correlationId: correlationId,
+    );
+  }
+
+  Future<void> _refreshDriverRows() async {
+    if (_section == AdminSection.drivers) {
+      await _loadDriversOnly(resetServerCursors: false);
+    }
+  }
+
+  Future<void> _showDriverDialog(
+    AdminDriverRecord driver, {
+    String? initialTabId,
+    bool syncUrl = true,
+  }) async {
+    if (!mounted) {
+      return;
+    }
+    final int t0 = DateTime.now().millisecondsSinceEpoch;
+    final AdminEntityDrawerController controller = AdminEntityDrawerController();
+    final int initialIndex = _driverDrawerTabIndex(initialTabId);
+    await AdminEntityDrawer.present(
+      context,
+      entityType: 'driver',
+      entityId: driver.id,
+      title: driver.name,
+      subtitle: driver.phone.isNotEmpty ? driver.phone : driver.id,
+      tabs: const <AdminEntityTabSpec>[
+        AdminEntityTabSpec(id: 'overview', label: 'Overview', icon: Icons.person_outline),
+        AdminEntityTabSpec(
+          id: 'verification',
+          label: 'Verification',
+          icon: Icons.verified_user_outlined,
+        ),
+        AdminEntityTabSpec(
+          id: 'wallet',
+          label: 'Wallet',
+          icon: Icons.account_balance_wallet_outlined,
+        ),
+        AdminEntityTabSpec(id: 'trips', label: 'Trips', icon: Icons.route_outlined),
+        AdminEntityTabSpec(
+          id: 'subscription',
+          label: 'Subscription',
+          icon: Icons.card_membership_outlined,
+        ),
+        AdminEntityTabSpec(
+          id: 'violations',
+          label: 'Violations',
+          icon: Icons.report_problem_outlined,
+        ),
+        AdminEntityTabSpec(
+          id: 'notes',
+          label: 'Notes',
+          icon: Icons.sticky_note_2_outlined,
+        ),
+        AdminEntityTabSpec(id: 'audit', label: 'Audit', icon: Icons.history),
+      ],
+      controller: controller,
+      debugOpenStartedMs: t0,
+      cachePolicy: AdminEntityCachePolicy.driverDrawer(),
+      syncBrowserHistory: syncUrl && kIsWeb,
+      initialTabIndex: initialIndex,
+      loadBody: (String tabId) => AdminDriverDrawerTabs.loadBody(
+        driver: driver,
+        tabId: tabId,
+        dataService: _dataService,
+        actionButtonsFor: (AdminDriverRecord d) =>
+            _driverAccountActionButtons(d, drawerController: controller),
       ),
     );
   }
@@ -2710,27 +5631,51 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        '${withdrawal.driverName} • ${formatAdminCurrency(withdrawal.amount)}',
+                        '${sentenceCaseStatus(withdrawal.entityType)} • ${formatAdminCurrency(withdrawal.amount)}',
                         style: const TextStyle(color: Color(0xFF6B655B)),
                       ),
+                      if (withdrawal.entityType == 'driver' &&
+                          !withdrawal.hasPayoutDestination) ...<Widget>[
+                        const SizedBox(height: 12),
+                        AdminStatusChip(
+                          'Missing withdrawal destination',
+                          color: AdminThemeTokens.warning,
+                        ),
+                      ],
                       const SizedBox(height: 18),
                       AdminKeyValueWrap(
                         items: <String, String>{
+                          'Entity type': withdrawal.entityType,
+                          'Driver UID': withdrawal.entityType == 'driver'
+                              ? (withdrawal.driverId.isNotEmpty
+                                  ? withdrawal.driverId
+                                  : '—')
+                              : '—',
+                          'Merchant ID': withdrawal.entityType == 'merchant'
+                              ? (withdrawal.merchantId.isNotEmpty
+                                  ? withdrawal.merchantId
+                                  : '—')
+                              : '—',
+                          'Party name': withdrawal.driverName.isNotEmpty
+                              ? withdrawal.driverName
+                              : '—',
+                          'Amount': formatAdminCurrency(withdrawal.amount),
                           'Current status':
                               sentenceCaseStatus(withdrawal.status),
-                          'Requested':
+                          'Requested at':
                               formatAdminDateTime(withdrawal.requestDate),
-                          'Processed':
+                          'Processed at':
                               formatAdminDateTime(withdrawal.processedDate),
-                          'Bank': withdrawal.bankName.isNotEmpty
+                          'Bank name': withdrawal.bankName.isNotEmpty
                               ? withdrawal.bankName
-                              : 'Not available',
-                          'Account name': withdrawal.accountName.isNotEmpty
-                              ? withdrawal.accountName
-                              : 'Not available',
+                              : '—',
                           'Account number': withdrawal.accountNumber.isNotEmpty
                               ? withdrawal.accountNumber
-                              : 'Not available',
+                              : '—',
+                          'Account holder name':
+                              withdrawal.accountName.isNotEmpty
+                                  ? withdrawal.accountName
+                                  : '—',
                         },
                       ),
                       const SizedBox(height: 18),
@@ -2764,18 +5709,99 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                       Row(
                         children: <Widget>[
                           Expanded(
-                            child: AdminPrimaryButton(
-                              label: 'Save payout update',
-                              onPressed: () async {
+                            child: Builder(
+                              builder: (BuildContext buttonContext) {
+                              final bool needsWithdrawalApprove =
+                                  selectedStatus == 'paid' ||
+                                      selectedStatus == 'rejected';
+                              final bool canMutateWithdrawal =
+                                  needsWithdrawalApprove
+                                      ? widget.session.hasPermission(
+                                          'withdrawals.approve',
+                                        )
+                                      : widget.session.hasPermission(
+                                          'finance.write',
+                                        );
+                              final Future<void> Function()? onSave =
+                                  canMutateWithdrawal
+                                      ? () async {
+                                if (selectedStatus == 'paid' &&
+                                    withdrawal.entityType == 'driver' &&
+                                    !withdrawal.hasPayoutDestination) {
+                                  ScaffoldMessenger.of(buttonContext).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Missing withdrawal destination. Cannot mark paid until payout details exist on this request.',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
+                                final String auditNote = noteController.text.trim();
+                                if (selectedStatus == 'paid' &&
+                                    auditNote.length < 8) {
+                                  ScaffoldMessenger.of(buttonContext).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Audit note is required (at least 8 characters) before marking paid.',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
                                 Navigator.of(dialogContext).pop();
-                                await _dataService.updateWithdrawal(
-                                  withdrawal: withdrawal,
-                                  status: selectedStatus,
-                                  payoutReference: referenceController.text,
-                                  note: noteController.text,
+                                if (!mounted) {
+                                  return;
+                                }
+                                await _actionExecutor.run<void>(
+                                  context: context,
+                                  actionName: 'withdrawal_update',
+                                  successMessage: 'Payout record updated.',
+                                  useDefaultMutationThrottle: true,
+                                  invoke: () => _dataService.updateWithdrawal(
+                                    withdrawal: withdrawal,
+                                    status: selectedStatus,
+                                    payoutReference: referenceController.text,
+                                    note: noteController.text,
+                                  ),
+                                  emitAudit: ({
+                                    required bool success,
+                                    Object? value,
+                                    Object? error,
+                                    required String correlationId,
+                                  }) {
+                                    return _withdrawalAudit(
+                                      action: 'withdrawal_update',
+                                      withdrawalId: withdrawal.id,
+                                      before: withdrawal.status,
+                                      after: success ? selectedStatus : null,
+                                      metadata: <String, dynamic>{
+                                        'driverId': withdrawal.driverId,
+                                        'payoutReference': referenceController.text,
+                                        'note': noteController.text,
+                                        if (!success && error != null) 'error': error.toString(),
+                                      },
+                                      correlationId: correlationId,
+                                    );
+                                  },
+                                  onSuccess: (_) {
+                                    unawaited(_refresh());
+                                  },
                                 );
-                                await _loadSnapshot();
-                              },
+                              }
+                                      : null;
+                              final Widget button = AdminPrimaryButton(
+                                label: 'Save payout update',
+                                onPressed: onSave,
+                              );
+                              if (canMutateWithdrawal) {
+                                return button;
+                              }
+                              return Tooltip(
+                                message: kAdminNoPermissionTooltip,
+                                child: button,
+                              );
+                            },
                             ),
                           ),
                         ],
@@ -2791,248 +5817,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
 
     referenceController.dispose();
-    noteController.dispose();
-  }
-
-  Future<void> _showSubscriptionDialog(AdminSubscriptionRecord record) async {
-    await _showDetailsDialog(
-      title: '${record.driverName} subscription',
-      subtitle: '${sentenceCaseStatus(record.planType)} plan',
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          AdminKeyValueWrap(
-            items: <String, String>{
-              'City': record.city.isNotEmpty ? record.city : 'Not set',
-              'Plan type': sentenceCaseStatus(record.planType),
-              'Status': sentenceCaseStatus(record.status),
-              'Payment status': sentenceCaseStatus(record.paymentStatus),
-              'Start date': formatAdminDate(record.startDate),
-              'End date': formatAdminDate(record.endDate),
-            },
-          ),
-          const SizedBox(height: 18),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: <Widget>[
-              AdminPrimaryButton(
-                label: 'Mark active',
-                onPressed: () async {
-                  Navigator.of(context).pop();
-                  await _dataService.updateSubscriptionStatus(
-                    subscription: record,
-                    status: 'active',
-                  );
-                  await _loadSnapshot();
-                },
-              ),
-              AdminGhostButton(
-                label: 'Mark expired',
-                onPressed: () async {
-                  Navigator.of(context).pop();
-                  await _dataService.updateSubscriptionStatus(
-                    subscription: record,
-                    status: 'expired',
-                  );
-                  await _loadSnapshot();
-                },
-              ),
-              AdminGhostButton(
-                label: 'Cancel plan',
-                onPressed: () async {
-                  Navigator.of(context).pop();
-                  await _dataService.updateSubscriptionStatus(
-                    subscription: record,
-                    status: 'cancelled',
-                  );
-                  await _loadSnapshot();
-                },
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _showVerificationDialog(AdminVerificationCase item) async {
-    final noteController = TextEditingController();
-    await showDialog<void>(
-      context: context,
-      builder: (BuildContext dialogContext) {
-        return Dialog(
-          insetPadding: const EdgeInsets.all(24),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(28),
-          ),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 860),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      item.driverName,
-                      style: const TextStyle(
-                        color: AdminThemeTokens.ink,
-                        fontSize: 24,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '${item.phone} • ${item.email}',
-                      style: const TextStyle(color: Color(0xFF6A6359)),
-                    ),
-                    const SizedBox(height: 18),
-                    AdminKeyValueWrap(
-                      items: <String, String>{
-                        'Business model':
-                            sentenceCaseStatus(item.businessModel),
-                        'Overall status':
-                            sentenceCaseStatus(item.overallStatus),
-                        'Workflow status': sentenceCaseStatus(item.status),
-                        'Submitted at': formatAdminDateTime(item.submittedAt),
-                        'Reviewed at': formatAdminDateTime(item.reviewedAt),
-                        'Reviewed by': item.reviewedBy.isNotEmpty
-                            ? item.reviewedBy
-                            : 'Pending',
-                        'Failure reason': item.failureReason.isNotEmpty
-                            ? item.failureReason
-                            : 'None',
-                      },
-                    ),
-                    const SizedBox(height: 20),
-                    const Text(
-                      'Documents',
-                      style: TextStyle(
-                        color: AdminThemeTokens.ink,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    ...item.documents.entries
-                        .map((MapEntry<String, dynamic> entry) {
-                      final document = _map(entry.value);
-                      final fileUrl = _text(document['fileUrl']);
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF8F5EF),
-                            borderRadius: BorderRadius.circular(18),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Row(
-                                children: <Widget>[
-                                  Expanded(
-                                    child: Text(
-                                      _text(document['label']).isNotEmpty
-                                          ? _text(document['label'])
-                                          : entry.key,
-                                      style: const TextStyle(
-                                        color: AdminThemeTokens.ink,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                  ),
-                                  AdminStatusChip(_text(document['status'])),
-                                ],
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                _text(document['documentNumber']).isNotEmpty
-                                    ? _text(document['documentNumber'])
-                                    : 'No document number stored',
-                                style:
-                                    const TextStyle(color: Color(0xFF6F685E)),
-                              ),
-                              if (fileUrl.isNotEmpty) ...<Widget>[
-                                const SizedBox(height: 10),
-                                AdminGhostButton(
-                                  label: 'Open uploaded file',
-                                  onPressed: () async {
-                                    final uri = Uri.tryParse(fileUrl);
-                                    if (uri != null) {
-                                      await launchUrl(uri);
-                                    }
-                                  },
-                                  icon: Icons.open_in_new_rounded,
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                      );
-                    }),
-                    TextField(
-                      controller: noteController,
-                      minLines: 2,
-                      maxLines: 4,
-                      decoration: _dialogInputDecoration(
-                          'Review note or resubmission reason'),
-                    ),
-                    const SizedBox(height: 18),
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 10,
-                      children: <Widget>[
-                        AdminPrimaryButton(
-                          label: 'Approve',
-                          onPressed: () async {
-                            Navigator.of(dialogContext).pop();
-                            await _dataService.reviewVerificationCase(
-                              verificationCase: item,
-                              action: 'approve',
-                              reviewedBy: widget.session.email,
-                              note: noteController.text,
-                            );
-                            await _loadSnapshot();
-                          },
-                        ),
-                        AdminGhostButton(
-                          label: 'Reject',
-                          onPressed: () async {
-                            Navigator.of(dialogContext).pop();
-                            await _dataService.reviewVerificationCase(
-                              verificationCase: item,
-                              action: 'reject',
-                              reviewedBy: widget.session.email,
-                              note: noteController.text,
-                            );
-                            await _loadSnapshot();
-                          },
-                        ),
-                        AdminGhostButton(
-                          label: 'Request resubmission',
-                          onPressed: () async {
-                            Navigator.of(dialogContext).pop();
-                            await _dataService.reviewVerificationCase(
-                              verificationCase: item,
-                              action: 'resubmit',
-                              reviewedBy: widget.session.email,
-                              note: noteController.text,
-                            );
-                            await _loadSnapshot();
-                          },
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
     noteController.dispose();
   }
 
@@ -3168,31 +5952,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
     return items.take(5).toList();
   }
-
-  Map<String, dynamic> _map(dynamic value) {
-    if (value is Map) {
-      return value.map<String, dynamic>(
-        (dynamic key, dynamic entryValue) =>
-            MapEntry(key.toString(), entryValue),
-      );
-    }
-    return <String, dynamic>{};
-  }
-
-  String _tripCancellationReasonLabel(String reason) {
-    return switch (reason.trim().toLowerCase()) {
-      'timeout' => 'Timeout',
-      'driver_offline' => 'Driver offline',
-      'user_cancelled' => 'User cancelled',
-      'driver_cancelled' => 'Driver cancelled',
-      'no_route_logs' => 'No route logs',
-      'no_drivers_available' => 'No drivers available',
-      '' => 'Not available',
-      _ => sentenceCaseStatus(reason),
-    };
-  }
-
-  String _text(dynamic value) => value?.toString().trim() ?? '';
 }
 
 double mathScore({
@@ -3218,13 +5977,11 @@ class _AdminPendingNotification {
     required this.title,
     required this.subtitle,
     required this.section,
-    this.updatedAt,
   });
 
   final String title;
   final String subtitle;
   final AdminSection section;
-  final int? updatedAt;
 }
 
 class _PricingEditor extends StatefulWidget {
@@ -3232,10 +5989,12 @@ class _PricingEditor extends StatefulWidget {
     required this.pricing,
     required this.settings,
     required this.onSave,
+    required this.canEditPricing,
   });
 
   final AdminPricingConfig pricing;
   final AdminOperationalSettings settings;
+  final bool canEditPricing;
   final Future<void> Function(
     List<AdminCityPricing> cities,
     double commissionRate,
@@ -3284,6 +6043,15 @@ class _PricingEditorState extends State<_PricingEditor> {
   }
 
   Future<void> _save() async {
+    if (!widget.canEditPricing) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text(kAdminNoPermissionTooltip)),
+      );
+      return;
+    }
     final commissionPercent =
         double.tryParse(_commissionController.text.trim());
     final weekly = int.tryParse(_weeklyController.text.trim());
@@ -3362,7 +6130,7 @@ class _PricingEditorState extends State<_PricingEditor> {
         AdminSummaryBanner(
           title: 'Pricing management',
           subtitle:
-              'Display or safely edit official fare formulas for Lagos and Abuja, together with NexRide monetization rules.',
+              'Display or safely edit official fare formulas for rollout regions (Lagos, Abuja/FCT, Delta, Edo, Imo, Anambra), together with NexRide monetization rules.',
           kpis: <String, String>{
             'Commission drivers':
                 '${(widget.pricing.commissionRate * 100).toStringAsFixed(0)}%',
@@ -3429,11 +6197,13 @@ class _PricingEditorState extends State<_PricingEditor> {
                       Switch.adaptive(
                         value: controllers.enabled,
                         activeTrackColor: AdminThemeTokens.gold,
-                        onChanged: (bool value) {
-                          setState(() {
-                            controllers.enabled = value;
-                          });
-                        },
+                        onChanged: widget.canEditPricing
+                            ? (bool value) {
+                                setState(() {
+                                  controllers.enabled = value;
+                                });
+                              }
+                            : null,
                       ),
                     ],
                   ),
@@ -3476,11 +6246,21 @@ class _PricingEditorState extends State<_PricingEditor> {
             ),
           );
         }),
-        AdminPrimaryButton(
-          label: _saving ? 'Saving...' : 'Save pricing config',
-          onPressed: _saving ? null : _save,
-          icon: Icons.save_outlined,
-        ),
+        if (widget.canEditPricing)
+          AdminPrimaryButton(
+            label: _saving ? 'Saving...' : 'Save pricing config',
+            onPressed: _saving ? null : _save,
+            icon: Icons.save_outlined,
+          )
+        else
+          Tooltip(
+            message: kAdminNoPermissionTooltip,
+            child: AdminPrimaryButton(
+              label: _saving ? 'Saving...' : 'Save pricing config',
+              onPressed: null,
+              icon: Icons.save_outlined,
+            ),
+          ),
       ],
     );
   }
@@ -3488,6 +6268,7 @@ class _PricingEditorState extends State<_PricingEditor> {
   Widget _editorField(TextEditingController controller, String label) {
     return TextField(
       controller: controller,
+      readOnly: !widget.canEditPricing,
       decoration: InputDecoration(
         labelText: label,
         filled: true,

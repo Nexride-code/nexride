@@ -177,6 +177,10 @@
     },
 
     "app_config": {
+      "nexride_official_bank_account": {
+        ".read": false,
+        ".write": false
+      },
       "rider_trust_rules": {
         ".read": "auth != null",
         ".write": "auth != null && root.child('users/' + auth.uid + '/role').val() === 'admin'"
@@ -425,6 +429,22 @@
       "$ticketId": {
         "$logId": {
           ".write": "auth != null && newData.child('actorId').val() === auth.uid && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))"
+        }
+      }
+    },
+
+    "merchant_public_teaser": {
+      "$merchantId": {
+        ".read": "auth != null",
+        ".write": false
+      }
+    },
+
+    "merchant_portal_presence": {
+      "$merchantId": {
+        "$sessionKey": {
+          ".read": "auth != null && ((auth.token.admin === true) || (auth.token.super_admin === true) || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin'))",
+          ".write": false
         }
       }
     }

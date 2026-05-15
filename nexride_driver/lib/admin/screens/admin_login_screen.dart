@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../portal_security/portal_forgot_password_dialog.dart';
 import '../admin_config.dart';
+import '../models/admin_models.dart';
 import '../services/admin_auth_service.dart';
 
 class AdminLoginScreen extends StatefulWidget {
@@ -10,11 +13,13 @@ class AdminLoginScreen extends StatefulWidget {
     this.inlineMessage,
     this.authService,
     this.dashboardRoute = AdminRoutePaths.admin,
+    this.changePasswordRoute = AdminPortalRoutePaths.changePassword,
   });
 
   final String? inlineMessage;
   final AdminAuthService? authService;
   final String dashboardRoute;
+  final String changePasswordRoute;
 
   @override
   State<AdminLoginScreen> createState() => _AdminLoginScreenState();
@@ -35,12 +40,27 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
   bool _obscurePassword = true;
   String? _errorMessage;
 
+  /// Shown when Firebase already has a user session — [currentSession] is
+  /// only awaited when the operator taps continue (never blocks first paint).
+  bool _showContinueToDashboard = false;
+  bool _continueBusy = false;
+
+  static const Duration _kResumeSessionTimeout = Duration(seconds: 25);
+
   @override
   void initState() {
     super.initState();
     _authService = widget.authService ?? AdminAuthService();
     debugPrint(
       '[AdminLogin] init inlineMessage=${widget.inlineMessage ?? '(none)'}',
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshContinueHint());
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          _refreshContinueHint();
+        }
+      }),
     );
     _animationController = AnimationController(
       vsync: this,
@@ -62,6 +82,89 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
     _passwordController.dispose();
     _animationController.dispose();
     super.dispose();
+  }
+
+  String _destinationRouteAfterAuth(BuildContext context) {
+    final Object? args = ModalRoute.of(context)?.settings.arguments;
+    if (args is AdminLoginIntent) {
+      final String? dest = AdminLoginIntent.validatedReturnRoute(args.returnRoute);
+      if (dest != null) {
+        return dest;
+      }
+    }
+    return widget.dashboardRoute;
+  }
+
+  void _refreshContinueHint() {
+    if (!mounted) {
+      return;
+    }
+    final show = _authService.hasAuthenticatedUser;
+    if (show == _showContinueToDashboard) {
+      return;
+    }
+    setState(() => _showContinueToDashboard = show);
+  }
+
+  Future<void> _continueToDashboard() async {
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _continueBusy = true;
+      _errorMessage = null;
+    });
+    try {
+      final AdminSession? session = await _authService
+          .currentSession()
+          .timeout(_kResumeSessionTimeout);
+      if (!mounted) {
+        return;
+      }
+      if (session == null) {
+        if (_authService.hasAuthenticatedUser) {
+          await _authService.signOut();
+        }
+        setState(() {
+          _showContinueToDashboard = false;
+          _errorMessage =
+              'Your account is signed in but does not have NexRide admin access. '
+              'Contact the NexRide system administrator, or sign in with a different account.';
+        });
+        return;
+      }
+      if (session.mustChangePassword) {
+        await Navigator.of(context).pushReplacementNamed(
+          widget.changePasswordRoute,
+        );
+        return;
+      }
+      final String target = _destinationRouteAfterAuth(context);
+      if (target == AdminPortalRoutePaths.auditLogs) {
+        debugPrint('[AUDIT_LOGS][LOGIN] continue route=/admin/audit-logs (base-relative)');
+      }
+      await Navigator.of(context).pushNamedAndRemoveUntil(
+        target,
+        (Route<dynamic> route) => false,
+      );
+    } on TimeoutException {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage =
+            'Verifying admin access took too long. Try again, or sign out and sign back in.';
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage = e.toString().replaceFirst('Bad state: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _continueBusy = false);
+      }
+    }
   }
 
   Future<void> _signIn() async {
@@ -88,11 +191,15 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
       if (!mounted) {
         return;
       }
+      final String target = _destinationRouteAfterAuth(context);
       debugPrint(
-        '[AdminLogin] admin sign-in succeeded, routing to ${widget.dashboardRoute}',
+        '[AdminLogin] admin sign-in succeeded, routing to $target',
       );
+      if (target == AdminPortalRoutePaths.auditLogs) {
+        debugPrint('[AUDIT_LOGS][LOGIN] post-auth route=/admin/audit-logs (base-relative)');
+      }
       Navigator.of(context).pushNamedAndRemoveUntil(
-        widget.dashboardRoute,
+        target,
         (Route<dynamic> route) => false,
       );
     } catch (error) {
@@ -100,8 +207,19 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
       if (!mounted) {
         return;
       }
+      final msg = error.toString().replaceFirst('Bad state: ', '');
+      if (msg.contains('does not have access')) {
+        try {
+          await _authService.signOut();
+        } catch (e) {
+          debugPrint('[AdminLogin] signOut after denied access failed: $e');
+        }
+        if (mounted) {
+          _refreshContinueHint();
+        }
+      }
       setState(() {
-        _errorMessage = error.toString().replaceFirst('Bad state: ', '');
+        _errorMessage = msg;
       });
     } finally {
       if (mounted) {
@@ -308,6 +426,47 @@ class _AdminLoginScreenState extends State<AdminLoginScreen>
             const SizedBox(height: 16),
             _inlineCallout(_errorMessage!, const Color(0xFFFFF0EE),
                 const Color(0xFFD64545)),
+          ],
+          if (_showContinueToDashboard) ...<Widget>[
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE8F5E9),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: const Color(0xFF81C784)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  const Text(
+                    'Already signed in',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 16,
+                      color: Color(0xFF1B5E20),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'We detected an active Firebase session. Continue opens the '
+                    'control center after verifying admin access.',
+                    style: TextStyle(
+                      color: Colors.black.withValues(alpha: 0.7),
+                      height: 1.45,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.tonal(
+                    onPressed: _continueBusy ? null : _continueToDashboard,
+                    child: Text(
+                      _continueBusy ? 'Verifying…' : 'Continue to dashboard',
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
           const SizedBox(height: 18),
           Form(

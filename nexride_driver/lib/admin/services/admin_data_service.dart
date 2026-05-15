@@ -5,18 +5,44 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 
+import '../admin_drivers_route_debug.dart';
 import '../../config/driver_app_config.dart';
 import '../../services/driver_finance_service.dart';
 import '../../support/driver_profile_support.dart';
+import '../utils/admin_callable_feedback.dart';
 import '../models/admin_models.dart';
+import '../utils/admin_perf_guard.dart';
 
+/// Loads data for the hosted **NexRide Admin** portal.
+///
+/// **Official direction:** privileged operations, audit trails, and most
+/// section-specific data use **HTTPS Cloud Functions** (`admin*` callables).
+/// Functions enforce admin auth and then read/write Firestore, RTDB, Auth,
+/// Storage, or payment backends as needed. The admin UI must not bypass
+/// functions for those paths.
+///
+/// **Legacy:** some dashboard flows still use the client RTDB SDK (e.g. large
+/// snapshot fetch) during migration; new work should prefer callable-backed
+/// loaders like drivers-only, audit logs, and service areas.
 class AdminDataService {
   AdminDataService({
     rtdb.FirebaseDatabase? database,
   }) : _database = database;
 
   static const Duration _sourceTimeout = Duration(seconds: 8);
+  static const Duration _driversRtdbProbeTimeout = Duration(seconds: 12);
   static AdminPanelSnapshot? _cachedSnapshot;
+
+  static const Map<String, String> _driverTabCallableNames = <String, String>{
+    'overview': 'adminGetDriverOverview',
+    'verification': 'adminGetDriverVerification',
+    'wallet': 'adminGetDriverWallet',
+    'trips': 'adminGetDriverTrips',
+    'subscription': 'adminGetDriverSubscription',
+    'violations': 'adminGetDriverViolations',
+    'notes': 'adminGetDriverNotes',
+    'audit': 'adminGetDriverAuditTimeline',
+  };
 
   final rtdb.FirebaseDatabase? _database;
 
@@ -37,7 +63,39 @@ class AdminDataService {
       'enabled': true,
     },
     'abuja': <String, dynamic>{
-      'city': 'Abuja',
+      'city': 'Abuja / FCT',
+      'baseFareNgn': 600,
+      'perKmNgn': 115,
+      'perMinuteNgn': 12,
+      'minimumFareNgn': 1350,
+      'enabled': true,
+    },
+    'delta': <String, dynamic>{
+      'city': 'Delta',
+      'baseFareNgn': 700,
+      'perKmNgn': 125,
+      'perMinuteNgn': 15,
+      'minimumFareNgn': 1400,
+      'enabled': true,
+    },
+    'edo': <String, dynamic>{
+      'city': 'Edo',
+      'baseFareNgn': 600,
+      'perKmNgn': 115,
+      'perMinuteNgn': 12,
+      'minimumFareNgn': 1350,
+      'enabled': true,
+    },
+    'imo': <String, dynamic>{
+      'city': 'Imo',
+      'baseFareNgn': 600,
+      'perKmNgn': 115,
+      'perMinuteNgn': 12,
+      'minimumFareNgn': 1350,
+      'enabled': true,
+    },
+    'anambra': <String, dynamic>{
+      'city': 'Anambra',
       'baseFareNgn': 600,
       'perKmNgn': 115,
       'perMinuteNgn': 12,
@@ -46,13 +104,73 @@ class AdminDataService {
     },
   };
 
+  /// Stable RTDB key under `app_config/pricing/cities/{slug}` (matches rollout
+  /// region ids: lagos, abuja, delta, edo, imo, anambra). Not used for Rivers/PH.
+  static String _pricingCityStorageKey(String cityName) {
+    final s = cityName.trim().toLowerCase();
+    if (s.startsWith('abuja')) return 'abuja';
+    if (s.startsWith('lagos')) return 'lagos';
+    if (s.startsWith('delta')) return 'delta';
+    if (s.startsWith('edo')) return 'edo';
+    if (s.startsWith('imo')) return 'imo';
+    if (s.startsWith('anambra')) return 'anambra';
+    return s
+        .replaceAll(RegExp(r'[\s/]+'), '_')
+        .replaceAll(RegExp(r'[^a-z0-9_]'), '');
+  }
+
+  /// Union of shipped defaults + optional RTDB `app_config` list so merchant
+  /// channels are never dropped if remote config only lists ride + dispatch.
+  static List<String> _mergeActiveRequestServiceTypes(
+    Map<String, dynamic> appConfigData,
+  ) {
+    final remote = _parseActiveRequestServiceTypesFromAppConfig(appConfigData);
+    final merged = <String>{
+      ...DriverFeatureFlags.activeRequestServiceTypes,
+      ...remote,
+    };
+    return merged.toList()..sort();
+  }
+
+  static List<String> _parseActiveRequestServiceTypesFromAppConfig(
+    Map<String, dynamic> appConfigData,
+  ) {
+    final dynamic raw = appConfigData['activeRequestServiceTypes'] ??
+        appConfigData['active_request_service_types'] ??
+        appConfigData['driverActiveRequestServiceTypes'];
+    if (raw == null) {
+      return const <String>[];
+    }
+    if (raw is List) {
+      return raw
+          .map((dynamic e) => e.toString().trim().toLowerCase())
+          .where((String e) => e.isNotEmpty)
+          .toList();
+    }
+    if (raw is String && raw.trim().isNotEmpty) {
+      return raw
+          .split(',')
+          .map((String e) => e.trim().toLowerCase())
+          .where((String e) => e.isNotEmpty)
+          .toList();
+    }
+    return const <String>[];
+  }
+
+  /// **Legacy compatibility — giant RTDB reads.**
+  ///
+  /// Loads multiple large RTDB roots in parallel (`users`, `ride_requests`,
+  /// `withdraw_requests`, …). **Do not add new callsites.** Use section
+  /// callables (`fetch*PageForAdmin`, `fetchDashboardSnapshot`, entity `adminGet*`)
+  /// instead. Inventory: `lib/admin/docs/SNAPSHOT_MIGRATION.md`.
   Future<AdminPanelSnapshot> fetchSnapshot({
     String adminEmail = '',
     String adminUid = '',
   }) async {
     debugPrint(
-      '[AdminData] fetchSnapshot start adminUid=$adminUid adminEmail=$adminEmail',
+      '[AdminData] fetchSnapshot LEGACY start adminUid=$adminUid adminEmail=$adminEmail',
     );
+    var driversFetchSource = 'rtdb';
     final results = await Future.wait<Map<String, dynamic>>(
       <Future<Map<String, dynamic>>>[
         _safeMapAt(
@@ -60,11 +178,13 @@ class AdminDataService {
           adminUid: adminUid,
           adminEmail: adminEmail,
         ),
-        _safeMapAt(
-          'drivers',
+        _resolveDriversForAdmin(
           adminUid: adminUid,
           adminEmail: adminEmail,
-        ),
+        ).then((resolved) {
+          driversFetchSource = resolved.source;
+          return resolved.data;
+        }),
         _safeMapAt(
           'ride_requests',
           adminUid: adminUid,
@@ -125,11 +245,7 @@ class AdminDataService {
           adminUid: adminUid,
           adminEmail: adminEmail,
         ),
-        _safeMapAt(
-          'trip_route_logs',
-          adminUid: adminUid,
-          adminEmail: adminEmail,
-        ),
+        Future.value(const <String, dynamic>{}), // skip GPS bulk on panel load
         _safeMapAt(
           'app_config',
           adminUid: adminUid,
@@ -140,18 +256,7 @@ class AdminDataService {
     );
 
     final usersData = results[0];
-    var driversData = results[1];
-    var driversFetchSource = 'rtdb';
-    if (driversData.isEmpty) {
-      debugPrint(
-        '[AdminData] /drivers RTDB map empty (rules or network); trying adminFetchDriversTree',
-      );
-      final serverDrivers = await _fetchDriversTreeViaCallable();
-      if (serverDrivers.isNotEmpty) {
-        driversData = serverDrivers;
-        driversFetchSource = 'callable_adminFetchDriversTree';
-      }
-    }
+    final driversData = results[1];
     final rideRequestsData = results[2];
     final walletsData = results[3];
     final withdrawalsData = results[4];
@@ -295,10 +400,963 @@ class AdminDataService {
       },
     );
     debugPrint(
-      '[AdminData] fetchSnapshot success riders=${snapshot.riders.length} drivers=${snapshot.drivers.length} trips=${snapshot.trips.length} withdrawals=${snapshot.withdrawals.length}',
+      '[AdminData] fetchSnapshot LEGACY success riders=${snapshot.riders.length} drivers=${snapshot.drivers.length} trips=${snapshot.trips.length} withdrawals=${snapshot.withdrawals.length}',
     );
     _cachedSnapshot = snapshot;
     return snapshot;
+  }
+
+  /// Aggregate dashboard only — no full RTDB trees. Used for `/admin` landing.
+  Future<AdminPanelSnapshot> fetchDashboardSnapshot({
+    required String adminEmail,
+    required String adminUid,
+  }) async {
+    debugPrint(
+      '[AdminData] fetchDashboardSnapshot start adminUid=$adminUid',
+    );
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminGetOperationsDashboard',
+      options: HttpsCallableOptions(timeout: Duration(seconds: 25)),
+    );
+    final result = await callable.call(<String, dynamic>{});
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    final dash = _map(data['dashboard']);
+    final metrics = AdminDashboardMetrics(
+      totalRiders: (dash['total_riders'] as num?)?.toInt() ??
+          (dash['total_riders_auth'] as num?)?.toInt() ??
+          (dash['total_riders_sample'] as num?)?.toInt() ??
+          0,
+      incompleteRiderRegistrations:
+          (dash['incomplete_rider_registrations'] as num?)?.toInt() ?? 0,
+      pendingOnboarding: (dash['pending_onboarding'] as num?)?.toInt() ?? 0,
+      totalMerchants: (dash['total_merchants'] as num?)?.toInt() ?? 0,
+      totalDrivers: (dash['total_drivers_sample'] as num?)?.toInt() ?? 0,
+      activeDriversOnline: (dash['online_drivers'] as num?)?.toInt() ?? 0,
+      ongoingTrips: (dash['active_trips'] as num?)?.toInt() ?? 0,
+      completedTrips: 0,
+      cancelledTrips: 0,
+      todaysRevenue: 0,
+      totalPlatformRevenue: 0,
+      totalDriverPayouts: 0,
+      pendingWithdrawals: 0,
+      subscriptionDriversCount: 0,
+      commissionDriversCount: 0,
+      totalGrossBookings: 0,
+      totalCommissionsEarned: 0,
+      subscriptionRevenue: 0,
+    );
+    final pricingConfig = _buildPricingConfig(const <String, dynamic>{});
+    final settings = _buildOperationalSettings(
+      appConfigData: const <String, dynamic>{},
+      pricingConfig: pricingConfig,
+      adminEmail: adminEmail,
+    );
+    final snapshot = AdminPanelSnapshot(
+      fetchedAt: DateTime.now(),
+      metrics: metrics,
+      riders: const <AdminRiderRecord>[],
+      drivers: const <AdminDriverRecord>[],
+      trips: const <AdminTripRecord>[],
+      withdrawals: const <AdminWithdrawalRecord>[],
+      subscriptions: const <AdminSubscriptionRecord>[],
+      verificationCases: const <AdminVerificationCase>[],
+      supportIssues: const <AdminSupportIssueRecord>[],
+      pricingConfig: pricingConfig,
+      settings: settings,
+      tripTrends: const <AdminTrendPoint>[],
+      revenueTrends: const <AdminTrendPoint>[],
+      cityPerformance: const <AdminTrendPoint>[],
+      driverGrowth: const <AdminTrendPoint>[],
+      adoptionBreakdown: const <AdminTrendPoint>[],
+      dailyFinance: const <AdminRevenueSlice>[],
+      weeklyFinance: const <AdminRevenueSlice>[],
+      monthlyFinance: const <AdminRevenueSlice>[],
+      cityFinance: const <AdminRevenueSlice>[],
+      liveDataSections: <String, bool>{
+        'riders': false,
+        'drivers': false,
+        'trips': false,
+        'wallets': false,
+        'withdrawals': false,
+        'verification': false,
+        'support': false,
+        'pricing': pricingConfig.loadedFromBackend,
+      },
+    );
+    _cachedSnapshot = snapshot;
+    debugPrint('[AdminData] fetchDashboardSnapshot success');
+    return snapshot;
+  }
+
+  // --- Service areas (Firestore `delivery_regions` via HTTPS callables) ---
+
+  Future<Map<String, dynamic>> adminListServiceAreas() async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminListServiceAreas',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+    );
+    final result = await callable.call(<String, dynamic>{});
+    return _map(result.data);
+  }
+
+  /// Filterable audit trail for `/admin/audit-logs`.
+  ///
+  /// **HTTPS callable only** (`adminListAuditLogs`). Do not load this data from
+  /// client RTDB/Firestore paths; see `docs/admin_deploy.md`.
+  Future<Map<String, dynamic>> adminListAuditLogs({
+    int limit = 200,
+    String? action,
+    String? entityType,
+    String? actorEmail,
+    int? fromMs,
+    int? toMs,
+  }) async {
+    debugPrint(
+      '[AUDIT_LOGS][DATA] adminListAuditLogs start limit=$limit '
+      'action=${action ?? '(null)'} entityType=${entityType ?? '(null)'}',
+    );
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListAuditLogs',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'limit': limit,
+        if (action != null && action.isNotEmpty) 'action': action,
+        if (entityType != null && entityType.isNotEmpty) 'entity_type': entityType,
+        if (actorEmail != null && actorEmail.isNotEmpty) 'actor_email': actorEmail,
+        if (fromMs != null) 'from_ms': fromMs,
+        if (toMs != null) 'to_ms': toMs,
+      });
+      final out = _map(result.data);
+      debugPrint(
+        '[AUDIT_LOGS][DATA] adminListAuditLogs success keys=${out.keys.toList()} '
+        'success=${out['success']} logsType=${out['logs']?.runtimeType}',
+      );
+      return out;
+    } catch (e, st) {
+      debugPrint('[AUDIT_LOGS][DATA] adminListAuditLogs error: $e\n$st');
+      return <String, dynamic>{
+        'success': false,
+        'reason': e.toString(),
+        'logs': <Map<String, dynamic>>[],
+        'meta': <String, dynamic>{},
+      };
+    }
+  }
+
+  Future<Map<String, dynamic>> adminGetServiceArea({
+    required String regionId,
+    String? cityId,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminGetServiceArea',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'region_id': regionId.trim(),
+      if (cityId != null && cityId.trim().isNotEmpty) 'city_id': cityId.trim(),
+    });
+    return _map(result.data);
+  }
+
+  Future<Map<String, dynamic>> adminUpsertServiceArea(
+    Map<String, dynamic> payload,
+  ) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminUpsertServiceArea',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(payload);
+    return _map(result.data);
+  }
+
+  Future<Map<String, dynamic>> adminEnableServiceArea({
+    required String regionId,
+    required String cityId,
+    String? reason,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminEnableServiceArea',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'region_id': regionId.trim(),
+      'city_id': cityId.trim(),
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+    return _map(result.data);
+  }
+
+  Future<Map<String, dynamic>> adminDisableServiceArea({
+    required String regionId,
+    required String cityId,
+    String? reason,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminDisableServiceArea',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'region_id': regionId.trim(),
+      'city_id': cityId.trim(),
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+    return _map(result.data);
+  }
+
+  Future<Map<String, dynamic>> adminGetProductionHealthSnapshot({
+    bool includeDebugMetrics = false,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetProductionHealthSnapshot',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 90)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        if (includeDebugMetrics) 'includeDebugMetrics': true,
+      });
+      return _map(result.data);
+    } catch (e, st) {
+      debugPrint('[SYSTEM_HEALTH][AdminDataService] callable error: $e\n$st');
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> adminGetLiveOperationsDashboard({
+    bool includeDebugMetrics = false,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetLiveOperationsDashboard',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        if (includeDebugMetrics) 'includeDebugMetrics': true,
+      });
+      final Map<String, dynamic> out = _map(result.data);
+      debugPrint(
+        '[LIVE_OPS][AdminDataService] response keys=${out.keys.toList()} success=${out['success']}',
+      );
+      return out;
+    } catch (e, st) {
+      debugPrint('[LIVE_OPS][AdminDataService] callable error: $e\n$st');
+      rethrow;
+    }
+  }
+
+  /// Full driver profile for admin detail (wallet + verification + document metadata).
+  Future<Map<String, dynamic>?> fetchDriverProfileForAdmin(String driverId) async {
+    if (driverId.trim().isEmpty) {
+      return null;
+    }
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetDriverProfile',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'driverId': driverId.trim(),
+      });
+      final data = _map(result.data);
+      if (data['success'] != true) {
+        return null;
+      }
+      return Map<String, dynamic>.from(data);
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchDriverProfileForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchDriverProfileForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  int _approxJsonUtf8Bytes(Map<String, dynamic> data) {
+    try {
+      return utf8.encode(jsonEncode(data)).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Per-tab driver payload for [AdminEntityDrawer] (Phase 3L). One callable per tab.
+  Future<Map<String, dynamic>?> fetchDriverEntityTabForAdmin({
+    required String driverId,
+    required String tabId,
+  }) async {
+    final String id = driverId.trim();
+    if (id.isEmpty) {
+      return null;
+    }
+    final String? callableName = _driverTabCallableNames[tabId];
+    if (callableName == null) {
+      debugPrint('[AdminData] fetchDriverEntityTabForAdmin unknown tab=$tabId');
+      return null;
+    }
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        callableName,
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final Map<String, dynamic> payload = <String, dynamic>{
+        'driverId': id,
+      };
+      if (tabId == 'trips') {
+        payload['limit'] = 25;
+      }
+      final result = await callable.call(payload);
+      final data = _map(result.data);
+      final Map<String, dynamic> copy = Map<String, dynamic>.from(data);
+      adminPerfWarnPayloadApprox(
+        surface: 'driver_drawer',
+        callableName: callableName,
+        approxUtf8Bytes: _approxJsonUtf8Bytes(copy),
+      );
+      return copy;
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[AdminData] fetchDriverEntityTabForAdmin tab=$tabId error=$error',
+      );
+      debugPrintStack(
+        label: '[AdminData] fetchDriverEntityTabForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  Future<AdminRidersPageResult> fetchRidersPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    try {
+      const String callableName = 'adminListRidersPage';
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        callableName,
+        options: HttpsCallableOptions(timeout: Duration(seconds: 90)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'limit': limit,
+        if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
+        ...?query?.toCallablePayload(),
+        if (kDebugMode) 'includeRiderClassificationDebug': true,
+      });
+      final dynamic rawEnvelope = result.data;
+      // ignore: avoid_print — temporary production diagnostics for admin riders list
+      print(
+        '[AdminRidersDebug] callable=$callableName envelopeType=${rawEnvelope.runtimeType}',
+      );
+      if (rawEnvelope is Map) {
+        final dynamic ridersNode = rawEnvelope['riders'];
+        // ignore: avoid_print
+        print(
+          '[AdminRidersDebug] envelopeKeys=${rawEnvelope.keys.toList()} '
+          'ridersNodeType=${ridersNode.runtimeType}',
+        );
+      }
+      final data = _map(rawEnvelope);
+      final bool ok = data['success'] == true || data['success'] == 1;
+      if (!ok) {
+        ensureAdminCallableSuccess(data);
+      }
+      final Map<String, dynamic> usersData = _coerceRidersPayloadToUidMap(
+        data['riders'],
+      );
+      // ignore: avoid_print
+      print(
+        '[AdminRidersDebug] parsedRiderMapSize=${usersData.length} '
+        'hasMore=${data['hasMore']} nextCursor=${data['nextCursor']}',
+      );
+      final riders = _buildRiders(
+        usersData: usersData,
+        riderReputationData: const <String, dynamic>{},
+        riderRiskFlagsData: const <String, dynamic>{},
+        riderPaymentFlagsData: const <String, dynamic>{},
+        riderTripStats: const <String, AdminTripSummary>{},
+      );
+      final rawNext = data['nextCursor'];
+      final String? nextCursor = rawNext == null
+          ? null
+          : rawNext.toString().trim().isEmpty
+              ? null
+              : rawNext.toString().trim();
+      final hasMore = data['hasMore'] == true;
+      // ignore: avoid_print
+      print('[AdminRidersDebug] builtAdminRiderRecords=${riders.length}');
+      for (final AdminRiderRecord r in riders) {
+        final Map<String, dynamic> raw = r.rawData;
+        if (raw.containsKey('classification_reason')) {
+          // ignore: avoid_print
+          print(
+            '[AdminRidersDebug] rider=${r.id} classification=${raw['classification_reason']} '
+            'source_path=${raw['source_path']} excluded_reason=${raw['excluded_reason']}',
+          );
+        }
+      }
+      return AdminRidersPageResult(
+        riders: riders,
+        nextCursor: nextCursor,
+        hasMore: hasMore,
+      );
+    } on StateError catch (e, st) {
+      debugPrint('[AdminData] fetchRidersPageForAdmin contract error=$e');
+      // ignore: avoid_print
+      print('[AdminRidersDebug] contractError=$e');
+      Error.throwWithStackTrace(e, st);
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchRidersPageForAdmin error=$error');
+      // ignore: avoid_print
+      print('[AdminRidersDebug] fetchRidersPageForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchRidersPageForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return const AdminRidersPageResult(
+        riders: <AdminRiderRecord>[],
+        nextCursor: null,
+        hasMore: false,
+      );
+    }
+  }
+
+  /// Paginated trips ([adminListTripsPage]) — summary rows only.
+  Future<AdminTripsPageResult> fetchTripsPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListTripsPage',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 90)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'limit': limit,
+        if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
+        ...?query?.toCallablePayload(),
+      });
+      final data = _map(result.data);
+      if (data['success'] != true) {
+        return const AdminTripsPageResult(
+          trips: <AdminTripRecord>[],
+          nextCursor: null,
+          hasMore: false,
+        );
+      }
+      final tripsMap = _map(data['trips']);
+      final trips = <AdminTripRecord>[];
+      for (final MapEntry<String, dynamic> e in tripsMap.entries) {
+        trips.add(
+          AdminTripRecord.fromAdminTripsPageRow(e.key, _map(e.value)),
+        );
+      }
+      trips.sort(
+        (AdminTripRecord a, AdminTripRecord b) =>
+            (b.createdAt?.millisecondsSinceEpoch ?? 0)
+                .compareTo(a.createdAt?.millisecondsSinceEpoch ?? 0),
+      );
+      final rawNext = data['nextCursor'];
+      final String? nextCursor = rawNext == null
+          ? null
+          : rawNext.toString().trim().isEmpty
+              ? null
+              : rawNext.toString().trim();
+      return AdminTripsPageResult(
+        trips: trips,
+        nextCursor: nextCursor,
+        hasMore: data['hasMore'] == true,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchTripsPageForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchTripsPageForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return const AdminTripsPageResult(
+        trips: <AdminTripRecord>[],
+        nextCursor: null,
+        hasMore: false,
+      );
+    }
+  }
+
+  Future<AdminWithdrawalsPageResult> fetchWithdrawalsPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListWithdrawalsPage',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 90)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'limit': limit,
+        if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
+        ...?query?.toCallablePayload(),
+      });
+      final data = _map(result.data);
+      if (data['success'] != true) {
+        return const AdminWithdrawalsPageResult(
+          withdrawals: <AdminWithdrawalRecord>[],
+          nextCursor: null,
+          hasMore: false,
+        );
+      }
+      final wMap = _map(data['withdrawals']);
+      final list = <AdminWithdrawalRecord>[];
+      for (final MapEntry<String, dynamic> e in wMap.entries) {
+        list.add(
+          AdminWithdrawalRecord.fromAdminListPageEntry(e.key, _map(e.value)),
+        );
+      }
+      list.sort(
+        (AdminWithdrawalRecord a, AdminWithdrawalRecord b) =>
+            (b.requestDate?.millisecondsSinceEpoch ?? 0)
+                .compareTo(a.requestDate?.millisecondsSinceEpoch ?? 0),
+      );
+      final rawNext = data['nextCursor'];
+      final String? nextCursor = rawNext == null
+          ? null
+          : rawNext.toString().trim().isEmpty
+              ? null
+              : rawNext.toString().trim();
+      return AdminWithdrawalsPageResult(
+        withdrawals: list,
+        nextCursor: nextCursor,
+        hasMore: data['hasMore'] == true,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchWithdrawalsPageForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchWithdrawalsPageForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return const AdminWithdrawalsPageResult(
+        withdrawals: <AdminWithdrawalRecord>[],
+        nextCursor: null,
+        hasMore: false,
+      );
+    }
+  }
+
+  Future<AdminSupportTicketsPageResult> fetchSupportTicketsPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListSupportTicketsPage',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 90)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'limit': limit,
+        if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
+        ...?query?.toCallablePayload(),
+      });
+      final data = _map(result.data);
+      if (data['success'] != true) {
+        return const AdminSupportTicketsPageResult(
+          tickets: <AdminSupportTicketListItem>[],
+          nextCursor: null,
+          hasMore: false,
+        );
+      }
+      final tMap = _map(data['tickets']);
+      final tickets = <AdminSupportTicketListItem>[];
+      for (final MapEntry<String, dynamic> e in tMap.entries) {
+        final row = _map(e.value);
+        tickets.add(
+          AdminSupportTicketListItem(
+            id: e.key,
+            status: row['status']?.toString() ?? '',
+            subject: row['subject']?.toString() ?? '',
+            rideId: row['ride_id']?.toString() ?? '',
+            createdByUserId: row['createdByUserId']?.toString() ?? '',
+            updatedAtMs: (row['updatedAt'] as num?)?.toInt() ?? 0,
+            createdAtMs: (row['createdAt'] as num?)?.toInt() ?? 0,
+            raw: row,
+          ),
+        );
+      }
+      tickets.sort(
+        (AdminSupportTicketListItem a, AdminSupportTicketListItem b) =>
+            b.updatedAtMs.compareTo(a.updatedAtMs),
+      );
+      final rawNext = data['nextCursor'];
+      final String? nextCursor = rawNext == null
+          ? null
+          : rawNext.toString().trim().isEmpty
+              ? null
+              : rawNext.toString().trim();
+      return AdminSupportTicketsPageResult(
+        tickets: tickets,
+        nextCursor: nextCursor,
+        hasMore: data['hasMore'] == true,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchSupportTicketsPageForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchSupportTicketsPageForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return const AdminSupportTicketsPageResult(
+        tickets: <AdminSupportTicketListItem>[],
+        nextCursor: null,
+        hasMore: false,
+      );
+    }
+  }
+
+  Future<Map<String, dynamic>?> fetchTripDetailForAdmin(String tripId) async {
+    if (tripId.trim().isEmpty) return null;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetTripDetail',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 60)),
+      );
+      final result =
+          await callable.call(<String, dynamic>{'tripId': tripId.trim()});
+      final data = _map(result.data);
+      if (data['success'] != true) return null;
+      return Map<String, dynamic>.from(data);
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchTripDetailForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchTripDetailForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> fetchSupportTicketForAdmin(
+    String ticketId,
+  ) async {
+    if (ticketId.trim().isEmpty) return null;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetSupportTicket',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'ticketId': ticketId.trim(),
+      });
+      final data = _map(result.data);
+      if (data['success'] != true) return null;
+      return Map<String, dynamic>.from(data);
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchSupportTicketForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchSupportTicketForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  Future<bool> adminUpdateSupportTicketStatusCallable({
+    required String ticketId,
+    required String status,
+  }) async {
+    final id = ticketId.trim();
+    final st = status.trim();
+    if (id.isEmpty || st.isEmpty) return false;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminUpdateSupportTicketStatus',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'ticketId': id,
+        'status': st,
+      });
+      final data = _map(result.data);
+      return data['success'] == true;
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] adminUpdateSupportTicketStatusCallable error=$error');
+      debugPrintStack(
+        label: '[AdminData] adminUpdateSupportTicketStatusCallable stack',
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  Future<bool> adminReplySupportTicketCallable({
+    required String ticketId,
+    required String message,
+    String visibility = 'public',
+  }) async {
+    final id = ticketId.trim();
+    final body = message.trim();
+    if (id.isEmpty || body.isEmpty) return false;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminReplySupportTicket',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'ticketId': id,
+        'message': body,
+        'visibility': visibility.trim().toLowerCase(),
+      });
+      final data = _map(result.data);
+      return data['success'] == true;
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] adminReplySupportTicketCallable error=$error');
+      debugPrintStack(
+        label: '[AdminData] adminReplySupportTicketCallable stack',
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  Future<bool> adminEscalateSupportTicketCallable({
+    required String ticketId,
+  }) async {
+    final id = ticketId.trim();
+    if (id.isEmpty) return false;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminEscalateSupportTicket',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{'ticketId': id});
+      final data = _map(result.data);
+      return data['success'] == true;
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] adminEscalateSupportTicketCallable error=$error');
+      debugPrintStack(
+        label: '[AdminData] adminEscalateSupportTicketCallable stack',
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> fetchRiderProfileForAdmin(String riderId) async {
+    if (riderId.trim().isEmpty) return null;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetRiderProfile',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result =
+          await callable.call(<String, dynamic>{'riderId': riderId.trim()});
+      final data = _map(result.data);
+      if (data['success'] != true) return null;
+      return Map<String, dynamic>.from(data);
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchRiderProfileForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchRiderProfileForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  /// Paginated drivers for admin web — calls [adminListDriversPage] unless
+  /// [AdminDriversRouteDebug.useLegacyFullDriversTreeCallable] is enabled.
+  Future<AdminDriversPageResult> fetchDriversPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    final t0 = DateTime.now().millisecondsSinceEpoch;
+    debugPrint(
+      '[AdminData] fetchDriversPageForAdmin start t=$t0 cursor=${cursor ?? '(null)'} limit=$limit '
+      'legacyTree=${AdminDriversRouteDebug.useLegacyFullDriversTreeCallable} '
+      'skipCallable=${AdminDriversRouteDebug.driversRouteSkipCallable}',
+    );
+
+    if (AdminDriversRouteDebug.driversRouteSkipCallable) {
+      return const AdminDriversPageResult(
+        drivers: <AdminDriverRecord>[],
+        nextCursor: null,
+        hasMore: false,
+      );
+    }
+
+    if (AdminDriversRouteDebug.useLegacyFullDriversTreeCallable) {
+      return _fetchDriversPageViaLegacyTree(t0: t0);
+    }
+
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListDriversPage',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 90)),
+      );
+      final t1 = DateTime.now().millisecondsSinceEpoch;
+      final result = await callable.call(<String, dynamic>{
+        'limit': limit,
+        if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
+        ...?query?.toCallablePayload(),
+      });
+      final t2 = DateTime.now().millisecondsSinceEpoch;
+      debugPrint(
+        '[AdminData] fetchDriversPageForAdmin callable done in ${t2 - t1}ms',
+      );
+
+      final data = _map(result.data);
+      if (data['success'] != true) {
+        debugPrint('[AdminData] fetchDriversPageForAdmin rejected: $data');
+        return const AdminDriversPageResult(
+          drivers: <AdminDriverRecord>[],
+          nextCursor: null,
+          hasMore: false,
+        );
+      }
+
+      final driversData = _map(data['drivers']);
+      final t3 = DateTime.now().millisecondsSinceEpoch;
+      final drivers = _buildDrivers(
+        driversData: driversData,
+        walletsData: const <String, dynamic>{},
+        driverBusinessModelsData: const <String, dynamic>{},
+        driverTripStats: const <String, _DriverTripStats>{},
+        withdrawals: const <AdminWithdrawalRecord>[],
+      );
+      final rawNext = data['nextCursor'];
+      final String? nextCursor = rawNext == null
+          ? null
+          : rawNext.toString().trim().isEmpty
+              ? null
+              : rawNext.toString().trim();
+      final hasMore = data['hasMore'] == true;
+      final t4 = DateTime.now().millisecondsSinceEpoch;
+      debugPrint(
+        '[AdminData] fetchDriversPageForAdmin mapped ${drivers.length} drivers in ${t4 - t3}ms '
+        'total=${t4 - t0}ms nextCursor=$nextCursor hasMore=$hasMore',
+      );
+      return AdminDriversPageResult(
+        drivers: drivers,
+        nextCursor: nextCursor,
+        hasMore: hasMore,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchDriversPageForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchDriversPageForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return const AdminDriversPageResult(
+        drivers: <AdminDriverRecord>[],
+        nextCursor: null,
+        hasMore: false,
+      );
+    }
+  }
+
+  Future<AdminDriversPageResult> _fetchDriversPageViaLegacyTree({
+    required int t0,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminFetchDriversTree',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 120)),
+      );
+      final payload = <String, dynamic>{};
+      if (AdminDriversRouteDebug.debugMaxDriversTreeFetch > 0) {
+        payload['maxDrivers'] = AdminDriversRouteDebug.debugMaxDriversTreeFetch;
+      }
+      final result = await callable.call(payload);
+      final data = _map(result.data);
+      if (data['success'] != true) {
+        return const AdminDriversPageResult(
+          drivers: <AdminDriverRecord>[],
+          nextCursor: null,
+          hasMore: false,
+        );
+      }
+      final driversData = _map(data['drivers']);
+      final drivers = _buildDrivers(
+        driversData: driversData,
+        walletsData: const <String, dynamic>{},
+        driverBusinessModelsData: const <String, dynamic>{},
+        driverTripStats: const <String, _DriverTripStats>{},
+        withdrawals: const <AdminWithdrawalRecord>[],
+      );
+      final t1 = DateTime.now().millisecondsSinceEpoch;
+      debugPrint(
+        '[AdminData] _fetchDriversPageViaLegacyTree rows=${drivers.length} total=${t1 - t0}ms',
+      );
+      return AdminDriversPageResult(
+        drivers: drivers,
+        nextCursor: null,
+        hasMore: false,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] _fetchDriversPageViaLegacyTree error=$error');
+      debugPrintStack(
+        label: '[AdminData] _fetchDriversPageViaLegacyTree stack',
+        stackTrace: stackTrace,
+      );
+      return const AdminDriversPageResult(
+        drivers: <AdminDriverRecord>[],
+        nextCursor: null,
+        hasMore: false,
+      );
+    }
+  }
+
+  /// Prefer [fetchDriversPageForAdmin]. Returns first page only (50 rows).
+  Future<List<AdminDriverRecord>> fetchDriversForAdminOnly() async {
+    final page = await fetchDriversPageForAdmin(limit: 50);
+    return page.drivers;
   }
 
   Future<void> updateRiderStatus({
@@ -364,10 +1422,53 @@ class AdminDataService {
     String payoutReference = '',
     String note = '',
   }) async {
-    final updates = <String, dynamic>{};
     final normalizedStatus = status.trim().toLowerCase();
     final reference = payoutReference.trim();
     final noteValue = note.trim();
+
+    if (normalizedStatus == 'paid') {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminApproveWithdrawal',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'withdrawalId': withdrawal.id,
+        'withdrawal_id': withdrawal.id,
+        if (noteValue.isNotEmpty) 'adminNote': noteValue,
+        if (noteValue.isNotEmpty) 'admin_note': noteValue,
+      });
+      final data = _map(result.data);
+      ensureAdminCallableSuccess(data);
+      if (reference.isNotEmpty) {
+        await _rootRef.child('withdraw_requests/${withdrawal.id}').update(<String, dynamic>{
+          'payoutReference': reference,
+          'payout_reference': reference,
+        });
+      }
+      return;
+    }
+
+    if (normalizedStatus == 'rejected') {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminRejectWithdrawal',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'withdrawalId': withdrawal.id,
+        'withdrawal_id': withdrawal.id,
+        if (noteValue.isNotEmpty) 'adminNote': noteValue,
+        if (noteValue.isNotEmpty) 'admin_note': noteValue,
+      });
+      final data = _map(result.data);
+      ensureAdminCallableSuccess(data);
+      return;
+    }
+
+    final updates = <String, dynamic>{};
     final sourcePaths = withdrawal.sourcePaths.isNotEmpty
         ? withdrawal.sourcePaths
         : <String>['withdraw_requests/${withdrawal.id}'];
@@ -376,7 +1477,7 @@ class AdminDataService {
       updates['$path/status'] = normalizedStatus;
       updates['$path/updatedAt'] = rtdb.ServerValue.timestamp;
       updates['$path/updated_at'] = rtdb.ServerValue.timestamp;
-      if (normalizedStatus == 'processing' || normalizedStatus == 'paid') {
+      if (normalizedStatus == 'processing') {
         updates['$path/processedAt'] = rtdb.ServerValue.timestamp;
       }
       if (reference.isNotEmpty) {
@@ -500,9 +1601,13 @@ class AdminDataService {
     required int weeklySubscriptionNgn,
     required int monthlySubscriptionNgn,
   }) async {
+    const int driverBatchSize = 150;
+    const int maxDriversToScan = 25000;
+    final t0 = DateTime.now().millisecondsSinceEpoch;
+
     final normalizedCities = <String, dynamic>{
       for (final city in cities)
-        city.city.toLowerCase(): <String, dynamic>{
+        _pricingCityStorageKey(city.city): <String, dynamic>{
           'city': city.city,
           'baseFareNgn': city.baseFareNgn,
           'perKmNgn': city.perKmNgn,
@@ -517,41 +1622,96 @@ class AdminDataService {
       'monthlySubscriptionNgn': monthlySubscriptionNgn,
       'updatedAt': rtdb.ServerValue.timestamp,
     };
-    final updates = <String, dynamic>{
+    final appConfigUpdates = <String, dynamic>{
       'app_config/pricing': <String, dynamic>{
         'cities': normalizedCities,
         ...pricingSnapshot,
       },
       'app_config/city_enablement': <String, dynamic>{
-        for (final city in cities) city.city.toLowerCase(): city.enabled,
+        for (final city in cities) _pricingCityStorageKey(city.city): city.enabled,
       },
     };
 
-    final driverSnapshot = await _rootRef.child('drivers').get();
-    final driversData = _map(driverSnapshot.value);
-    for (final entry in driversData.entries) {
-      final driverId = entry.key;
-      final driverProfile = _map(entry.value);
-      final nextBusinessModel = normalizedDriverBusinessModel(
-        <String, dynamic>{
-          ..._map(
-            driverProfile['businessModel'] ?? driverProfile['business_model'],
-          ),
-          'pricingSnapshot': pricingSnapshot,
-          'updatedAt': rtdb.ServerValue.timestamp,
-        },
+    await _rootRef.update(appConfigUpdates);
+
+    var processed = 0;
+    String? pageCursor;
+    while (processed < maxDriversToScan) {
+      rtdb.Query pageQuery =
+          _rootRef.child('drivers').orderByKey().limitToFirst(driverBatchSize);
+      if (pageCursor != null && pageCursor.isNotEmpty) {
+        pageQuery = _rootRef
+            .child('drivers')
+            .orderByKey()
+            .startAfter(pageCursor)
+            .limitToFirst(driverBatchSize);
+      }
+      final snap = await pageQuery.get();
+      if (!snap.exists || snap.value == null) {
+        break;
+      }
+      final raw = snap.value;
+      if (raw is! Map) {
+        break;
+      }
+      final chunk = Map<Object?, Object?>.from(raw);
+      if (chunk.isEmpty) {
+        break;
+      }
+
+      final batchUpdates = <String, dynamic>{};
+      for (final MapEntry<Object?, Object?> e in chunk.entries) {
+        final driverId = e.key?.toString().trim() ?? '';
+        if (driverId.isEmpty) {
+          continue;
+        }
+        final driverProfile = _map(e.value);
+        final nextBusinessModel = normalizedDriverBusinessModel(
+          <String, dynamic>{
+            ..._map(
+              driverProfile['businessModel'] ?? driverProfile['business_model'],
+            ),
+            'pricingSnapshot': pricingSnapshot,
+            'updatedAt': rtdb.ServerValue.timestamp,
+          },
+        );
+        batchUpdates['drivers/$driverId/businessModel'] = nextBusinessModel;
+        batchUpdates['drivers/$driverId/updated_at'] = rtdb.ServerValue.timestamp;
+        batchUpdates['driver_business_models/$driverId'] =
+            buildDriverBusinessModelAdminPayload(
+          driverId: driverId,
+          driverProfile: driverProfile,
+          businessModel: nextBusinessModel,
+        );
+      }
+      if (batchUpdates.isNotEmpty) {
+        await _rootRef.update(batchUpdates);
+      }
+
+      final sortedKeys = chunk.keys.map((k) => k.toString()).toList()..sort();
+      pageCursor = sortedKeys.last;
+      processed += chunk.length;
+
+      debugPrint(
+        '[AdminPerf] updatePricingConfig driver batch size=${chunk.length} '
+        'processedTotal=$processed elapsedMs=${DateTime.now().millisecondsSinceEpoch - t0}',
       );
-      updates['drivers/$driverId/businessModel'] = nextBusinessModel;
-      updates['drivers/$driverId/updated_at'] = rtdb.ServerValue.timestamp;
-      updates['driver_business_models/$driverId'] =
-          buildDriverBusinessModelAdminPayload(
-        driverId: driverId,
-        driverProfile: driverProfile,
-        businessModel: nextBusinessModel,
-      );
+
+      if (chunk.length < driverBatchSize) {
+        break;
+      }
     }
 
-    await _rootRef.update(updates);
+    if (processed >= maxDriversToScan) {
+      debugPrint(
+        '[AdminPerf] updatePricingConfig capped at maxDriversToScan=$maxDriversToScan '
+        '(remaining drivers were not updated in this run).',
+      );
+    }
+    debugPrint(
+      '[AdminPerf] updatePricingConfig complete driversProcessed=$processed '
+      'elapsedMs=${DateTime.now().millisecondsSinceEpoch - t0}',
+    );
   }
 
   Future<void> updateSubscriptionStatus({
@@ -612,11 +1772,7 @@ class AdminDataService {
       'action': approve ? 'approve' : 'reject',
     });
     final data = _map(result.data);
-    if (data['success'] != true) {
-      throw StateError(
-        'Subscription review failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
-      );
-    }
+    ensureAdminCallableSuccess(data);
   }
 
   Future<String> fetchSubscriptionProofUrl({required String driverId}) async {
@@ -630,11 +1786,7 @@ class AdminDataService {
       'driverId': driverId,
     });
     final data = _map(result.data);
-    if (data['success'] != true) {
-      throw StateError(
-        'Proof URL unavailable: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
-      );
-    }
+    ensureAdminCallableSuccess(data);
     return _text(data['proofUrl']);
   }
 
@@ -655,11 +1807,7 @@ class AdminDataService {
       'reason': reason,
     });
     final data = _map(result.data);
-    if (data['success'] != true) {
-      throw StateError(
-        'Suspend failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
-      );
-    }
+    ensureAdminCallableSuccess(data);
   }
 
   Future<void> adminReviewRiderFirestoreIdentity({
@@ -681,11 +1829,7 @@ class AdminDataService {
     };
     final result = await callable.call(payload);
     final data = _map(result.data);
-    if (data['success'] != true) {
-      throw StateError(
-        'Identity review failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
-      );
-    }
+    ensureAdminCallableSuccess(data);
   }
 
   Future<void> adminWarnAccount({
@@ -707,11 +1851,7 @@ class AdminDataService {
       'message': message,
     });
     final data = _map(result.data);
-    if (data['success'] != true) {
-      throw StateError(
-        'Warn failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
-      );
-    }
+    ensureAdminCallableSuccess(data);
   }
 
   Future<void> adminDeleteAccount({
@@ -729,11 +1869,31 @@ class AdminDataService {
       'role': role,
     });
     final data = _map(result.data);
-    if (data['success'] != true) {
-      throw StateError(
-        'Delete failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
-      );
-    }
+    ensureAdminCallableSuccess(data);
+  }
+
+  /// Queues `admin_support_flags` and notifies the user (callable
+  /// [adminFlagUserForSupportContact]).
+  Future<void> adminFlagUserForSupportContact({
+    required String uid,
+    required String role,
+    required String note,
+    String priority = 'normal',
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminFlagUserForSupportContact',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'uid': uid.trim(),
+      'role': role.trim().toLowerCase(),
+      'note': note.trim(),
+      'priority': priority.trim().toLowerCase(),
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
   }
 
   Future<void> adminApproveDriverVerification({
@@ -749,11 +1909,7 @@ class AdminDataService {
       'driverId': driverId,
     });
     final data = _map(result.data);
-    if (data['success'] != true) {
-      throw StateError(
-        'Approve verification failed: ${_firstText(<dynamic>[data['reason']], fallback: 'unknown_error')}',
-      );
-    }
+    ensureAdminCallableSuccess(data);
   }
 
   Future<Map<String, dynamic>> _fetchDriversTreeViaCallable() async {
@@ -763,7 +1919,7 @@ class AdminDataService {
       ).httpsCallable(
         'adminFetchDriversTree',
         options: HttpsCallableOptions(
-          timeout: const Duration(seconds: 45),
+          timeout: const Duration(seconds: 120),
         ),
       );
       final result = await callable.call(<String, dynamic>{});
@@ -781,6 +1937,28 @@ class AdminDataService {
       );
       return const <String, dynamic>{};
     }
+  }
+
+  Future<({Map<String, dynamic> data, String source})> _resolveDriversForAdmin({
+    required String adminUid,
+    required String adminEmail,
+  }) async {
+    final pair = await Future.wait<Map<String, dynamic>>(<Future<Map<String, dynamic>>>[
+      _safeMapAt(
+        'drivers',
+        adminUid: adminUid,
+        adminEmail: adminEmail,
+        timeout: _driversRtdbProbeTimeout,
+      ),
+      _fetchDriversTreeViaCallable(),
+    ]);
+    if (pair[0].isNotEmpty) {
+      return (data: pair[0], source: 'rtdb');
+    }
+    debugPrint(
+      '[AdminData] drivers RTDB empty (expected for web admin rules); using adminFetchDriversTree',
+    );
+    return (data: pair[1], source: 'callable_adminFetchDriversTree');
   }
 
   /// Safe logging only (no `dart:js_interop` — avoids browser crashes).
@@ -847,12 +2025,15 @@ class AdminDataService {
     required String adminUid,
     required String adminEmail,
     bool critical = false,
+    Duration? timeout,
   }) async {
+    final Duration effectiveTimeout = timeout ?? _sourceTimeout;
     debugPrint(
       '[AdminData] query start source=rtdb path=$path adminUid=$adminUid adminEmail=$adminEmail critical=$critical',
     );
     try {
-      final snapshot = await _rootRef.child(path).get().timeout(_sourceTimeout);
+      final snapshot =
+          await _rootRef.child(path).get().timeout(effectiveTimeout);
       final mapped = _map(snapshot.value);
       debugPrint(
         '[AdminData] query success source=rtdb path=$path records=${mapped.length}',
@@ -1169,9 +2350,37 @@ class AdminDataService {
     final withdrawals = merged.values.map((accumulator) {
       final raw = accumulator.rawData;
       final driverData = _map(driversData[accumulator.driverId]);
+      final snap = _map(raw['withdrawal_destination_snapshot']);
+      final entityType =
+          _text(raw['entity_type'] ?? raw['entityType'] ?? 'driver').toLowerCase();
+      final merchantId = _firstText(<dynamic>[raw['merchantId'], raw['merchant_id']]);
+      final bankName = _firstText(<dynamic>[
+        snap['bank_name'],
+        _map(raw['withdrawalAccount'])['bankName'],
+        _map(raw['bankDetails'])['bankName'],
+        raw['bankName'],
+      ]);
+      final accountName = _firstText(<dynamic>[
+        snap['account_holder_name'],
+        _map(raw['withdrawalAccount'])['accountName'],
+        _map(raw['bankDetails'])['accountName'],
+        raw['accountName'],
+      ]);
+      final accountNumber = _firstText(<dynamic>[
+        snap['account_number'],
+        _map(raw['withdrawalAccount'])['accountNumber'],
+        _map(raw['bankDetails'])['accountNumber'],
+        raw['accountNumber'],
+      ]);
+      final hasPayoutDestination = entityType == 'merchant' ||
+          (bankName.isNotEmpty &&
+              accountNumber.isNotEmpty &&
+              accountName.isNotEmpty);
       return AdminWithdrawalRecord(
         id: accumulator.id,
+        entityType: entityType.isEmpty ? 'driver' : entityType,
         driverId: accumulator.driverId,
+        merchantId: merchantId,
         driverName: _firstText(<dynamic>[
           raw['driverName'],
           raw['driver_name'],
@@ -1190,21 +2399,10 @@ class AdminDataService {
           raw['updatedAt'],
           raw['updated_at'],
         ]),
-        bankName: _firstText(<dynamic>[
-          _map(raw['withdrawalAccount'])['bankName'],
-          _map(raw['bankDetails'])['bankName'],
-          raw['bankName'],
-        ]),
-        accountName: _firstText(<dynamic>[
-          _map(raw['withdrawalAccount'])['accountName'],
-          _map(raw['bankDetails'])['accountName'],
-          raw['accountName'],
-        ]),
-        accountNumber: _firstText(<dynamic>[
-          _map(raw['withdrawalAccount'])['accountNumber'],
-          _map(raw['bankDetails'])['accountNumber'],
-          raw['accountNumber'],
-        ]),
+        bankName: bankName,
+        accountName: accountName,
+        accountNumber: accountNumber,
+        hasPayoutDestination: hasPayoutDestination,
         payoutReference: _firstText(<dynamic>[
           raw['payoutReference'],
           raw['payout_reference'],
@@ -1228,6 +2426,26 @@ class AdminDataService {
     return withdrawals;
   }
 
+  bool _adminBool(dynamic v) {
+    if (v == true || v == 1 || v == '1' || v == 'true') {
+      return true;
+    }
+    if (v == false || v == 0 || v == '0' || v == 'false') {
+      return false;
+    }
+    return false;
+  }
+
+  bool? _adminTriBool(dynamic v) {
+    if (v == true || v == 1 || v == '1' || v == 'true') {
+      return true;
+    }
+    if (v == false || v == 0 || v == '0' || v == 'false') {
+      return false;
+    }
+    return null;
+  }
+
   List<AdminRiderRecord> _buildRiders({
     required Map<String, dynamic> usersData,
     required Map<String, dynamic> riderReputationData,
@@ -1245,12 +2463,42 @@ class AdminDataService {
         final reputation = _map(riderReputationData[id]);
         final riskFlags = _map(riderRiskFlagsData[id]);
         final paymentFlags = _map(riderPaymentFlagsData[id]);
+        final String phone = _firstText(<dynamic>[user['phone']]);
+        final String email = _firstText(<dynamic>[user['email']]);
+        final bool profileCompleted = user.containsKey('profile_completed')
+            ? _adminBool(user['profile_completed'])
+            : true;
+        final bool? onboardingCompleted = user.containsKey('onboarding_completed')
+            ? _adminTriBool(user['onboarding_completed'])
+            : null;
+        final String rawName = _firstText(<dynamic>[
+          user['name'],
+          user['displayName'],
+          user['username'],
+          user['userName'],
+        ], fallback: '').trim();
+        final String lower = rawName.toLowerCase();
+        final bool genericTitle = lower == 'rider' || rawName.isEmpty;
+        final String displayName;
+        if (!profileCompleted) {
+          displayName = 'Incomplete registration';
+        } else if (genericTitle) {
+          if (phone.isNotEmpty) {
+            displayName = phone;
+          } else if (email.isNotEmpty) {
+            displayName = email;
+          } else {
+            displayName = id.length > 10 ? id.substring(0, 10) : id;
+          }
+        } else {
+          displayName = rawName;
+        }
         riders.add(
           AdminRiderRecord(
             id: id,
-            name: _firstText(<dynamic>[user['name']], fallback: 'Rider'),
-            phone: _firstText(<dynamic>[user['phone']]),
-            email: _firstText(<dynamic>[user['email']]),
+            name: displayName,
+            phone: phone,
+            email: email,
             city: _firstText(<dynamic>[
               user['city'],
               user['homeCity'],
@@ -1271,14 +2519,18 @@ class AdminDataService {
               paymentFlags['status'],
               trustSummary['paymentStatus'],
             ], fallback: 'clear'),
+            profileCompleted: profileCompleted,
+            onboardingCompleted: onboardingCompleted,
             createdAt: _dateFromCandidates(<dynamic>[
               user['createdAt'],
               user['created_at'],
             ]),
             lastActiveAt: _dateFromCandidates(<dynamic>[
               user['lastActive'],
+              user['lastActiveAt'],
               user['updatedAt'],
               user['last_active'],
+              user['last_active_at'],
             ]),
             walletBalance: _firstPositiveDouble(<dynamic>[
               _map(user['wallet'])['balance'],
@@ -1316,12 +2568,54 @@ class AdminDataService {
       }
     }
 
-    riders.sort(
-      (AdminRiderRecord a, AdminRiderRecord b) =>
-          (b.createdAt?.millisecondsSinceEpoch ?? 0)
-              .compareTo(a.createdAt?.millisecondsSinceEpoch ?? 0),
-    );
+    riders.sort((AdminRiderRecord a, AdminRiderRecord b) {
+      final int pa = a.profileCompleted ? 1 : 0;
+      final int pb = b.profileCompleted ? 1 : 0;
+      if (pb != pa) {
+        return pb.compareTo(pa);
+      }
+      return (b.createdAt?.millisecondsSinceEpoch ?? 0)
+          .compareTo(a.createdAt?.millisecondsSinceEpoch ?? 0);
+    });
     return riders;
+  }
+
+  /// Admin list + go-online use RTDB top-level identity fields; document-derived
+  /// [normalizedDriverVerification] can lag after `adminApproveDriverVerification`.
+  String _driverVerificationStatusForAdminList(
+    Map<String, dynamic> driver,
+    Map<String, dynamic> normalizedVerification,
+  ) {
+    final fromTop = _firstText(<dynamic>[
+      driver['identity_verification_status'],
+      driver['verification_status'],
+      driver['verificationStatus'],
+    ], fallback: '');
+    if (fromTop.isNotEmpty) {
+      return fromTop;
+    }
+    if (driver['is_verified'] == true || driver['nexride_verified'] == true) {
+      return 'approved';
+    }
+    final overall = _text(normalizedVerification['overallStatus']);
+    if (overall.isNotEmpty) {
+      return overall;
+    }
+    return 'incomplete';
+  }
+
+  bool _driverRowIsOnline(Map<String, dynamic> driver) {
+    if (driver['isOnline'] == true) {
+      return true;
+    }
+    if (driver['is_online'] == true) {
+      return true;
+    }
+    if (driver['online'] == true) {
+      return true;
+    }
+    final avail = _map(driver['availability']);
+    return avail['isOnline'] == true || avail['is_online'] == true;
   }
 
   List<AdminDriverRecord> _buildDrivers({
@@ -1371,6 +2665,17 @@ class AdminDataService {
           phone: _firstText(<dynamic>[driver['phone']]),
           email: _firstText(<dynamic>[driver['email']]),
           city: _firstText(<dynamic>[driver['city']]),
+          stateOrRegion: _firstText(<dynamic>[
+            driver['state'],
+            driver['region'],
+            driver['state_name'],
+            driver['province'],
+            driver['location_state'],
+            driver['address_state'],
+            driver['rollout_region_id'],
+            driver['rollout_city_id'],
+            driver['dispatch_market'],
+          ]),
           accountStatus: _normalizedAdminDriverAccountStatus(
             _firstText(<dynamic>[
               driver['accountStatus'],
@@ -1379,10 +2684,11 @@ class AdminDataService {
             ], fallback: 'active'),
           ),
           status: _firstText(<dynamic>[driver['status']], fallback: 'offline'),
-          isOnline: driver['isOnline'] == true,
-          verificationStatus: _text(verification['overallStatus']).isNotEmpty
-              ? _text(verification['overallStatus'])
-              : 'incomplete',
+          isOnline: _driverRowIsOnline(driver),
+          verificationStatus: _driverVerificationStatusForAdminList(
+            driver,
+            verification,
+          ),
           vehicleName: _firstText(<dynamic>[
             driver['car'],
             _map(driver['vehicle'])['model'],
@@ -1705,8 +3011,9 @@ class AdminDataService {
     };
 
     for (final entry in pricingCities.entries) {
-      mergedCities[entry.key.toLowerCase()] = <String, dynamic>{
-        ...mergedCities[entry.key.toLowerCase()] ?? const <String, dynamic>{},
+      final slug = _pricingCityStorageKey(entry.key);
+      mergedCities[slug] = <String, dynamic>{
+        ...mergedCities[slug] ?? const <String, dynamic>{},
         ..._map(entry.value),
       };
     }
@@ -1767,8 +3074,8 @@ class AdminDataService {
     final withdrawalConfig = _map(appConfigData['withdrawals']);
     final cityEnablement = <String, bool>{
       for (final city in pricingConfig.cities)
-        city.city.toLowerCase():
-            cityEnablementConfig[city.city.toLowerCase()] != false &&
+        _pricingCityStorageKey(city.city):
+            cityEnablementConfig[_pricingCityStorageKey(city.city)] != false &&
                 city.enabled,
     };
 
@@ -1781,8 +3088,8 @@ class AdminDataService {
       driverVerificationRequired:
           appConfigData['driverVerificationRequired'] == true ||
               DriverFeatureFlags.driverVerificationRequired,
-      activeServiceTypes: DriverFeatureFlags.activeRequestServiceTypes.toList()
-        ..sort(),
+      activeServiceTypes:
+          AdminDataService._mergeActiveRequestServiceTypes(appConfigData),
       offRouteToleranceMeters: _firstInt(<dynamic>[
         riderTrustRules['offRouteToleranceMeters'],
         250,
@@ -1857,6 +3164,14 @@ class AdminDataService {
 
     return AdminDashboardMetrics(
       totalRiders: riders.length,
+      incompleteRiderRegistrations: riders
+          .where((AdminRiderRecord r) => !r.profileCompleted)
+          .length,
+      pendingOnboarding: riders
+          .where((AdminRiderRecord r) =>
+              r.profileCompleted && r.onboardingCompleted == false)
+          .length,
+      totalMerchants: 0,
       totalDrivers: drivers.length,
       activeDriversOnline:
           drivers.where((AdminDriverRecord driver) => driver.isOnline).length,
@@ -2299,6 +3614,38 @@ class AdminDataService {
       return value.map<String, dynamic>(
         (dynamic key, dynamic entry) => MapEntry(key.toString(), entry),
       );
+    }
+    return <String, dynamic>{};
+  }
+
+  /// [adminListRidersPage] returns `riders` as a uid→row map; legacy paths may
+  /// return a list of `{uid, ...}` rows. [_map] would drop a [List], yielding
+  /// an empty admin UI — normalize both shapes here.
+  Map<String, dynamic> _coerceRidersPayloadToUidMap(dynamic ridersRaw) {
+    if (ridersRaw == null) {
+      return <String, dynamic>{};
+    }
+    if (ridersRaw is Map) {
+      return _map(ridersRaw);
+    }
+    if (ridersRaw is List) {
+      final Map<String, dynamic> out = <String, dynamic>{};
+      for (final dynamic item in ridersRaw) {
+        if (item is! Map) {
+          continue;
+        }
+        final Map<String, dynamic> m = _map(item);
+        final String id = _text(m['uid']).isNotEmpty
+            ? _text(m['uid'])
+            : _text(m['rider_id']).isNotEmpty
+                ? _text(m['rider_id'])
+                : _text(m['riderId']);
+        if (id.isEmpty) {
+          continue;
+        }
+        out[id] = m;
+      }
+      return out;
     }
     return <String, dynamic>{};
   }

@@ -26,7 +26,8 @@ function callableContext(request) {
   return { auth: request.auth };
 }
 
-const { isNexRideAdmin } = require("./admin_auth");
+const { normUid } = require("./admin_auth");
+const adminPerms = require("./admin_permissions");
 const ride = require("./ride_callables");
 const delivery = require("./delivery_callables");
 const paymentFlow = require("./payment_flow");
@@ -42,7 +43,7 @@ const { resolveDriverMonetization, resolveCommissionPolicy } = require("./driver
 const pushNotifications = require("./push_notifications");
 const safetyEscalation = require("./safety_escalation");
 
-async function verifyPaymentInternal(reference) {
+async function verifyPaymentInternal(reference, callerUid = "") {
   const ref = String(reference || "").trim();
   const txRef = db.ref(`payment_transactions/${ref}`);
   const existingSnap = await txRef.get();
@@ -54,6 +55,17 @@ async function verifyPaymentInternal(reference) {
       amount: Number(existing.amount || 0),
       providerStatus: String(existing.provider_status || "successful"),
     };
+  }
+
+  if (String(existing.purpose || "").trim() === "merchant_wallet_topup") {
+    const uid = String(callerUid || "").trim();
+    if (!uid) {
+      return { success: false, reason: "unauthorized" };
+    }
+    const fs = admin.firestore();
+    return merchantWallet.verifyAndFinalizeMerchantWalletTopUpForReference(db, fs, ref, {
+      callerUid: uid,
+    });
   }
 
   let rideId = String(existing.ride_id || "").trim();
@@ -208,6 +220,21 @@ exports.adminUpsertDeliveryCity = onCall(rideCallOpts, async (request) =>
 exports.adminListDeliveryRollout = onCall(rideCallOpts, async (request) =>
   ecosystemDelivery.adminListDeliveryRollout(request.data, callableContext(request), db),
 );
+exports.adminListServiceAreas = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminListServiceAreas(request.data, callableContext(request), db),
+);
+exports.adminGetServiceArea = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminGetServiceArea(request.data, callableContext(request), db),
+);
+exports.adminUpsertServiceArea = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminUpsertServiceArea(request.data, callableContext(request), db),
+);
+exports.adminEnableServiceArea = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminEnableServiceArea(request.data, callableContext(request), db),
+);
+exports.adminDisableServiceArea = onCall(rideCallOpts, async (request) =>
+  ecosystemDelivery.adminDisableServiceArea(request.data, callableContext(request), db),
+);
 exports.validateServiceLocation = onCall(rideCallOpts, async (request) =>
   ecosystemDelivery.validateServiceLocation(request.data, callableContext(request)),
 );
@@ -217,8 +244,36 @@ exports.backfillUserRolloutRegions = onCall(rideCallOpts, async (request) =>
 
 // --- Merchant Phase 1 (registration + admin review only; no orders/menus/wallets) ---
 const merchantCallables = require("./merchant/merchant_callables");
+const merchantWallet = require("./merchant/merchant_wallet");
+const nexrideOfficialBankConfig = require("./nexride_official_bank_config");
 exports.merchantRegister = onCall(rideCallOpts, async (request) =>
   merchantCallables.merchantRegister(request.data, callableContext(request), db),
+);
+exports.merchantGetMyMerchant = onCall(rideCallOpts, async (request) =>
+  merchantCallables.merchantGetMyMerchant(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.merchantUpdateMerchantProfile = onCall(rideCallOpts, async (request) =>
+  merchantCallables.merchantUpdateMerchantProfile(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.merchantSetAvailability = onCall(rideCallOpts, async (request) =>
+  merchantCallables.merchantSetAvailability(request.data, callableContext(request), db),
+);
+exports.merchantUpdateAvailability = onCall(rideCallOpts, async (request) =>
+  merchantCallables.merchantUpdateAvailability(request.data, callableContext(request), db),
+);
+exports.merchantPortalHeartbeat = onCall(rideCallOpts, async (request) =>
+  merchantCallables.merchantPortalHeartbeat(request.data, callableContext(request), db),
+);
+exports.merchantPutStaffMember = onCall(rideCallOpts, async (request) =>
+  merchantCallables.merchantPutStaffMember(request.data, callableContext(request), db),
 );
 exports.adminListMerchants = onCall(rideCallOpts, async (request) =>
   merchantCallables.adminListMerchants(request.data, callableContext(request), db),
@@ -226,8 +281,410 @@ exports.adminListMerchants = onCall(rideCallOpts, async (request) =>
 exports.adminGetMerchant = onCall(rideCallOpts, async (request) =>
   merchantCallables.adminGetMerchant(request.data, callableContext(request), db),
 );
+exports.adminListMerchantsPage = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminListMerchantsPage(request.data, callableContext(request), db),
+);
+exports.adminGetMerchantProfile = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminGetMerchantProfile(request.data, callableContext(request), db),
+);
 exports.adminReviewMerchant = onCall(rideCallOpts, async (request) =>
   merchantCallables.adminReviewMerchant(request.data, callableContext(request), db),
+);
+
+exports.adminUpdateMerchantPaymentModel = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminUpdateMerchantPaymentModel(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+exports.adminUpdateMerchantSubscriptionStatus = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminUpdateMerchantSubscriptionStatus(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+exports.recomputeMerchantFinancialModel = onCall(rideCallOpts, async (request) =>
+  merchantCallables.recomputeMerchantFinancialModel(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+exports.adminWarnMerchant = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminWarnMerchant(request.data, callableContext(request), db),
+);
+exports.adminSetMerchantCommissionWithdrawal = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminSetMerchantCommissionWithdrawal(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminAppendMerchantInternalNote = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminAppendMerchantInternalNote(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminUpdateMerchantLocation = onCall(rideCallOpts, async (request) =>
+  merchantCallables.adminUpdateMerchantLocation(request.data, callableContext(request), db),
+);
+
+// --- Merchant wallet / billing (Firestore wallet + RTDB withdrawals + Flutterwave) ---
+exports.merchantCreateBankTransferTopUp = onCall(rideCallOpts, async (request) =>
+  merchantWallet.merchantCreateBankTransferTopUp(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.merchantAttachBankTransferTopUpProof = onCall(rideCallOpts, async (request) =>
+  merchantWallet.merchantAttachBankTransferTopUpProof(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.merchantStartWalletTopUpFlutterwave = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    merchantWallet.merchantStartWalletTopUpFlutterwave(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+exports.merchantListWalletLedger = onCall(rideCallOpts, async (request) =>
+  merchantWallet.merchantListWalletLedger(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.merchantRequestWithdrawal = onCall(rideCallOpts, async (request) =>
+  merchantWallet.merchantRequestWithdrawal(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.merchantRequestPaymentModelChange = onCall(rideCallOpts, async (request) =>
+  merchantWallet.merchantRequestPaymentModelChange(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminListMerchantBankTopUps = onCall(rideCallOpts, async (request) =>
+  merchantWallet.adminListMerchantBankTopUps(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminReviewMerchantBankTopUp = onCall(rideCallOpts, async (request) =>
+  merchantWallet.adminReviewMerchantBankTopUp(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminListMerchantPaymentModelRequests = onCall(rideCallOpts, async (request) =>
+  merchantWallet.adminListMerchantPaymentModelRequests(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminResolveMerchantPaymentModelRequest = onCall(rideCallOpts, async (request) =>
+  merchantWallet.adminResolveMerchantPaymentModelRequest(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+// --- Merchant Phase 4B (menu, orders, rider catalog, linked delivery) ---
+const merchantCommerce = require("./merchant/merchant_commerce");
+exports.merchantUpsertMenuCategory = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantUpsertMenuCategory(request.data, callableContext(request), db),
+);
+exports.merchantDeleteMenuCategory = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantDeleteMenuCategory(request.data, callableContext(request), db),
+);
+exports.merchantUpsertMenuItem = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantUpsertMenuItem(request.data, callableContext(request), db),
+);
+exports.merchantArchiveMenuItem = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantArchiveMenuItem(request.data, callableContext(request), db),
+);
+exports.merchantListMyMenu = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantListMyMenu(request.data, callableContext(request), db),
+);
+exports.merchantListMyMenuPage = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantListMyMenuPage(request.data, callableContext(request), db),
+);
+exports.merchantAttachMenuOrProfileImage = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantAttachMenuOrProfileImage(request.data, callableContext(request), db),
+);
+exports.riderListApprovedMerchants = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.riderListApprovedMerchants(request.data, callableContext(request), db),
+);
+exports.riderGetMerchantCatalog = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.riderGetMerchantCatalog(request.data, callableContext(request), db),
+);
+exports.riderPlaceMerchantOrder = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.riderPlaceMerchantOrder(request.data, callableContext(request), db),
+);
+exports.merchantListMyOrders = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantListMyOrders(request.data, callableContext(request), db),
+);
+exports.merchantListMyOrdersPage = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantListMyOrdersPage(request.data, callableContext(request), db),
+);
+exports.merchantGetOperationsInsights = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantGetOperationsInsights(request.data, callableContext(request), db),
+);
+exports.merchantUpdateOrderStatus = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.merchantUpdateOrderStatus(request.data, callableContext(request), db),
+);
+exports.adminListMerchantOrders = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.adminListMerchantOrders(request.data, callableContext(request), db),
+);
+exports.riderListMyOrders = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.riderListMyOrders(request.data, callableContext(request), db),
+);
+exports.supportGetMerchantOrderContext = onCall(rideCallOpts, async (request) =>
+  merchantCommerce.supportGetMerchantOrderContext(request.data, callableContext(request), db),
+);
+
+// --- Merchant Phase 2B (verification documents + readiness) ---
+const merchantVerification = require("./merchant/merchant_verification");
+exports.merchantUploadVerificationDocument = onCall(rideCallOpts, async (request) =>
+  merchantVerification.merchantUploadVerificationDocument(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.merchantListMyVerificationDocuments = onCall(rideCallOpts, async (request) =>
+  merchantVerification.merchantListMyVerificationDocuments(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminReviewMerchantDocument = onCall(rideCallOpts, async (request) =>
+  merchantVerification.adminReviewMerchantDocument(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminGetMerchantReadiness = onCall(rideCallOpts, async (request) =>
+  merchantVerification.adminGetMerchantReadiness(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminRecomputeMerchantReadiness = onCall(rideCallOpts, async (request) =>
+  merchantVerification.adminRecomputeMerchantReadiness(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+// --- Phase 2D unified verification center ---
+const verificationCenter = require("./verification_center_callables");
+exports.adminListVerificationUploads = onCall(rideCallOpts, async (request) =>
+  verificationCenter.adminListVerificationUploads(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminReviewDriverDocument = onCall(rideCallOpts, async (request) =>
+  verificationCenter.adminReviewDriverDocument(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminListDriverVerificationDocuments = onCall(rideCallOpts, async (request) =>
+  verificationCenter.adminListDriverVerificationDocuments(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminReviewRiderDocument = onCall(rideCallOpts, async (request) =>
+  verificationCenter.adminReviewRiderDocument(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminListRiderVerificationDocuments = onCall(rideCallOpts, async (request) =>
+  verificationCenter.adminListRiderVerificationDocuments(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+/** Restored production callables — must stay exported so deploy does not delete remote functions. */
+const productionOps = require("./production_ops_callables");
+const liveOperationsDashboard = require("./live_operations_dashboard_callable");
+const productionHealth = require("./production_health_callable");
+
+exports.adminAssignSupportTicket = onCall(rideCallOpts, async (request) =>
+  productionOps.adminAssignSupportTicket(request.data, callableContext(request), db),
+);
+exports.adminBlockUserTrips = onCall(rideCallOpts, async (request) =>
+  productionOps.adminBlockUserTrips(request.data, callableContext(request), db),
+);
+exports.adminConfirmBankTransferPayment = onCall(rideCallOpts, async (request) =>
+  productionOps.adminConfirmBankTransferPayment(request.data, callableContext(request), db),
+);
+exports.adminDisableUser = onCall(rideCallOpts, async (request) =>
+  productionOps.adminDisableUser(request.data, callableContext(request), db),
+);
+exports.adminDriverSubscriptionManage = onCall(rideCallOpts, async (request) =>
+  productionOps.adminDriverSubscriptionManage(request.data, callableContext(request), db),
+);
+exports.adminEscalateSupportTicket = onCall(rideCallOpts, async (request) =>
+  productionOps.adminEscalateSupportTicket(request.data, callableContext(request), db),
+);
+exports.adminForceDriverOffline = onCall(rideCallOpts, async (request) =>
+  productionOps.adminForceDriverOffline(request.data, callableContext(request), db),
+);
+exports.adminGetOperationsDashboard = onCall(rideCallOpts, async (request) =>
+  productionOps.adminGetOperationsDashboard(request.data, callableContext(request), db),
+);
+exports.adminGetLiveOperationsDashboard = onCall(rideCallOpts, async (request) =>
+  liveOperationsDashboard.adminGetLiveOperationsDashboard(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminGetProductionHealthSnapshot = onCall(rideCallOpts, async (request) =>
+  productionHealth.adminGetProductionHealthSnapshot(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+/** Alias for integrations expecting `adminGetDashboard`. */
+exports.adminGetDashboard = onCall(rideCallOpts, async (request) =>
+  productionOps.adminGetOperationsDashboard(request.data, callableContext(request), db),
+);
+exports.adminGetPricingConfig = onCall(rideCallOpts, async (request) =>
+  productionOps.adminGetPricingConfig(request.data, callableContext(request), db),
+);
+exports.adminGetSubscriptionOperations = onCall(rideCallOpts, async (request) =>
+  productionOps.adminGetSubscriptionOperations(request.data, callableContext(request), db),
+);
+exports.adminGetSupportTicket = onCall(rideCallOpts, async (request) =>
+  productionOps.adminGetSupportTicket(request.data, callableContext(request), db),
+);
+exports.adminGetTripDetail = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetTripDetail(request.data, callableContext(request), db),
+);
+exports.adminGetUserProfile = onCall(rideCallOpts, async (request) =>
+  productionOps.adminGetUserProfile(request.data, callableContext(request), db),
+);
+exports.adminIdentityVerificationDebug = onCall(rideCallOpts, async (request) =>
+  productionOps.adminIdentityVerificationDebug(request.data, callableContext(request), db),
+);
+exports.adminIdentityVerificationSignedUrl = onCall(rideCallOpts, async (request) =>
+  productionOps.adminIdentityVerificationSignedUrl(request.data, callableContext(request), db),
+);
+exports.adminListActiveOperations = onCall(rideCallOpts, async (request) =>
+  productionOps.adminListActiveOperations(request.data, callableContext(request), db),
+);
+exports.adminListAuditLogs = onCall(rideCallOpts, async (request) =>
+  productionOps.adminListAuditLogs(request.data, callableContext(request), db),
+);
+exports.adminListIdentityVerifications = onCall(rideCallOpts, async (request) =>
+  productionOps.adminListIdentityVerifications(request.data, callableContext(request), db),
+);
+exports.adminListMarkets = onCall(rideCallOpts, async (request) =>
+  productionOps.adminListMarkets(request.data, callableContext(request), db),
+);
+exports.adminListReportsAndDisputes = onCall(rideCallOpts, async (request) =>
+  productionOps.adminListReportsAndDisputes(request.data, callableContext(request), db),
+);
+exports.adminListTrips = onCall(rideCallOpts, async (request) =>
+  productionOps.adminListTrips(request.data, callableContext(request), db),
+);
+exports.adminListUsers = onCall(rideCallOpts, async (request) =>
+  productionOps.adminListUsers(request.data, callableContext(request), db),
+);
+exports.adminReplySupportTicket = onCall(rideCallOpts, async (request) =>
+  productionOps.adminReplySupportTicket(request.data, callableContext(request), db),
+);
+exports.adminReviewIdentityVerification = onCall(rideCallOpts, async (request) =>
+  productionOps.adminReviewIdentityVerification(request.data, callableContext(request), db),
+);
+exports.adminSuspendUser = onCall(rideCallOpts, async (request) =>
+  productionOps.adminSuspendUser(request.data, callableContext(request), db),
+);
+exports.adminUnsuspendUser = onCall(rideCallOpts, async (request) =>
+  productionOps.adminUnsuspendUser(request.data, callableContext(request), db),
+);
+exports.adminUpdateMarketEnabled = onCall(rideCallOpts, async (request) =>
+  productionOps.adminUpdateMarketEnabled(request.data, callableContext(request), db),
+);
+exports.adminUpdatePricingConfig = onCall(rideCallOpts, async (request) =>
+  productionOps.adminUpdatePricingConfig(request.data, callableContext(request), db),
+);
+exports.adminUpdateSupportTicketStatus = onCall(rideCallOpts, async (request) =>
+  productionOps.adminUpdateSupportTicketStatus(request.data, callableContext(request), db),
+);
+exports.adminUpdateUserStatus = onCall(rideCallOpts, async (request) =>
+  productionOps.adminUpdateUserStatus(request.data, callableContext(request), db),
+);
+exports.adminWarnUser = onCall(rideCallOpts, async (request) =>
+  productionOps.adminWarnUser(request.data, callableContext(request), db),
+);
+exports.driverConfirmBankTransferPayment = onCall(rideCallOpts, async (request) =>
+  productionOps.driverConfirmBankTransferPayment(request.data, callableContext(request), db),
+);
+exports.driverReportBankTransferNotReceived = onCall(rideCallOpts, async (request) =>
+  productionOps.driverReportBankTransferNotReceived(request.data, callableContext(request), db),
+);
+exports.finalizeBankTransferReceiptUpload = onCall(rideCallOpts, async (request) =>
+  productionOps.finalizeBankTransferReceiptUpload(request.data, callableContext(request), db),
+);
+exports.getBankTransferReceiptSignedUrl = onCall(rideCallOpts, async (request) =>
+  productionOps.getBankTransferReceiptSignedUrl(request.data, callableContext(request), db),
+);
+exports.getDriverSubscriptionSummary = onCall(rideCallOpts, async (request) =>
+  productionOps.getDriverSubscriptionSummary(request.data, callableContext(request), db),
+);
+exports.getPricingConfigForMarket = onCall(rideCallOpts, async (request) =>
+  productionOps.getPricingConfigForMarket(request.data, callableContext(request), db),
+);
+exports.listEnabledServiceMarkets = onCall(rideCallOpts, async (request) =>
+  productionOps.listEnabledServiceMarkets(request.data, callableContext(request), db),
+);
+exports.renewDriverSubscriptionFromWallet = onCall(rideCallOpts, async (request) =>
+  productionOps.renewDriverSubscriptionFromWallet(request.data, callableContext(request), db),
+);
+exports.setDriverSubscriptionAutoRenew = onCall(rideCallOpts, async (request) =>
+  productionOps.setDriverSubscriptionAutoRenew(request.data, callableContext(request), db),
+);
+exports.syncIdentityVerificationSubmission = onCall(rideCallOpts, async (request) =>
+  productionOps.syncIdentityVerificationSubmission(request.data, callableContext(request), db),
 );
 
 // Single client-facing accept entrypoint: [acceptRide] → ride.acceptRideRequest (implementation).
@@ -264,6 +721,19 @@ exports.setDriverOffline = onCall(
   },
   async (request) =>
     ride.setDriverOffline(request.data, callableContext(request), db),
+);
+
+exports.driverUpdateLiveLocation = onCall(
+  {
+    ...rideCallOpts,
+    timeoutSeconds: 30,
+  },
+  async (request) =>
+    ride.driverUpdateLiveLocation(request.data, callableContext(request), db),
+);
+
+exports.withdrawDriverOffer = onCall(rideCallOpts, async (request) =>
+  ride.withdrawDriverOffer(request.data, callableContext(request), db),
 );
 
 exports.completeTrip = onCall(rideCallOpts, async (request) =>
@@ -307,7 +777,6 @@ exports.cleanupActiveRide = onCall(rideCallOpts, async (request) => {
     }
     const updates = {
       [`rider_active_trip/${riderId}`]: null,
-      [`active_trips/${riderId}`]: null,
     };
     if (rideHint) {
       updates[`active_trips/${rideHint}`] = null;
@@ -394,6 +863,21 @@ exports.adminListLiveRides = onCall(rideCallOpts, async (request) =>
 exports.adminGetRideDetails = onCall(rideCallOpts, async (request) =>
   adminCallables.adminGetRideDetails(request.data, callableContext(request), db),
 );
+exports.adminListLiveTrips = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListLiveTrips(request.data, callableContext(request), db),
+);
+exports.adminCancelTrip = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminCancelTrip(request.data, callableContext(request), db),
+);
+exports.adminMarkTripEmergency = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminMarkTripEmergency(request.data, callableContext(request), db),
+);
+exports.adminResolveTripEmergency = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminResolveTripEmergency(request.data, callableContext(request), db),
+);
+exports.adminListOnlineDrivers = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListOnlineDrivers(request.data, callableContext(request), db),
+);
 exports.adminApproveWithdrawal = onCall(rideCallOpts, async (request) =>
   adminCallables.adminApproveWithdrawal(request.data, callableContext(request), db),
 );
@@ -424,6 +908,54 @@ exports.adminListDrivers = onCall(rideCallOpts, async (request) =>
 exports.adminFetchDriversTree = onCall(rideCallOpts, async (request) =>
   adminCallables.adminFetchDriversTree(request.data, callableContext(request), db),
 );
+exports.adminListDriversPage = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListDriversPage(request.data, callableContext(request), db),
+);
+exports.adminGetDriverProfile = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverProfile(request.data, callableContext(request), db),
+);
+exports.adminGetDriverOverview = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverOverview(request.data, callableContext(request), db),
+);
+exports.adminGetDriverVerification = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverVerification(request.data, callableContext(request), db),
+);
+exports.adminGetDriverWallet = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverWallet(request.data, callableContext(request), db),
+);
+exports.adminGetDriverTrips = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverTrips(request.data, callableContext(request), db),
+);
+exports.adminGetDriverSubscription = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverSubscription(request.data, callableContext(request), db),
+);
+exports.adminGetDriverViolations = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverViolations(request.data, callableContext(request), db),
+);
+exports.adminGetDriverNotes = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverNotes(request.data, callableContext(request), db),
+);
+exports.adminGetDriverAuditTimeline = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetDriverAuditTimeline(request.data, callableContext(request), db),
+);
+exports.adminListRidersPage = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListRidersPage(request.data, callableContext(request), db),
+);
+exports.adminGetRiderProfile = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetRiderProfile(request.data, callableContext(request), db),
+);
+exports.adminListTripsPage = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListTripsPage(request.data, callableContext(request), db),
+);
+exports.adminListWithdrawalsPage = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListWithdrawalsPage(request.data, callableContext(request), db),
+);
+exports.adminListSupportTicketsPage = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListSupportTicketsPage(request.data, callableContext(request), db),
+);
+exports.adminGetSidebarBadgeCounts = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetSidebarBadgeCounts(request.data, callableContext(request), db),
+);
 exports.adminListRiders = onCall(rideCallOpts, async (request) =>
   adminCallables.adminListRiders(request.data, callableContext(request), db),
 );
@@ -441,6 +973,9 @@ exports.adminWarnAccount = onCall(rideCallOpts, async (request) =>
 );
 exports.adminDeleteAccount = onCall(rideCallOpts, async (request) =>
   adminCallables.adminDeleteAccount(request.data, callableContext(request), db),
+);
+exports.adminFlagUserForSupportContact = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminFlagUserForSupportContact(request.data, callableContext(request), db),
 );
 exports.adminApproveDriverVerification = onCall(rideCallOpts, async (request) =>
   adminCallables.adminApproveDriverVerification(request.data, callableContext(request), db),
@@ -467,6 +1002,12 @@ exports.supportListTickets = onCall(rideCallOpts, async (request) =>
 );
 exports.supportUpdateTicket = onCall(rideCallOpts, async (request) =>
   supportCallables.supportUpdateTicket(request.data, callableContext(request), db),
+);
+exports.merchantListMySupportTickets = onCall(rideCallOpts, async (request) =>
+  supportCallables.merchantListMySupportTickets(request.data, callableContext(request), db),
+);
+exports.merchantAppendSupportTicketMessage = onCall(rideCallOpts, async (request) =>
+  supportCallables.merchantAppendSupportTicketMessage(request.data, callableContext(request), db),
 );
 
 exports.setUserRole = onCall(rideCallOpts, async (request) =>
@@ -522,7 +1063,7 @@ exports.verifyPayment = onCall(
     if (!reference) {
       return { success: false, reason: "invalid_reference" };
     }
-    return verifyPaymentInternal(reference);
+    return verifyPaymentInternal(reference, normUid(request.auth?.uid));
   },
 );
 
@@ -530,6 +1071,16 @@ exports.initiateFlutterwavePayment = onCall(
   { region: REGION, secrets: [flutterwaveSecretKey] },
   async (request) =>
     paymentFlow.initiateFlutterwavePayment(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+
+exports.initiateFlutterwaveMerchantOrderPayment = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    paymentFlow.initiateFlutterwaveMerchantOrderPayment(
       request.data,
       callableContext(request),
       db,
@@ -587,6 +1138,14 @@ exports.registerBankTransferPayment = onCall(rideCallOpts, async (request) =>
   ),
 );
 
+exports.getNexrideOfficialBankAccount = onCall(rideCallOpts, async (request) =>
+  nexrideOfficialBankConfig.getNexrideOfficialBankAccount(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
 exports.flutterwaveWebhook = onRequest(
   {
     region: REGION,
@@ -599,9 +1158,8 @@ exports.flutterwaveWebhook = onRequest(
 
 exports.createWalletTransaction = onCall(rideCallOpts, async (request) => {
   const ctx = callableContext(request);
-  if (!ctx.auth || !(await isNexRideAdmin(db, ctx))) {
-    return { success: false, reason: "unauthorized" };
-  }
+  const denyCwt = await adminPerms.enforceCallable(db, ctx, "createWalletTransaction");
+  if (denyCwt) return denyCwt;
   const idk = String(request.data?.idempotencyKey ?? "").trim();
   if (!idk) {
     return { success: false, reason: "idempotency_key_required" };
@@ -618,6 +1176,14 @@ exports.requestWithdrawal = onCall(rideCallOpts, async (request) =>
   withdrawFlow.requestWithdrawal(request.data, callableContext(request), db),
 );
 
+exports.driverGetWithdrawalDestination = onCall(rideCallOpts, async (request) =>
+  withdrawFlow.driverGetWithdrawalDestination(request.data, callableContext(request), db),
+);
+
+exports.driverUpdateWithdrawalDestination = onCall(rideCallOpts, async (request) =>
+  withdrawFlow.driverUpdateWithdrawalDestination(request.data, callableContext(request), db),
+);
+
 exports.approveWithdrawal = onCall(rideCallOpts, async (request) =>
   withdrawFlow.approveWithdrawal(request.data, callableContext(request), db),
 );
@@ -626,9 +1192,8 @@ exports.recordTripCompletion = onCall(
   { region: REGION, secrets: [flutterwaveSecretKey] },
   async (request) => {
     const ctx = callableContext(request);
-    if (!ctx.auth || !(await isNexRideAdmin(db, ctx))) {
-      return { success: false, reason: "unauthorized" };
-    }
+    const denyRtc = await adminPerms.enforceCallable(db, ctx, "recordTripCompletion");
+    if (denyRtc) return denyRtc;
 
     const rideId = String(request.data?.rideId ?? "").trim();
     if (!rideId) {
@@ -752,3 +1317,7 @@ exports.recordTripCompletion = onCall(
     };
   },
 );
+
+// --- Merchant order realtime (FCM + public RTDB teaser for riders) ---
+const merchantOrderTriggers = require("./merchant_order_triggers");
+exports.onMerchantOrderCreatedNotify = merchantOrderTriggers.onMerchantOrderCreatedNotify;

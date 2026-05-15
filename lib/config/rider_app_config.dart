@@ -1,6 +1,6 @@
 class RiderFeatureFlags {
-  static const bool enableGroceries = false;
-  static const bool enableFood = false;
+  static const bool enableGroceries = true;
+  static const bool enableFood = true;
   static const bool hideUserVerificationWhenApproved = true;
   static bool get enableRiderRestrictions => false;
   static bool get enableCancellationFeeBlocking => false;
@@ -43,14 +43,9 @@ class RiderFeatureFlags {
   }
 }
 
-/// Official payout account shown for bank-transfer trips (rider chat + trip UI).
-class RiderBankTransferConfig {
-  RiderBankTransferConfig._();
-
-  static const String bankName = 'UNITED BANK FOR AFRICA (UBA)';
-  static const String accountName = 'NEXRIDE DYNAMIC JOURNEY LTD';
-  static const String accountNumber = '1029983699';
-}
+/// Bank transfer display data comes from callable [getNexrideOfficialBankAccount]
+/// (see `lib/services/nexride_official_bank_account_service.dart`). Do not add hardcoded
+/// corporate account numbers here.
 
 class RiderVerificationCopy {
   static const String title = 'User Verification';
@@ -273,6 +268,12 @@ class RiderServiceAreaConfig {
       label: 'Edo',
       latitude: 6.3350,
       longitude: 5.6037,
+    ),
+    RiderLaunchMarket(
+      city: 'imo',
+      label: 'Imo',
+      latitude: 5.4930,
+      longitude: 7.0258,
     ),
   ];
 
@@ -676,6 +677,15 @@ class RiderLaunchScope {
       'uromi',
       'abudu',
     ];
+    const imoTokens = <String>[
+      'imo',
+      'imo state',
+      'owerri',
+      'orlu',
+      'okigwe',
+      'mbaise',
+      'oguta',
+    ];
 
     bool containsToken(List<String> tokens) {
       for (final token in tokens) {
@@ -707,6 +717,10 @@ class RiderLaunchScope {
 
     if (containsToken(edoTokens)) {
       return 'edo';
+    }
+
+    if (containsToken(imoTokens)) {
+      return 'imo';
     }
 
     return null;
@@ -943,6 +957,56 @@ class RiderFareSettings {
     ],
   );
 
+  static const RiderFareRule edo = RiderFareRule(
+    baseFare: 570,
+    perKmRate: 106,
+    perMinuteRate: 11,
+    minimumFare: 1200,
+    trafficWindows: <RiderTrafficWindow>[
+      RiderTrafficWindow(
+        label: 'edo_morning_peak',
+        startHour: 6,
+        startMinute: 30,
+        endHour: 9,
+        endMinute: 30,
+        multiplier: 1.05,
+      ),
+      RiderTrafficWindow(
+        label: 'edo_evening_peak',
+        startHour: 16,
+        startMinute: 30,
+        endHour: 19,
+        endMinute: 0,
+        multiplier: 1.08,
+      ),
+    ],
+  );
+
+  static const RiderFareRule imo = RiderFareRule(
+    baseFare: 550,
+    perKmRate: 102,
+    perMinuteRate: 10,
+    minimumFare: 1150,
+    trafficWindows: <RiderTrafficWindow>[
+      RiderTrafficWindow(
+        label: 'imo_morning_peak',
+        startHour: 6,
+        startMinute: 30,
+        endHour: 9,
+        endMinute: 30,
+        multiplier: 1.05,
+      ),
+      RiderTrafficWindow(
+        label: 'imo_evening_peak',
+        startHour: 16,
+        startMinute: 30,
+        endHour: 19,
+        endMinute: 0,
+        multiplier: 1.08,
+      ),
+    ],
+  );
+
   static String? normalizeSupportedCity(String? city) {
     return RiderLaunchScope.normalizeSupportedCity(city);
   }
@@ -953,6 +1017,8 @@ class RiderFareSettings {
       'abuja' => abuja,
       'delta' => delta,
       'anambra' => anambra,
+      'edo' => edo,
+      'imo' => imo,
       _ => null,
     };
   }

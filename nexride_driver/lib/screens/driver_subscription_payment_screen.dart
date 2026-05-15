@@ -7,6 +7,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../services/nexride_official_bank_account_service.dart';
 import '../support/driver_profile_support.dart';
 import '../support/friendly_firebase_errors.dart';
 
@@ -30,9 +31,6 @@ class DriverSubscriptionPaymentScreen extends StatefulWidget {
 class _DriverSubscriptionPaymentScreenState
     extends State<DriverSubscriptionPaymentScreen> {
   static const Duration _windowDuration = Duration(minutes: 30);
-  static const String _bankName = 'United Bank of Africa (UBA)';
-  static const String _accountName = 'NEXRIDE DYNAMIC JOURNEY LTD';
-  static const String _accountNumber = '1029983699';
 
   final ImagePicker _picker = ImagePicker();
   final rtdb.DatabaseReference _rootRef = rtdb.FirebaseDatabase.instance.ref();
@@ -45,11 +43,36 @@ class _DriverSubscriptionPaymentScreenState
   bool _uploadingProof = false;
   bool _submitting = false;
   bool _expired = false;
+  String _bankName = '';
+  String _accountName = '';
+  String _accountNumber = '';
+  bool _bankDetailsLoading = true;
 
   @override
   void initState() {
     super.initState();
+    unawaited(_loadOfficialBankDetails());
     _resetWindow(showExpiredNotice: false);
+  }
+
+  Future<void> _loadOfficialBankDetails() async {
+    try {
+      final b = await NexrideOfficialBankAccountService.instance.fetch();
+      if (!mounted) return;
+      setState(() {
+        _bankDetailsLoading = false;
+        if (b != null) {
+          _bankName = b.bankName;
+          _accountName = b.accountName;
+          _accountNumber = b.accountNumber;
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _bankDetailsLoading = false;
+      });
+    }
   }
 
   @override
@@ -396,9 +419,28 @@ class _DriverSubscriptionPaymentScreenState
                         ),
                       ),
                       const SizedBox(height: 10),
-                      Text('Bank: $_bankName'),
-                      Text('Account Name: $_accountName'),
-                      Text('Account Number: $_accountNumber'),
+                      if (_bankDetailsLoading)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 12),
+                          child: Center(
+                            child: SizedBox(
+                              height: 24,
+                              width: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        )
+                      else if (_bankName.isEmpty)
+                        const Text(
+                          'Official bank details could not be loaded. '
+                          'Contact NexRide support or try again shortly.',
+                          style: TextStyle(color: Color(0xFF8B4513)),
+                        )
+                      else ...<Widget>[
+                        Text('Bank: $_bankName'),
+                        Text('Account Name: $_accountName'),
+                        Text('Account Number: $_accountNumber'),
+                      ],
                       Text('Amount: $amountLabel'),
                       const SizedBox(height: 8),
                       SelectableText(

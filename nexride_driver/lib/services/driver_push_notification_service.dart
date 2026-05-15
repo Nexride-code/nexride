@@ -45,6 +45,12 @@ class DriverPushNotificationService {
       if (t == 'driver_offer') {
         DriverOfferPrimeCoordinator.instance.requestPrime();
       }
+    }, onError: (Object error, StackTrace stackTrace) {
+      debugPrint('[NEXRIDE_DIAG] FCM_onMessage_stream error=$error');
+      debugPrintStack(
+        label: '[NEXRIDE_DIAG] FCM_onMessage stack',
+        stackTrace: stackTrace,
+      );
     });
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
       DriverPendingOfferLaunchStore.instance
@@ -54,6 +60,12 @@ class DriverPushNotificationService {
       if (t == 'driver_offer') {
         DriverOfferPrimeCoordinator.instance.requestPrime();
       }
+    }, onError: (Object error, StackTrace stackTrace) {
+      debugPrint('[NEXRIDE_DIAG] FCM_onMessageOpenedApp error=$error');
+      debugPrintStack(
+        label: '[NEXRIDE_DIAG] FCM_onMessageOpenedApp stack',
+        stackTrace: stackTrace,
+      );
     });
     final initialMessage = await _messaging.getInitialMessage();
     if (initialMessage != null) {
@@ -68,12 +80,19 @@ class DriverPushNotificationService {
 
     _tokenRefreshSubscription = _messaging.onTokenRefresh.listen((String token) {
       unawaited(_registerToken(token));
+    }, onError: (Object error, StackTrace stackTrace) {
+      debugPrint('[NEXRIDE_DIAG] FCM_tokenRefresh error=$error');
+      debugPrintStack(
+        label: '[NEXRIDE_DIAG] FCM_tokenRefresh stack',
+        stackTrace: stackTrace,
+      );
     });
       final token = await _messaging.getToken();
       if (token != null && token.trim().isNotEmpty) {
         await _registerToken(token);
       }
     } catch (error) {
+      debugPrint('[NEXRIDE_DIAG] DRIVER_PUSH_INIT_FAIL error=$error');
       debugPrint('DRIVER_PUSH_INIT_FAIL error=$error');
     }
   }

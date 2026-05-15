@@ -5,9 +5,13 @@ import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/material.dart';
 
 import 'config/rider_app_config.dart';
+import 'food/merchant_food_hub_screen.dart';
+import 'food/rider_orders_screen.dart';
 import 'payment_methods_screen.dart';
 import 'rider_verification_screen.dart';
 import 'services/payment_methods_service.dart';
+import 'services/rider_compliance_service.dart';
+import 'services/rider_rollout_profile_store.dart';
 import 'services/rider_ride_cloud_functions_service.dart';
 import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
@@ -227,6 +231,20 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
         fallbackPhone: existingUser['phone']?.toString(),
       );
 
+      final compliance =
+          await RiderComplianceService.instance.fetchSnapshot(widget.riderId);
+      final mergedVerification = applyAdminFirestoreVerificationToRiderDisplayMap(
+        verification: bundle.verification,
+        firestoreVerificationStatus: compliance.verificationStatus,
+      );
+      final mergedTrust = buildRiderTrustSummary(
+        verification: mergedVerification,
+        riskFlags: bundle.riskFlags,
+        paymentFlags: bundle.paymentFlags,
+        reputation: bundle.reputation,
+        accessDecision: bundle.accessDecision.toMap(),
+      );
+
       final paymentMethods = await _paymentMethodsService.fetchPaymentMethods(
         widget.riderId,
       );
@@ -249,7 +267,7 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
           'created_at':
               existingUser['created_at'] ?? rtdb.ServerValue.timestamp,
         },
-        verification: bundle.verification,
+        verification: mergedVerification,
         deviceFingerprints: bundle.deviceFingerprints,
         source: 'rider_profile.bootstrap_write',
       );
@@ -260,11 +278,11 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
 
       setState(() {
         _userProfile = Map<String, dynamic>.from(bundle.userProfile);
-        _verification = bundle.verification;
+        _verification = mergedVerification;
         _riskFlags = bundle.riskFlags;
         _paymentFlags = bundle.paymentFlags;
         _reputation = bundle.reputation;
-        _trustSummary = bundle.trustSummary;
+        _trustSummary = mergedTrust;
         _paymentMethods = paymentMethods;
         _supportSummary = supportSummary;
         _loading = false;
@@ -308,6 +326,46 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => RiderTripHistoryScreen(userId: widget.riderId),
+      ),
+    );
+  }
+
+  Future<void> _openMerchantFoodHub() async {
+    final sel = await RiderRolloutProfileStore.instance.fetchSelection(
+      widget.riderId.trim(),
+    );
+    if (!mounted) {
+      return;
+    }
+    if (sel == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Choose your service area on the map first so we can show stores near you.',
+          ),
+        ),
+      );
+      return;
+    }
+    final city = sel[RiderRolloutProfileStore.kCityId] ?? '';
+    final region = sel[RiderRolloutProfileStore.kRegionId];
+    final dm = sel[RiderRolloutProfileStore.kDispatchMarketId];
+    if ((region ?? '').trim().isEmpty || (dm ?? '').trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Service area is incomplete. Open the map and pick your region.'),
+        ),
+      );
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => MerchantFoodHubScreen(
+          riderId: widget.riderId,
+          cityId: city.trim(),
+          regionId: region,
+          dispatchMarketId: dm,
+        ),
       ),
     );
   }
@@ -849,6 +907,27 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
                               color: const Color(0xFF1E3A5F),
                             ),
                       onTap: _openPaymentMethods,
+                    ),
+                    const SizedBox(height: 14),
+                    _ProfileActionTile(
+                      icon: Icons.storefront_outlined,
+                      title: 'Food & stores',
+                      subtitle:
+                          'Browse approved merchants in your rollout city, build a cart, and checkout with Flutterwave.',
+                      onTap: () => unawaited(_openMerchantFoodHub()),
+                    ),
+                    const SizedBox(height: 14),
+                    _ProfileActionTile(
+                      icon: Icons.receipt_long_outlined,
+                      title: 'My orders',
+                      subtitle: 'Track your food and delivery order status.',
+                      onTap: () => unawaited(
+                        Navigator.of(context).push<void>(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const RiderOrdersScreen(),
+                          ),
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 14),
                     _ProfileActionTile(

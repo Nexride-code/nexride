@@ -7,13 +7,28 @@ function normUid(uid) {
   return String(uid ?? "").trim();
 }
 
+/**
+ * RTDB `admins/{uid}` may be `true` (legacy) or an object with role metadata.
+ * @param {unknown} val
+ */
+function adminsEntryAllowsPortal(val) {
+  if (val === true) return true;
+  if (!val || typeof val !== "object") return false;
+  if (val.enabled === false || val.disabled === true) return false;
+  return val.admin === true || val.enabled === true || val.admin_role != null || val.role != null;
+}
+
 async function isNexRideAdmin(db, context) {
   if (!context?.auth?.uid) return false;
   if (context.auth.token?.admin === true) return true;
+  const tokenRole = String(context.auth.token?.role ?? "")
+    .trim()
+    .toLowerCase();
+  if (tokenRole === "admin") return true;
   const uid = normUid(context.auth.uid);
   if (!uid) return false;
   const snap = await db.ref(`admins/${uid}`).get();
-  return snap.val() === true;
+  return adminsEntryAllowsPortal(snap.val());
 }
 
 async function isNexRideSupportStaff(db, context) {
@@ -50,6 +65,7 @@ async function isNexRideAdminOrSupport(db, context) {
 
 module.exports = {
   normUid,
+  adminsEntryAllowsPortal,
   isAdmin: isNexRideAdmin,
   isNexRideAdmin,
   isNexRideSupportStaff,

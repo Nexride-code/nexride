@@ -87,7 +87,6 @@ class _WalletScreenState extends State<WalletScreen> {
       await _financeService.createWithdrawalRequest(
         driverId: widget.driverId,
         amount: amount,
-        payoutDestination: snapshot.payoutDestination,
       );
       if (!mounted) {
         return;
@@ -98,6 +97,23 @@ class _WalletScreenState extends State<WalletScreen> {
         ),
       );
       await _loadWallet(showLoader: false);
+    } on StateError catch (e) {
+      if (!mounted) {
+        return;
+      }
+      final String code = e.message;
+      final String msg = switch (code) {
+        'withdrawal_destination_required' =>
+          'Add your bank account details before requesting a withdrawal.',
+        'insufficient_balance' =>
+          'Withdrawal amount exceeds your wallet balance.',
+        'invalid_amount' => 'Enter a valid withdrawal amount.',
+        _ =>
+          'Unable to submit the withdrawal request${code.isNotEmpty ? ' ($code)' : ''}.',
+      };
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg)),
+      );
     } catch (error) {
       if (!mounted) {
         return;
@@ -119,6 +135,19 @@ class _WalletScreenState extends State<WalletScreen> {
   Future<void> _showWithdrawDialog() async {
     final snapshot = _snapshot;
     if (snapshot == null) {
+      return;
+    }
+    if (!snapshot.payoutDestination.isConfigured) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Add your withdrawal destination before requesting a payout.',
+          ),
+        ),
+      );
       return;
     }
 
@@ -183,6 +212,137 @@ class _WalletScreenState extends State<WalletScreen> {
         );
       },
     );
+  }
+
+  Future<void> _showEditDestinationDialog(
+    DriverPayoutDestination current,
+  ) async {
+    final bankController = TextEditingController(text: current.bankName);
+    final accountController = TextEditingController(text: current.accountNumber);
+    final holderController = TextEditingController(text: current.accountName);
+    final bankCodeController = TextEditingController(text: current.bankCode);
+    var saving = false;
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return StatefulBuilder(
+          builder: (BuildContext context, void Function(void Function()) setLocal) {
+            return AlertDialog(
+              title: const Text('Withdrawal destination'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    TextField(
+                      controller: bankController,
+                      decoration: const InputDecoration(
+                        labelText: 'Bank name',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: accountController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Account number',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: holderController,
+                      decoration: const InputDecoration(
+                        labelText: 'Account holder name',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: bankCodeController,
+                      decoration: const InputDecoration(
+                        labelText: 'Bank code (optional)',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: saving ? null : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: saving
+                      ? null
+                      : () async {
+                          setLocal(() {
+                            saving = true;
+                          });
+                          try {
+                            await _financeService.saveWithdrawalDestination(
+                              destination: DriverPayoutDestination(
+                                bankName: bankController.text.trim(),
+                                accountName: holderController.text.trim(),
+                                accountNumber: accountController.text.trim(),
+                                bankCode: bankCodeController.text.trim(),
+                              ),
+                            );
+                            if (!mounted) {
+                              return;
+                            }
+                            Navigator.of(dialogContext).pop();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Withdrawal destination saved.'),
+                              ),
+                            );
+                            await _loadWallet(showLoader: false);
+                          } on StateError catch (e) {
+                            if (!mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(e.message)),
+                            );
+                          } catch (_) {
+                            if (!mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Could not save. Try again.'),
+                              ),
+                            );
+                          } finally {
+                            if (dialogContext.mounted) {
+                              setLocal(() {
+                                saving = false;
+                              });
+                            }
+                          }
+                        },
+                  child: saving
+                      ? const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    bankController.dispose();
+    accountController.dispose();
+    holderController.dispose();
+    bankCodeController.dispose();
   }
 
   void _showWithdrawalDetails(DriverWithdrawalRecord record) {
@@ -306,11 +466,32 @@ class _WalletScreenState extends State<WalletScreen> {
                       _DestinationSummaryCard(
                         destination: snapshot.payoutDestination,
                       ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: _isSubmittingWithdrawal
+                              ? null
+                              : () async {
+                                  await _showEditDestinationDialog(
+                                    snapshot.payoutDestination,
+                                  );
+                                },
+                          icon: const Icon(Icons.account_balance_outlined, size: 18),
+                          label: Text(
+                            snapshot.payoutDestination.isConfigured
+                                ? 'Edit withdrawal destination'
+                                : 'Add withdrawal destination',
+                          ),
+                        ),
+                      ),
                       const SizedBox(height: 14),
                       _WithdrawalActionCard(
                         isSubmitting: _isSubmittingWithdrawal,
                         balance: snapshot.currentWalletBalance,
-                        onPressed: snapshot.currentWalletBalance > 0
+                        hasDestination: snapshot.payoutDestination.isConfigured,
+                        onPressed: snapshot.currentWalletBalance > 0 &&
+                                snapshot.payoutDestination.isConfigured
                             ? _showWithdrawDialog
                             : null,
                       ),
@@ -637,15 +818,28 @@ class _WithdrawalActionCard extends StatelessWidget {
   const _WithdrawalActionCard({
     required this.isSubmitting,
     required this.balance,
+    required this.hasDestination,
     required this.onPressed,
   });
 
   final bool isSubmitting;
   final double balance;
+  final bool hasDestination;
   final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
+    final String helper;
+    if (balance <= 0) {
+      helper =
+          'You need an available wallet balance before you can request a withdrawal.';
+    } else if (!hasDestination) {
+      helper =
+          'Add your bank account details above before you can request a withdrawal.';
+    } else {
+      helper =
+          'Submit a withdrawal request from your available wallet balance.';
+    }
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -672,9 +866,7 @@ class _WithdrawalActionCard extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            balance > 0
-                ? 'Submit a withdrawal request from your available wallet balance.'
-                : 'You need an available wallet balance before you can request a withdrawal.',
+            helper,
             style: TextStyle(
               color: Colors.black.withValues(alpha: 0.68),
               height: 1.4,

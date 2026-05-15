@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import 'config/rider_app_config.dart';
 import 'rider_verification_submission_screen.dart';
+import 'services/rider_compliance_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'support/friendly_firebase_errors.dart';
 import 'support/rider_trust_support.dart';
@@ -84,22 +85,42 @@ class _RiderVerificationScreenState extends State<RiderVerificationScreen> {
         fallbackEmail: FirebaseAuth.instance.currentUser?.email,
       );
 
+      final compliance =
+          await RiderComplianceService.instance.fetchSnapshot(widget.riderId);
+      final mergedVerification = applyAdminFirestoreVerificationToRiderDisplayMap(
+        verification: bundle.verification,
+        firestoreVerificationStatus: compliance.verificationStatus,
+      );
+      final mergedTrust = buildRiderTrustSummary(
+        verification: mergedVerification,
+        riskFlags: bundle.riskFlags,
+        paymentFlags: bundle.paymentFlags,
+        reputation: bundle.reputation,
+        accessDecision: bundle.accessDecision.toMap(),
+      );
+
       if (!mounted) {
         return;
       }
 
       setState(() {
         _riderProfile = bundle.userProfile;
-        _verification = bundle.verification;
+        _verification = mergedVerification;
         _riskFlags = bundle.riskFlags;
         _paymentFlags = bundle.paymentFlags;
         _reputation = bundle.reputation;
         _deviceFingerprints = bundle.deviceFingerprints;
-        _trustSummary = bundle.trustSummary;
+        _trustSummary = mergedTrust;
         _loading = false;
       });
 
-      unawaited(_persistRiderTrustBootstrap(existingUser, bundle));
+      unawaited(
+        _persistRiderTrustBootstrap(
+          existingUser,
+          bundle,
+          mergedVerification,
+        ),
+      );
     } catch (error, stackTrace) {
       debugPrint('[RiderVerification] load failed: $error');
       debugPrintStack(
@@ -119,6 +140,7 @@ class _RiderVerificationScreenState extends State<RiderVerificationScreen> {
   Future<void> _persistRiderTrustBootstrap(
     Map<String, dynamic> existingUser,
     RiderTrustBootstrapBundle bundle,
+    Map<String, dynamic> verificationToPersist,
   ) async {
     try {
       await persistRiderOwnedBootstrap(
@@ -130,7 +152,7 @@ class _RiderVerificationScreenState extends State<RiderVerificationScreen> {
           'created_at':
               existingUser['created_at'] ?? rtdb.ServerValue.timestamp,
         },
-        verification: bundle.verification,
+        verification: verificationToPersist,
         deviceFingerprints: bundle.deviceFingerprints,
         source: 'rider_verification.bootstrap_write',
       );

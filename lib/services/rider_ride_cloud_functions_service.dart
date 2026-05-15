@@ -263,6 +263,9 @@ class RiderRideCloudFunctionsService {
         'ride_id': rideId,
       });
 
+  Future<Map<String, dynamic>> getNexrideOfficialBankAccount() =>
+      _call('getNexrideOfficialBankAccount', <String, dynamic>{});
+
   Future<Map<String, dynamic>> registerDevicePushToken({
     required String token,
     required String platform,
@@ -296,6 +299,91 @@ class RiderRideCloudFunctionsService {
         'details': details,
         if (sourceFlagId.trim().isNotEmpty) 'sourceFlagId': sourceFlagId.trim(),
       });
+
+  Future<Map<String, dynamic>> riderListApprovedMerchants({
+    String? cityId,
+    String? regionId,
+    double? lat,
+    double? lng,
+    double? riderLat,
+    double? riderLng,
+    String? market,
+    String? dispatchMarketId,
+    String? serviceAreaId,
+  }) =>
+      _call('riderListApprovedMerchants', <String, dynamic>{
+        if (cityId != null && cityId.trim().isNotEmpty) 'city_id': cityId.trim(),
+        if (serviceAreaId != null && serviceAreaId.trim().isNotEmpty)
+          'service_area_id': serviceAreaId.trim(),
+        if (regionId != null && regionId.isNotEmpty) 'region_id': regionId,
+        if (riderLat != null) 'rider_lat': riderLat,
+        if (riderLng != null) 'rider_lng': riderLng,
+        if (lat != null) 'lat': lat,
+        if (lng != null) 'lng': lng,
+        if (market != null && market.isNotEmpty) 'market': market,
+        if (dispatchMarketId != null && dispatchMarketId.isNotEmpty)
+          'dispatch_market_id': dispatchMarketId,
+      });
+
+  Future<Map<String, dynamic>> riderGetMerchantCatalog({
+    required String merchantId,
+    double? riderLat,
+    double? riderLng,
+  }) =>
+      _call('riderGetMerchantCatalog', <String, dynamic>{
+        'merchant_id': merchantId,
+        if (riderLat != null) 'rider_lat': riderLat,
+        if (riderLng != null) 'rider_lng': riderLng,
+      });
+
+  Future<Map<String, dynamic>> initiateFlutterwaveMerchantOrderPayment({
+    double? amount,
+    int? subtotalNgn,
+    int? deliveryFeeNgn,
+    String currency = 'NGN',
+    String? customerName,
+    String? email,
+    String? redirectUrl,
+    String orderFlow = 'food_order',
+  }) =>
+      _call('initiateFlutterwaveMerchantOrderPayment', <String, dynamic>{
+        if (amount != null) 'amount': amount,
+        if (subtotalNgn != null) 'subtotal_ngn': subtotalNgn,
+        if (deliveryFeeNgn != null) 'delivery_fee_ngn': deliveryFeeNgn,
+        'order_flow': orderFlow,
+        'currency': currency,
+        if (customerName != null) 'customer_name': customerName,
+        if (email != null) 'email': email,
+        if (redirectUrl != null) 'redirect_url': redirectUrl,
+      });
+
+  Future<Map<String, dynamic>> riderPlaceMerchantOrder({
+    required String merchantId,
+    required List<Map<String, dynamic>> cart,
+    required Map<String, dynamic> dropoff,
+    required String prepaidFlutterwaveRef,
+    double? deliveryFeeNgn,
+    int? totalNgn,
+    String? recipientName,
+    String? recipientPhone,
+    String? serviceCityId,
+    String? serviceRegionId,
+  }) =>
+      _call('riderPlaceMerchantOrder', <String, dynamic>{
+        'merchant_id': merchantId,
+        'cart': cart,
+        'dropoff': dropoff,
+        'prepaid_flutterwave_ref': prepaidFlutterwaveRef,
+        if (deliveryFeeNgn != null) 'delivery_fee_ngn': deliveryFeeNgn,
+        if (totalNgn != null) 'total_ngn': totalNgn,
+        if (recipientName != null) 'recipient_name': recipientName,
+        if (recipientPhone != null) 'recipient_phone': recipientPhone,
+        if (serviceCityId != null) 'service_city_id': serviceCityId,
+        if (serviceRegionId != null) 'service_region_id': serviceRegionId,
+      });
+
+  Future<Map<String, dynamic>> riderListMyOrders() =>
+      _call('riderListMyOrders', <String, dynamic>{});
 }
 
 bool riderRideCallableSucceeded(Map<String, dynamic>? response) =>

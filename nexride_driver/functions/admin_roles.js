@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
-const { isNexRideAdmin, normUid } = require("./admin_auth");
+const { normUid } = require("./admin_auth");
+const adminPerms = require("./admin_permissions");
 
 const SUPPORT_ROLES = new Set(["support_agent", "support_manager"]);
 
@@ -20,14 +21,17 @@ async function mergeUserClaims(uid, patch) {
 /**
  * Admin-only: assign admin/support roles and claims.
  * Input: { uid, role } where role in ["admin", "support_agent", "support_manager"].
+ * For role "admin", optional `admin_role` sets JWT + RTDB mirror
+ * (`super_admin` | `ops_admin` | `finance_admin` | `support_admin` | `verification_admin` | `merchant_ops_admin`).
  */
 async function setUserRole(data, context, db) {
   if (!context?.auth?.uid) {
     return { success: false, reason: "unauthorized" };
   }
-  if (!(await isNexRideAdmin(db, context))) {
-    return { success: false, reason: "forbidden" };
-  }
+  const deny = await adminPerms.enforcePermission(db, context, "settings.write", "setUserRole", {
+    auditDenied: true,
+  });
+  if (deny) return deny;
   const callerUid = normUid(context.auth.uid);
   const targetUid = normUid(data?.uid);
   const role = String(data?.role ?? "").trim().toLowerCase();
@@ -40,16 +44,29 @@ async function setUserRole(data, context, db) {
 
   const ts = nowMs();
   if (role === "admin") {
-    await db.ref(`admins/${targetUid}`).set(true);
-    await mergeUserClaims(targetUid, { admin: true });
+    const chosenAdminRole = String(data?.admin_role ?? "super_admin")
+      .trim()
+      .toLowerCase();
+    if (!adminPerms.ADMIN_ROLES.has(chosenAdminRole)) {
+      return { success: false, reason: "invalid_admin_role" };
+    }
+    await db.ref(`admins/${targetUid}`).set({
+      enabled: true,
+      admin: true,
+      admin_role: chosenAdminRole,
+      updated_at: ts,
+      updated_by: callerUid,
+    });
+    await mergeUserClaims(targetUid, { admin: true, admin_role: chosenAdminRole });
     await db.ref("admin_audit_logs").push().set({
       type: "set_user_role",
       role: "admin",
+      admin_role: chosenAdminRole,
       target_uid: targetUid,
       actor_uid: callerUid,
       created_at: ts,
     });
-    return { success: true, uid: targetUid, role: "admin" };
+    return { success: true, uid: targetUid, role: "admin", admin_role: chosenAdminRole };
   }
 
   await db.ref(`support_staff/${targetUid}`).set({
@@ -92,15 +109,22 @@ async function bootstrapFirstAdmin(_data, context, db) {
     return { success: false, reason: "already_bootstrapped" };
   }
 
-  await db.ref(`admins/${uid}`).set(true);
-  await mergeUserClaims(uid, { admin: true });
+  const ts = nowMs();
+  await db.ref(`admins/${uid}`).set({
+    enabled: true,
+    admin: true,
+    admin_role: "super_admin",
+    bootstrap: true,
+    created_at: ts,
+  });
+  await mergeUserClaims(uid, { admin: true, admin_role: "super_admin" });
   await db.ref("admin_audit_logs").push().set({
     type: "bootstrap_first_admin",
     target_uid: uid,
     actor_uid: uid,
-    created_at: nowMs(),
+    created_at: ts,
   });
-  return { success: true, uid, role: "admin", bootstrap: true };
+  return { success: true, uid, role: "admin", admin_role: "super_admin", bootstrap: true };
 }
 
 module.exports = {

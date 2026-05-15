@@ -116,6 +116,21 @@ service cloud.firestore {
       return signedIn() && resource.data.createdByUserId == request.auth.uid;
     }
 
+    /** Merchant portal: owner or listed staff (same uid as staff_uids array). */
+    function merchantMemberCanReadMerchantDoc(merchantId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/merchants/$(merchantId))
+        && (
+          get(/databases/$(database)/documents/merchants/$(merchantId)).data.owner_uid
+            == request.auth.uid
+          || (
+            'staff_uids' in get(/databases/$(database)/documents/merchants/$(merchantId)).data
+            && request.auth.uid
+              in get(/databases/$(database)/documents/merchants/$(merchantId)).data.staff_uids
+          )
+        );
+    }
+
     function ticketOwnerById(ticketId) {
       return signedIn() &&
         exists(/databases/$(database)/documents/support_tickets/$(ticketId)) &&
@@ -234,10 +249,30 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
-    // Merchants — Phase 1: writes only via Cloud Functions; owners may read their own row.
+    // Merchants — owners + staff may read; writes only via Cloud Functions.
     match /merchants/{merchantId} {
-      allow read: if isAdmin() || (signedIn() && resource.data.owner_uid == request.auth.uid);
+      allow read: if isAdmin()
+        || (signedIn() && resource.data.owner_uid == request.auth.uid)
+        || (signedIn()
+          && 'staff_uids' in resource.data
+          && request.auth.uid in resource.data.staff_uids);
       allow create, update, delete: if false;
+    }
+
+    // Merchant verification documents — server-side writes only; merchant/admin read.
+    match /merchant_verification_documents/{merchantId}/documents/{documentType} {
+      allow read: if isAdmin()
+        || (
+          signedIn()
+          && exists(/databases/$(database)/documents/merchants/$(merchantId))
+          && get(/databases/$(database)/documents/merchants/$(merchantId)).data.owner_uid
+            == request.auth.uid
+        );
+      allow create, update, delete: if false;
+    }
+
+    match /merchant_verification_documents/{merchantId} {
+      allow read, write: if false;
     }
 
     // Rider profile compliance (Firestore) — field-level rider restrictions
@@ -261,6 +296,37 @@ service cloud.firestore {
     match /shared_trips/{token} {
       allow read: if true;
       allow write: if signedIn();
+    }
+
+    match /merchant_orders/{orderId} {
+      allow read: if signedIn()
+        && resource.data.merchant_id is string
+        && merchantMemberCanReadMerchantDoc(resource.data.merchant_id);
+      allow write: if false;
+    }
+
+    match /merchants/{merchantId}/menu_categories/{docId} {
+      allow read, write: if false;
+    }
+
+    match /merchants/{merchantId}/menu_items/{docId} {
+      allow read, write: if false;
+    }
+
+    match /merchants/{merchantId}/internal_notes/{docId} {
+      allow read, write: if false;
+    }
+
+    // Rider identity verification submissions — rider writes own record; admin reads/manages.
+    match /identity_verifications/{uid} {
+      allow read: if isOwner(uid) || isAdmin() || isSupport();
+      // Riders submit their own record; review fields must remain null/empty.
+      allow create, update: if isOwner(uid)
+        && request.resource.data.user_type == 'rider'
+        && request.resource.data.uid == uid
+        && request.resource.data.get('reviewed_at', null) == null
+        && request.resource.data.get('review_note', '') == '';
+      allow delete: if isAdmin();
     }
 
     match /{document=**} {

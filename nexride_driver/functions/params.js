@@ -17,7 +17,15 @@ const agoraAppCertificateSecret = defineSecret("AGORA_APP_CERTIFICATE");
 
 const nexridePlatformFeeNgn = defineString("NEXRIDE_PLATFORM_FEE_NGN", {
   default: "30",
-  description: "Flat platform fee in NGN for trip settlement",
+  description: "Mandatory platform/booking fee (NGN) on every rider request",
+});
+const nexrideSmallOrderFeeNgn = defineString("NEXRIDE_SMALL_ORDER_FEE_NGN", {
+  default: "15",
+  description: "Small-order surcharge (NGN) for merchant/food/mart orders below threshold",
+});
+const nexrideSmallOrderThresholdNgn = defineString("NEXRIDE_SMALL_ORDER_THRESHOLD_NGN", {
+  default: "3000",
+  description: "Subtotal below this (NGN) triggers small-order fee on commerce orders",
 });
 const flutterwavePublicKey = defineString("FLUTTERWAVE_PUBLIC_KEY", {
   default: "",
@@ -30,9 +38,28 @@ function flutterwaveSecretForVerify() {
   return String(process.env.FLUTTERWAVE_SECRET_KEY || "").trim();
 }
 
+function readParamNumber(paramDef, fallback, { min = 0 } = {}) {
+  try {
+    const n = Number(paramDef.value());
+    if (!Number.isFinite(n) || n <= min) {
+      return fallback;
+    }
+    return n;
+  } catch (_) {
+    return fallback;
+  }
+}
+
 function platformFeeNgn() {
-  const n = Number(nexridePlatformFeeNgn.value());
-  return Number.isFinite(n) && n > 0 ? n : 30;
+  return readParamNumber(nexridePlatformFeeNgn, 30, { min: 0 });
+}
+
+function smallOrderFeeNgn() {
+  return readParamNumber(nexrideSmallOrderFeeNgn, 15, { min: 0 });
+}
+
+function smallOrderThresholdNgn() {
+  return readParamNumber(nexrideSmallOrderThresholdNgn, 3000, { min: 0 });
 }
 
 module.exports = {
@@ -45,4 +72,8 @@ module.exports = {
   REGION,
   flutterwaveSecretForVerify,
   platformFeeNgn,
+  smallOrderFeeNgn,
+  smallOrderThresholdNgn,
+  nexrideSmallOrderFeeNgn,
+  nexrideSmallOrderThresholdNgn,
 };

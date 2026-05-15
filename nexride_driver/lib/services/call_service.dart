@@ -194,7 +194,6 @@ class CallService {
   String? _callableAgoraChannelName;
   int? _joinRtcUidOverride;
   Object? _lastAgoraErrorCode;
-  String? _lastAgoraErrorMessage;
   ConnectionChangedReasonType? _lastConnectionReason;
   _VoiceJoinRequest? _lastJoinRequest;
   ConnectionStateType _connectionState =
@@ -619,7 +618,6 @@ class CallService {
       _joinWatchdogTimer = Timer(const Duration(seconds: 15), () {
         if (_connectionState != ConnectionStateType.connectionStateConnected) {
           const failureMessage = 'Could not connect call. Please try again.';
-          _lastAgoraErrorMessage = failureMessage;
           debugPrint('[CALL_JOIN_TIMEOUT] rideId=$normalizedRide');
           _setPhase(AgoraConnectionPhase.failed, error: failureMessage);
         }
@@ -689,7 +687,6 @@ class CallService {
     _callableAgoraChannelName = null;
     _joinRtcUidOverride = null;
     _lastAgoraErrorCode = null;
-    _lastAgoraErrorMessage = null;
     _lastConnectionReason = null;
 
     await leaveVoiceChannel();
@@ -1069,7 +1066,6 @@ class CallService {
       },
       onError: (err, msg) {
         _lastAgoraErrorCode = err;
-        _lastAgoraErrorMessage = msg;
         debugPrint('[CALL_ERROR] $err: $msg');
         debugPrint('[RideCall] agora error code=$err message=$msg');
       },

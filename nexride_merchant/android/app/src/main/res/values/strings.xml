@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NexRide</string>
+    <!-- Maps key is injected at build time via app/build.gradle.kts from
+         local.properties (GOOGLE_MAPS_ANDROID_API_KEY) or env GOOGLE_MAPS_ANDROID_API_KEY -->
+</resources>

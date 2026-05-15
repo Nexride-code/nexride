@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!-- Required by flutter build web -->
+  <base href="/merchant/">
+  <!-- Path-absolute asset root for the web engine (must end with /). Without this,
+       some asset fetches under deep routes can resolve to /.../assets/foo instead of
+       /.../assets/assets/foo, hit the /admin/** SPA rewrite, and return index.html;
+       jsonDecode then fails on <!DOCTYPE. Replaces with the same value as base href. -->
+  <meta name="assetBase" content="/merchant/">
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="NexRide web app">
+  <title>NexRide</title>
+  <link rel="manifest" href="manifest.json">
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

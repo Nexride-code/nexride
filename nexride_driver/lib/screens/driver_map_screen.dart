@@ -39,6 +39,7 @@ import '../support/app_role.dart';
 import '../support/driver_location_access_support.dart';
 import '../support/driver_dispatch_support.dart';
 import '../support/driver_profile_bootstrap_support.dart';
+import '../support/driver_identity_online_gate.dart';
 import '../support/driver_kyc_gate_support.dart';
 import '../support/driver_profile_support.dart';
 import '../support/dispatch_payment_support.dart';
@@ -464,6 +465,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   bool _lastAvailabilityIntentOnline = false;
   bool _availabilityActionInProgress = false;
 
+  /// Server `driver_availability_mode` while online (or last go-online mode).
+  String _activeOnlineAvailabilityMode = '';
+
+  /// Next GO ONLINE uses GPS vs selected rollout city (`current_location` | `service_area`).
+  String _pendingAvailabilityMode = 'current_location';
+
   /// Last successfully loaded driver profile from RTDB (used for fast GO ONLINE).
   Map<String, dynamic>? _lastDriverProfileSnapshot;
   bool _isDriverChatOpen = false;
@@ -512,6 +519,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   String _lastRouteBuildKey = '';
   String _lastRouteConsistencyCheckKey = '';
   bool _startupPermissionNoticeShown = false;
+  /// Latest [evaluateDriverLocationCapability] result (drives go-online gating UI).
+  DriverLocationCapability? _driverLocationCapability;
   int _mapInitializationAttempt = 0;
   int _mapRenderRefreshGeneration = 0;
   bool _mapCameraIdleObserved = false;
@@ -601,12 +610,43 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   String get _availabilityStatusLabel => _isOnline ? 'ONLINE' : 'OFFLINE';
   String get _availabilityStatusMessage {
     if (_isOnline) {
+      if (_activeOnlineAvailabilityMode == 'service_area') {
+        return 'Ride requests are live for your selected service area.';
+      }
+      if (_activeOnlineAvailabilityMode == 'current_location') {
+        return 'Ride requests are live using your current GPS position.';
+      }
       return 'Ride requests are live. You can receive trips now.';
     }
     if (_lastAvailabilityIntentOnline) {
       return 'Last intended state: ONLINE. Tap GO ONLINE to publish availability again.';
     }
     return 'You stay offline until you explicitly tap GO ONLINE.';
+  }
+
+  String _normalizedAvailabilityMode(String raw) {
+    final t = raw.trim().toLowerCase().replaceAll('-', '_');
+    if (t == 'service_area' || t == 'area' || t == 'city') {
+      return 'service_area';
+    }
+    return 'current_location';
+  }
+
+  String _friendlySetDriverOnlineError(String reason) {
+    switch (reason) {
+      case 'location_required':
+        return 'Location permission required to go online.';
+      case 'service_area_required':
+        return 'Choose a service area first in Driver Hub.';
+      case 'driver_not_approved':
+        return 'Your account must be approved before going online.';
+      case 'driver_suspended':
+        return 'Your account is suspended.';
+      case 'invalid_availability_mode':
+        return 'That availability mode is not supported. Update the app and try again.';
+      default:
+        return 'Could not go online. Please try again.';
+    }
   }
 
   bool _lastAvailabilityIntentFromRecord(
@@ -721,9 +761,20 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         .listen((event) {
       final raw = event.snapshot.value;
       _serverTimeOffsetMs = raw is num ? raw.toInt() : 0;
+    }, onError: (Object error, StackTrace stackTrace) {
+      debugPrint('[NEXRIDE_DIAG] serverTimeOffset_listener error=$error');
+      debugPrintStack(
+        label: '[NEXRIDE_DIAG] serverTimeOffset_listener stack',
+        stackTrace: stackTrace,
+      );
     });
     _startRideDiscoveryFallbackPolling();
     print('DRIVER_MAP_INIT');
+    debugPrint(
+      '[NEXRIDE_DIAG] driver_map_init '
+      'uid=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} '
+      'widgetDriverId=${widget.driverId}',
+    );
     _log(
       'screen init auth=${FirebaseAuth.instance.currentUser?.uid ?? 'none'} widgetDriverId=${widget.driverId} platform=${defaultTargetPlatform.name}',
     );
@@ -931,6 +982,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         return;
       }
       _applySubscriptionBannerFromDriverRow(Map<String, dynamic>.from(m));
+    }, onError: (Object error, StackTrace stackTrace) {
+      debugPrint('[NEXRIDE_DIAG] driver_subscription_banner_rtdb error=$error');
+      debugPrintStack(
+        label: '[NEXRIDE_DIAG] driver_subscription_banner stack',
+        stackTrace: stackTrace,
+      );
     });
   }
 
@@ -1244,7 +1301,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
       unawaited(_resyncIncomingCallState());
       await _listenToActiveRide(recoveredRide.rideId);
-      _startLiveLocationStream();
+      await _startLiveLocationStream();
       _log(
         'startup session restored active ride in offline-safe mode driverId=$driverId rideId=${recoveredRide.rideId} status=$restoredStatus',
       );
@@ -1617,6 +1674,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         'map initialization failure timeout attempt=$attempt bootstrapReady=$_mapBootstrapReady mapViewReady=$_mapViewReady',
       );
       _setDebugStartupStep('map init timeout');
+      if (!mounted) {
+        return;
+      }
       setState(() {
         _mapInitializationInProgress = false;
         _mapInitializationError = defaultTargetPlatform == TargetPlatform.iOS
@@ -1672,6 +1732,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     _mapInitializationTimer?.cancel();
+    if (!mounted) {
+      return;
+    }
     setState(() {
       _mapInitializationInProgress = false;
       _mapInitializationError = null;
@@ -1680,7 +1743,18 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       'map initialization success attempt=$attempt city=${_driverCity ?? 'unknown'}',
     );
     _setDebugStartupStep('map ready');
-    _moveCameraToIdleState();
+    if (!mounted) {
+      return;
+    }
+    try {
+      _moveCameraToIdleState();
+    } catch (e, st) {
+      debugPrint('[DriverMap] _completeMapInitializationIfReady camera error=$e');
+      debugPrintStack(
+        label: '[DriverMap] _completeMapInitializationIfReady stack',
+        stackTrace: st,
+      );
+    }
     _log(
         'camera initialized attempt=$attempt target=${_driverLocation.latitude},${_driverLocation.longitude}');
   }
@@ -1704,12 +1778,22 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       'refreshing map presentation reason=$reason activeRide=$_hasRenderableActiveRide markers=${_markers.length} polylines=${_polyLines.length}',
     );
 
-    if (_hasRenderableActiveRide) {
-      _moveCameraToActiveTrip();
-      return;
-    }
+    try {
+      if (_hasRenderableActiveRide) {
+        _moveCameraToActiveTrip();
+        return;
+      }
 
-    _moveCameraToIdleState();
+      _moveCameraToIdleState();
+    } catch (e, st) {
+      debugPrint(
+        '[DriverMap] _refreshDriverMapPresentation error=$e reason=$reason',
+      );
+      debugPrintStack(
+        label: '[DriverMap] _refreshDriverMapPresentation stack',
+        stackTrace: st,
+      );
+    }
   }
 
   void _scheduleIosMapStabilization({
@@ -2574,6 +2658,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   @override
   void dispose() {
     _isDisposing = true;
+    _mapInitializationTimer?.cancel();
+    _mapInitializationTimer = null;
     WidgetsBinding.instance.removeObserver(this);
     _positionStream?.cancel();
     _serverTimeOffsetSubscription?.cancel();
@@ -2634,7 +2720,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         (_isOnline ||
             (_currentRideId?.isNotEmpty ?? false) ||
             (_driverActiveRideId?.isNotEmpty ?? false))) {
-      _startLiveLocationStream();
+      unawaited(_startLiveLocationStream());
     }
 
     final rideId = _currentRideId;
@@ -2683,70 +2769,87 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   Future<void> _prepareInitialLocation() async {
     _log('location permission started source=initial_map');
     _setDebugStartupStep('waiting for location');
-    final testLocation = _getNigeriaTestDriverLocation();
-    if (testLocation != null) {
-      _driverLocation = LatLng(testLocation.latitude, testLocation.longitude);
-      _driverCity = testLocation.city;
-      _mapLocationReady = false;
+    try {
+      final testLocation = _getNigeriaTestDriverLocation();
+      if (testLocation != null) {
+        _driverLocation = LatLng(testLocation.latitude, testLocation.longitude);
+        _driverCity = testLocation.city;
+        _mapLocationReady = false;
+        _log(
+          'location permission completed source=initial_map mode=test_location city=${testLocation.city}',
+        );
+        _updateDriverMarker();
+
+        if (mounted) {
+          setState(() {});
+        }
+        return;
+      }
+
+      final position = await _getCurrentPositionIfPossible();
+      if (position == null) {
+        _log('initial location unavailable');
+        _mapLocationReady = false;
+        _log(
+            'location permission completed source=initial_map status=unavailable');
+        return;
+      }
+
+      final detectedLaunchCity = await _resolveLaunchCityFromPosition(position);
+      if (detectedLaunchCity == null) {
+        _driverLocation = const LatLng(
+          DriverServiceAreaConfig.defaultMapLatitude,
+          DriverServiceAreaConfig.defaultMapLongitude,
+        );
+        _driverCity = _selectedLaunchCity;
+        _deviceLocationOutsideLaunchArea = true;
+        _mapLocationReady = false;
+        _log(
+          'location permission completed source=initial_map status=outside_launch_area selectedLaunchCity=$_selectedLaunchCity',
+        );
+        _updateDriverMarker();
+        if (mounted) {
+          setState(() {});
+        }
+        return;
+      }
+
+      _deviceLocationOutsideLaunchArea = false;
+      if (!_launchCityChosenManually &&
+          detectedLaunchCity != _selectedLaunchCity) {
+        await _selectLaunchCity(
+          detectedLaunchCity,
+          manual: false,
+          persist: false,
+          moveCamera: false,
+        );
+      }
+      _driverLocation = LatLng(position.latitude, position.longitude);
+      await _resolveDriverCity(position: position);
+      _mapLocationReady = true;
       _log(
-        'location permission completed source=initial_map mode=test_location city=${testLocation.city}',
+        'location permission completed source=initial_map lat=${position.latitude} lng=${position.longitude} city=${_driverCity ?? 'unknown'}',
       );
       _updateDriverMarker();
 
       if (mounted) {
         setState(() {});
       }
-      return;
-    }
-
-    final position = await _getCurrentPositionIfPossible();
-    if (position == null) {
-      _log('initial location unavailable');
-      _mapLocationReady = false;
-      _log(
-          'location permission completed source=initial_map status=unavailable');
-      return;
-    }
-
-    final detectedLaunchCity = await _resolveLaunchCityFromPosition(position);
-    if (detectedLaunchCity == null) {
-      _driverLocation = const LatLng(
-        DriverServiceAreaConfig.defaultMapLatitude,
-        DriverServiceAreaConfig.defaultMapLongitude,
+    } catch (e, st) {
+      debugPrint('[DriverMap] _prepareInitialLocation error=$e');
+      debugPrintStack(
+        label: '[DriverMap] _prepareInitialLocation stack',
+        stackTrace: st,
       );
-      _driverCity = _selectedLaunchCity;
-      _deviceLocationOutsideLaunchArea = true;
       _mapLocationReady = false;
+      _driverLocation = _selectedLaunchCityCenter;
       _log(
-        'location permission completed source=initial_map status=outside_launch_area selectedLaunchCity=$_selectedLaunchCity',
+        'location permission completed source=initial_map status=error_fallback',
       );
       _updateDriverMarker();
       if (mounted) {
         setState(() {});
       }
-      return;
-    }
-
-    _deviceLocationOutsideLaunchArea = false;
-    if (!_launchCityChosenManually &&
-        detectedLaunchCity != _selectedLaunchCity) {
-      await _selectLaunchCity(
-        detectedLaunchCity,
-        manual: false,
-        persist: false,
-        moveCamera: false,
-      );
-    }
-    _driverLocation = LatLng(position.latitude, position.longitude);
-    await _resolveDriverCity(position: position);
-    _mapLocationReady = true;
-    _log(
-      'location permission completed source=initial_map lat=${position.latitude} lng=${position.longitude} city=${_driverCity ?? 'unknown'}',
-    );
-    _updateDriverMarker();
-
-    if (mounted) {
-      setState(() {});
     }
   }
 
@@ -2793,6 +2896,14 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       ).timeout(readTimeout);
       final profile = result.profile;
       _lastDriverProfileSnapshot = Map<String, dynamic>.from(profile);
+      final modeRaw =
+          profile['driver_availability_mode']?.toString().trim() ?? '';
+      if (modeRaw.isNotEmpty) {
+        if (!_isOnline &&
+            (modeRaw == 'current_location' || modeRaw == 'service_area')) {
+          _pendingAvailabilityMode = modeRaw;
+        }
+      }
       _log(
         'driver profile fetch completed source=$source driverId=$driverId path=${result.path} exists=${result.snapshotFound} createdFallback=${result.createdFallbackProfile} uidMatches=${result.uidMatchesRecord} parseWarning=${result.parseWarning ?? 'none'} readError=${result.readError ?? 'none'} persistWarning=${result.persistWarning ?? 'none'} status=${profile['status']} online=${profile['isOnline']}',
       );
@@ -2874,39 +2985,47 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _rolloutCatalogLoading = true;
       _rolloutCatalogError = null;
     }
-    try {
-      final raw = await RideCloudFunctionsService()
-          .listDeliveryRegions()
-          .timeout(const Duration(seconds: 22));
-      if (raw['success'] != true) {
-        throw StateError('listDeliveryRegions_failed');
-      }
-      final regions = parseRolloutRegionsResponse(raw);
-      if (mounted) {
-        _setStateSafely(() {
+    Object? lastError;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) {
+          await Future<void>.delayed(Duration(milliseconds: 400 * attempt));
+        }
+        final raw = await RideCloudFunctionsService()
+            .listDeliveryRegions()
+            .timeout(const Duration(seconds: 22));
+        if (raw['success'] != true) {
+          throw StateError('listDeliveryRegions_failed');
+        }
+        final regions = parseRolloutRegionsResponse(raw);
+        if (mounted) {
+          _setStateSafely(() {
+            _rolloutCatalog = regions;
+            _rolloutCatalogLoading = false;
+            _rolloutCatalogHydrated = true;
+            _rolloutCatalogError = null;
+          });
+        } else {
           _rolloutCatalog = regions;
           _rolloutCatalogLoading = false;
           _rolloutCatalogHydrated = true;
           _rolloutCatalogError = null;
-        });
-      } else {
-        _rolloutCatalog = regions;
+        }
+        return;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    if (mounted) {
+      _setStateSafely(() {
         _rolloutCatalogLoading = false;
         _rolloutCatalogHydrated = true;
-        _rolloutCatalogError = null;
-      }
-    } catch (e) {
-      if (mounted) {
-        _setStateSafely(() {
-          _rolloutCatalogLoading = false;
-          _rolloutCatalogHydrated = true;
-          _rolloutCatalogError = e;
-        });
-      } else {
-        _rolloutCatalogLoading = false;
-        _rolloutCatalogHydrated = true;
-        _rolloutCatalogError = e;
-      }
+        _rolloutCatalogError = lastError;
+      });
+    } else {
+      _rolloutCatalogLoading = false;
+      _rolloutCatalogHydrated = true;
+      _rolloutCatalogError = lastError;
     }
   }
 
@@ -3112,7 +3231,37 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return;
     }
 
-    _setStateSafely(() {});
+    _setStateSafely(() {
+      _driverLocationCapability = capability;
+    });
+    debugPrint(
+      '[NEXRIDE_DIAG] location_capability_applied reason=$reason '
+      'canGoOnline=${capability.canGoOnline} permission=${capability.permission} '
+      'services=${capability.locationServiceEnabled}',
+    );
+  }
+
+  bool get _showLocationGoOnlineBanner =>
+      _driverLocationCapability != null &&
+      !_driverLocationCapability!.canGoOnline &&
+      _driverLocationCapability!.canBrowseDriverApp;
+
+  String _locationGoOnlineBannerPrimaryLine(DriverLocationCapability c) {
+    if (!c.locationServiceEnabled) {
+      return 'Turn on Location Services to go online.';
+    }
+    if (c.permission == LocationPermission.denied ||
+        c.permission == LocationPermission.deniedForever) {
+      return 'Location permission required to go online.';
+    }
+    return c.title;
+  }
+
+  String _locationGoOnlineBannerSecondaryLine(DriverLocationCapability c) {
+    if (!c.locationServiceEnabled) {
+      return 'You can still browse the map while offline.';
+    }
+    return c.message;
   }
 
   void _showDriverLocationRequirementNotice(
@@ -3186,7 +3335,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       await _refreshDriverLocationCapability(
           reason: 'go_online_permission_denied');
       _showDriverLocationRequirementNotice(
-        'Allow location access to go online and receive trips in ${DriverLaunchScope.launchCitiesLabel}.',
+        'Location permission required to go online. '
+        'Allow location access to receive trips in ${DriverLaunchScope.launchCitiesLabel}.',
       );
       return null;
     }
@@ -3197,7 +3347,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         reason: 'go_online_permission_denied_forever',
       );
       _showDriverLocationRequirementNotice(
-        'Location access is turned off for NexRide. Enable it in app settings before going online.',
+        'Location permission required to go online. '
+        'Enable location for NexRide in app settings.',
         openAppSettings: true,
       );
       return null;
@@ -3441,9 +3592,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (moveCamera && !_hasRenderableActiveRide) {
       _driverLocation = _selectedLaunchCityCenter;
       if (_mapController != null && _mapViewReady) {
-        await _mapController!.animateCamera(
-          CameraUpdate.newLatLngZoom(_selectedLaunchCityCenter, 14),
-        );
+        try {
+          await _mapController!.animateCamera(
+            CameraUpdate.newLatLngZoom(_selectedLaunchCityCenter, 14),
+          );
+        } catch (e, st) {
+          debugPrint(
+            '[DriverMap] _selectLaunchCity animateCamera error=$e',
+          );
+          debugPrintStack(
+            label: '[DriverMap] _selectLaunchCity stack',
+            stackTrace: st,
+          );
+        }
       }
       _updateDriverMarker();
     }
@@ -4401,7 +4562,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   }
 
   String _dispatchPackageDetails(Map<String, dynamic>? ride) {
-    return _valueAsText(_dispatchDetailsFromRide(ride)['package_details']);
+    if (ride == null) {
+      return '';
+    }
+    final fromDetails =
+        _valueAsText(_dispatchDetailsFromRide(ride)['package_details']);
+    if (fromDetails.isNotEmpty) {
+      return fromDetails;
+    }
+    final food = _valueAsText(ride['food_order_summary']);
+    if (food.isNotEmpty) {
+      return food;
+    }
+    return _valueAsText(ride['package_description']);
   }
 
   String _dispatchRecipientName(Map<String, dynamic>? ride) {
@@ -9279,9 +9452,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         return;
       }
 
+      final sessionMode = _normalizedAvailabilityMode(_pendingAvailabilityMode);
       final testLocation = _getNigeriaTestDriverLocation();
       Future<Position?>? positionFuture;
-      if (testLocation == null) {
+      if (testLocation == null && sessionMode == 'current_location') {
         positionFuture = _requestReadyPosition(
           positionTimeLimit: const Duration(seconds: 12),
         );
@@ -9303,20 +9477,15 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           source: 'go_online_reconcile',
           readTimeout: const Duration(seconds: 18),
         );
-        kycAllowed = await driverPassesKycGateForGoOnline(
-              driverId,
-              driverProfile: _lastDriverProfileSnapshot,
-            )
+        kycAllowed = await driverPassesKycGateForGoOnline(driverId)
             .timeout(const Duration(seconds: 5), onTimeout: () => true);
       } else {
         profile = await _fetchDriverProfile(
           source: 'go_online',
           readTimeout: const Duration(seconds: 5),
         );
-        kycAllowed = await driverPassesKycGateForGoOnline(
-          driverId,
-          driverProfile: profile,
-        ).timeout(const Duration(seconds: 5), onTimeout: () => false);
+        kycAllowed = await driverPassesKycGateForGoOnline(driverId)
+            .timeout(const Duration(seconds: 5), onTimeout: () => false);
       }
 
       final businessModel =
@@ -9418,6 +9587,16 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         longitude = testLocation.longitude;
         resolvedCity = testLocation.city;
         _driverCity = resolvedCity;
+      } else if (sessionMode == 'service_area') {
+        final String rolloutMarketTrim = (_rolloutDispatchMarketId ?? '').trim();
+        final hubCity = DriverServiceAreaConfig.marketForCity(
+          rolloutMarketTrim.isNotEmpty ? rolloutMarketTrim : _selectedLaunchCity,
+        ).city;
+        resolvedCity = hubCity;
+        _driverCity = resolvedCity;
+        latitude = DriverLaunchScope.latitudeForCity(hubCity);
+        longitude = DriverLaunchScope.longitudeForCity(hubCity);
+        livePosition = null;
       } else {
         final requestedPositionFuture = positionFuture;
         if (requestedPositionFuture == null) {
@@ -9484,7 +9663,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       // Fanout indexes drivers by `dispatch_market`; must match the rider ride `market` (never force a single city).
       _driverCity = cityToSave;
       _selectedLaunchCity = cityToSave;
-      if (_deviceLocationOutsideLaunchArea) {
+      if (_deviceLocationOutsideLaunchArea && sessionMode != 'service_area') {
         latitude = DriverLaunchScope.latitudeForCity(cityToSave);
         longitude = DriverLaunchScope.longitudeForCity(cityToSave);
       }
@@ -9544,6 +9723,31 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         return;
       }
 
+      try {
+        final Map<String, dynamic> cloudResp = await _rideCloud
+            .setDriverOnline(
+              availabilityMode: sessionMode,
+              dispatchMarket: cityToSave,
+              latitude: sessionMode == 'current_location' ? latitude : null,
+              longitude: sessionMode == 'current_location' ? longitude : null,
+              serviceRegionId: rRoll,
+              serviceCityId: cRoll,
+            )
+            .timeout(const Duration(seconds: 28));
+        if (!rideCallableSucceeded(cloudResp)) {
+          _showAvailabilityFailureNotice(
+            _friendlySetDriverOnlineError(rideCallableReason(cloudResp)),
+          );
+          return;
+        }
+      } catch (e) {
+        _log('goOnline setDriverOnline error: $e');
+        _showAvailabilityFailureNotice(
+          'Could not sync availability to servers. Check your connection and try again.',
+        );
+        return;
+      }
+
       _logRtdb('online publish start driverId=$driverId');
       onlinePublishAttempted = true;
       try {
@@ -9577,6 +9781,16 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           'currentRideId': null,
           'lat': latitude,
           'lng': longitude,
+          'driver_availability_mode': sessionMode,
+          'selected_service_area_id':
+              sessionMode == 'service_area' ? cRoll : null,
+          'selected_service_area_name': null,
+          'last_location': sessionMode == 'current_location'
+              ? <String, double>{'lat': latitude, 'lng': longitude}
+              : null,
+          'last_location_updated_at': sessionMode == 'current_location'
+              ? rtdb.ServerValue.timestamp
+              : null,
           'country': driverScope['country'],
           'country_code': driverScope['country_code'],
           'area': driverScope['area'],
@@ -9655,6 +9869,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       if (mounted) {
         _setStateSafely(() {
           _isOnline = true;
+          _activeOnlineAvailabilityMode = sessionMode;
           _rideStatus = 'idle';
           _tripStarted = false;
           _driverUnreadChatCount = 0;
@@ -9662,6 +9877,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         });
       } else {
         _isOnline = true;
+        _activeOnlineAvailabilityMode = sessionMode;
         _rideStatus = 'idle';
         _tripStarted = false;
         _driverUnreadChatCount = 0;
@@ -9695,7 +9911,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         _moveCameraToIdleState();
       }
       _refreshIosDriverMapIfNeeded(reason: 'go_online');
-      _startLiveLocationStream();
+      await _startLiveLocationStream();
       if (discoveryReady) {
         _showSnackBarSafely(
           const SnackBar(
@@ -9790,6 +10006,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
     if (driverId.isNotEmpty) {
       try {
+        try {
+          final Map<String, dynamic> offResp =
+              await _rideCloud.setDriverOffline().timeout(
+                    const Duration(seconds: 20),
+                  );
+          if (!rideCallableSucceeded(offResp)) {
+            _log(
+              'goOffline setDriverOffline reason=${rideCallableReason(offResp)}',
+            );
+          }
+        } catch (e) {
+          _log('goOffline setDriverOffline error=$e');
+        }
         await _driversRef.child(driverId).update({
           'isOnline': false,
           'is_online': false,
@@ -9798,6 +10027,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           'available': false,
           'status': 'offline',
           'dispatch_state': 'offline',
+          'driver_availability_mode': 'offline',
           'activeRideId': null,
           'currentRideId': null,
           'online_session_started_at': null,
@@ -9859,6 +10089,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       setState(() {
         _currentRideId = null;
         _isOnline = false;
+        _activeOnlineAvailabilityMode = '';
         _currentRideData = null;
         _rideStatus = 'offline';
         _tripStarted = false;
@@ -9891,6 +10122,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _currentRideId = null;
     _currentRideData = null;
     _sessionTrackedRideId = null;
+    _isOnline = false;
+    _activeOnlineAvailabilityMode = '';
     _tripWaypoints.clear();
     _expectedRoutePoints.clear();
     _activePopupRideId = null;
@@ -10162,8 +10395,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     return null;
   }
 
-  void _startLiveLocationStream() {
-    _positionStream?.cancel();
+  Future<void> _startLiveLocationStream() async {
+    final previous = _positionStream;
+    _positionStream = null;
+    if (previous != null) {
+      await previous.cancel();
+    }
 
     final testLocation = _getNigeriaTestDriverLocation();
     if (testLocation != null) {
@@ -10177,6 +10414,51 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return;
     }
 
+    final hasTrackedRide = (_currentRideId?.isNotEmpty ?? false) ||
+        (_driverActiveRideId?.isNotEmpty ?? false);
+    if (!_isOnline && !hasTrackedRide) {
+      _log(
+        'live location stream skipped reason=no_online_or_tracked_ride '
+        'isOnline=$_isOnline hasTrackedRide=$hasTrackedRide',
+      );
+      debugPrint(
+        '[NEXRIDE_DIAG] location_stream_skipped no_online_or_ride '
+        'isOnline=$_isOnline hasTrackedRide=$hasTrackedRide',
+      );
+      return;
+    }
+
+    DriverLocationCapability capability;
+    try {
+      capability = await evaluateDriverLocationCapability();
+    } catch (e, st) {
+      debugPrint(
+        '[NEXRIDE_DIAG] location_stream capability_preflight_failed error=$e',
+      );
+      debugPrintStack(
+        label: '[NEXRIDE_DIAG] capability_preflight stack',
+        stackTrace: st,
+      );
+      _log('live location stream skipped: capability evaluate failed error=$e');
+      return;
+    }
+
+    if (!capability.locationServiceEnabled || !capability.hasLocationAccess) {
+      _log(
+        'live location stream skipped services=${capability.locationServiceEnabled} '
+        'permission=${capability.permission} hasAccess=${capability.hasLocationAccess}',
+      );
+      debugPrint(
+        '[NEXRIDE_DIAG] location_stream_skipped no_gps_access '
+        'perm=${capability.permission} services=${capability.locationServiceEnabled}',
+      );
+      return;
+    }
+
+    if (!mounted || _isDisposing) {
+      return;
+    }
+
     try {
       _positionStream = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
@@ -10185,9 +10467,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         ),
       ).listen((position) async {
         try {
-          final hasTrackedRide = (_currentRideId?.isNotEmpty ?? false) ||
+          final hasRide = (_currentRideId?.isNotEmpty ?? false) ||
               (_driverActiveRideId?.isNotEmpty ?? false);
-          if (!_isOnline && !hasTrackedRide) {
+          if (!_isOnline && !hasRide) {
             return;
           }
 
@@ -10213,7 +10495,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                     _kDriverLocationWriteThrottle.inMilliseconds;
             if (shouldPublish) {
               _lastDriverLocationWriteAtMs = nowMs;
-              await _driversRef.child(driverId).update({
+              final Map<String, Object?> heartbeat = <String, Object?>{
                 'lng': _driverLocation.longitude,
                 'lat': _driverLocation.latitude,
                 'isOnline': _isOnline,
@@ -10235,7 +10517,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                 'last_availability_intent': _lastAvailabilityIntentValue,
                 'last_active_at': rtdb.ServerValue.timestamp,
                 'updated_at': rtdb.ServerValue.timestamp,
-              });
+              };
+              if (_isOnline &&
+                  _activeOnlineAvailabilityMode == 'current_location') {
+                heartbeat['last_location'] = <String, double>{
+                  'lat': _driverLocation.latitude,
+                  'lng': _driverLocation.longitude,
+                };
+                heartbeat['last_location_updated_at'] =
+                    rtdb.ServerValue.timestamp;
+              }
+              await _driversRef.child(driverId).update(heartbeat);
               _lastActiveHeartbeatLogCount += 1;
               if (_lastActiveHeartbeatLogCount % 18 == 1) {
                 _log('[LAST_ACTIVE] updated source=location_heartbeat');
@@ -10307,10 +10599,22 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         } catch (error) {
           _log('live location update failed error=$error');
         }
-      }, onError: (Object error) {
+      }, onError: (Object error, StackTrace stackTrace) {
+        debugPrint('[NEXRIDE_DIAG] live_position_stream_event_error error=$error');
+        debugPrintStack(
+          label: '[NEXRIDE_DIAG] live_position_stream_event stack',
+          stackTrace: stackTrace,
+        );
         _log('live location listener error=$error');
       });
-    } catch (error) {
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[NEXRIDE_DIAG] getPositionStream_attach_failed error=$error',
+      );
+      debugPrintStack(
+        label: '[NEXRIDE_DIAG] getPositionStream_attach stack',
+        stackTrace: stackTrace,
+      );
       _log('live location stream start failed error=$error');
       _showAvailabilityFailureNotice(
         'Live location could not start. Please try GO ONLINE again.',
@@ -10362,6 +10666,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       '__nexride_request_kind': offer['__nexride_request_kind'],
       'delivery_id': offer['delivery_id'],
       'delivery_state': offer['delivery_state'],
+      'merchant_id': offer['merchant_id'],
+      'merchant_order_id': offer['merchant_order_id'],
+      'food_order_summary': offer['food_order_summary'],
+      'package_description': offer['package_description'],
     };
   }
 
@@ -12693,6 +13001,35 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                             value: packageDetails,
                           ),
                         ],
+                        Builder(
+                          builder: (context) {
+                            final Map<String, dynamic> popupRideData =
+                                activePopupRide.rideData;
+                            final foodMerchantOrderId =
+                                _valueAsText(popupRideData['merchant_order_id']);
+                            final foodMerchantId =
+                                _valueAsText(popupRideData['merchant_id']);
+                            if (foodMerchantOrderId.isEmpty &&
+                                foodMerchantId.isEmpty) {
+                              return const SizedBox.shrink();
+                            }
+                            final line = <String>[
+                              if (foodMerchantOrderId.isNotEmpty)
+                                'Order $foodMerchantOrderId',
+                              if (foodMerchantId.isNotEmpty) 'Store $foodMerchantId',
+                            ].join(' · ');
+                            return Column(
+                              children: <Widget>[
+                                const SizedBox(height: 12),
+                                _buildTripDetailRow(
+                                  icon: Icons.store_mall_directory_outlined,
+                                  label: 'Merchant reference',
+                                  value: line,
+                                ),
+                              ],
+                            );
+                          },
+                        ),
                         if (recipientSummary.isNotEmpty) ...[
                           const SizedBox(height: 12),
                           _buildTripDetailRow(
@@ -15025,22 +15362,30 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     final minLng = longitudes.reduce(math.min);
     final maxLng = longitudes.reduce(math.max);
 
-    if (minLat == maxLat && minLng == maxLng) {
-      _mapController!.animateCamera(
-        CameraUpdate.newLatLngZoom(points.first, 16),
-      );
-      return;
-    }
+    try {
+      if (minLat == maxLat && minLng == maxLng) {
+        _mapController!.animateCamera(
+          CameraUpdate.newLatLngZoom(points.first, 16),
+        );
+        return;
+      }
 
-    _mapController!.animateCamera(
-      CameraUpdate.newLatLngBounds(
-        LatLngBounds(
-          southwest: LatLng(minLat, minLng),
-          northeast: LatLng(maxLat, maxLng),
+      _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(
+          LatLngBounds(
+            southwest: LatLng(minLat, minLng),
+            northeast: LatLng(maxLat, maxLng),
+          ),
+          padding,
         ),
-        padding,
-      ),
-    );
+      );
+    } catch (e, st) {
+      debugPrint('[DriverMap] _moveCameraToBounds animateCamera error=$e');
+      debugPrintStack(
+        label: '[DriverMap] _moveCameraToBounds stack',
+        stackTrace: st,
+      );
+    }
   }
 
   void _moveCameraToIdleState() {
@@ -15051,10 +15396,18 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     final target = (_mapLocationReady && !_deviceLocationOutsideLaunchArea)
         ? _driverLocation
         : _selectedLaunchCityCenter;
-    _mapController!.animateCamera(
-      CameraUpdate.newLatLngZoom(
-          target, DriverServiceAreaConfig.defaultMapZoom),
-    );
+    try {
+      _mapController!.animateCamera(
+        CameraUpdate.newLatLngZoom(
+            target, DriverServiceAreaConfig.defaultMapZoom),
+      );
+    } catch (e, st) {
+      debugPrint('[DriverMap] _moveCameraToIdleState animateCamera error=$e');
+      debugPrintStack(
+        label: '[DriverMap] _moveCameraToIdleState stack',
+        stackTrace: st,
+      );
+    }
   }
 
   void _moveCameraToActiveTrip() {
@@ -18127,6 +18480,71 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     );
   }
 
+  Widget _buildAvailabilityModeSelector() {
+    Widget modeChip({
+      required String id,
+      required String label,
+      required IconData icon,
+    }) {
+      final bool selected = _pendingAvailabilityMode == id;
+      return Expanded(
+        child: ChoiceChip(
+          avatar: Icon(icon, size: 18),
+          label: Text(label),
+          selected: selected,
+          onSelected: (bool v) {
+            if (!v || !mounted) {
+              return;
+            }
+            setState(() {
+              _pendingAvailabilityMode = id;
+            });
+          },
+        ),
+      );
+    }
+
+    return Material(
+      color: Colors.white.withValues(alpha: 0.96),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(
+              _pendingAvailabilityMode == 'service_area'
+                  ? 'Area mode: requests match your selected city (GPS not required).'
+                  : 'GPS mode: requests match distance from your live position.',
+              style: const TextStyle(
+                color: Colors.black54,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                height: 1.3,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: <Widget>[
+                modeChip(
+                  id: 'current_location',
+                  label: 'GPS',
+                  icon: Icons.gps_fixed_rounded,
+                ),
+                const SizedBox(width: 8),
+                modeChip(
+                  id: 'service_area',
+                  label: 'Area',
+                  icon: Icons.location_city_rounded,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildAvailabilityStatusCard() {
     final badgeBackground = _isOnline
         ? const Color(0xFFDBF7E6)
@@ -18439,17 +18857,26 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           ),
           if (!_hasRenderableActiveRide)
             Positioned(
-              bottom: 94,
+              bottom: 20,
               left: 20,
               right: 20,
-              child: _buildAvailabilityStatusCard(),
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    _buildAvailabilityStatusCard(),
+                    const SizedBox(height: 10),
+                    if (!_isOnline) ...<Widget>[
+                      _buildAvailabilityModeSelector(),
+                      const SizedBox(height: 10),
+                    ],
+                    _buildAvailabilityToggleButton(),
+                  ],
+                ),
+              ),
             ),
-          Positioned(
-            bottom: 20,
-            left: 20,
-            right: 20,
-            child: _buildAvailabilityToggleButton(),
-          ),
           if (_activeSafetyPromptMessage != null)
             Positioned(
               top: safetyPromptTop,
@@ -18459,6 +18886,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
             ),
           if (showActiveTripReturnBanner ||
               _driverSubscriptionBannerKind != _DriverSubscriptionBannerKind.none ||
+              _showLocationGoOnlineBanner ||
               (!_hasRenderableActiveRide &&
                   (_rolloutCatalogLoading ||
                       _rolloutCatalogError != null ||
@@ -18474,6 +18902,69 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
+                    if (_showLocationGoOnlineBanner) ...<Widget>[
+                      Material(
+                        color: const Color(0xFFE8F4FD),
+                        borderRadius: BorderRadius.circular(14),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              const Icon(
+                                Icons.location_off_outlined,
+                                color: Color(0xFF1565C0),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: <Widget>[
+                                    Text(
+                                      _locationGoOnlineBannerPrimaryLine(
+                                        _driverLocationCapability!,
+                                      ),
+                                      style: const TextStyle(
+                                        color: Color(0xFF0D47A1),
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      _locationGoOnlineBannerSecondaryLine(
+                                        _driverLocationCapability!,
+                                      ),
+                                      style: TextStyle(
+                                        color: Colors.blueGrey.shade800,
+                                        fontSize: 12,
+                                        height: 1.25,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (_driverLocationCapability!
+                                  .recommendOpenSettings)
+                                TextButton(
+                                  onPressed: () {
+                                    if (!_driverLocationCapability!
+                                        .locationServiceEnabled) {
+                                      unawaited(
+                                        Geolocator.openLocationSettings(),
+                                      );
+                                    } else {
+                                      unawaited(Geolocator.openAppSettings());
+                                    }
+                                  },
+                                  child: const Text('Settings'),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     if (!_hasRenderableActiveRide &&
                         (_rolloutCatalogLoading ||
                             _rolloutCatalogError != null ||

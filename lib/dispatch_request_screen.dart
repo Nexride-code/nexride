@@ -28,6 +28,7 @@ import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'services/trip_safety_service.dart';
 import 'service_type.dart';
+import 'support/rider_backend_pricing.dart';
 import 'support/rider_fare_support.dart';
 import 'support/friendly_firebase_errors.dart';
 import 'support/rtdb_flow_debug_log.dart';
@@ -95,6 +96,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   StreamSubscription<rtdb.DatabaseEvent>? _activeRequestSubscription;
   String? _activeRequestId;
   Map<String, dynamic>? _activeRequest;
+  RiderBackendPricingQuote? _dispatchFarePreview;
   DispatchPhotoSelectedAsset? _packagePhotoAsset;
   String _selectedLaunchCity = RiderLaunchScope.defaultBrowseCity;
   List<RolloutDeliveryRegionModel> _rolloutCatalog =
@@ -614,12 +616,15 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
   Future<Map<String, dynamic>?> _runFlutterwaveDeliveryCheckout({
     required String deliveryId,
-    required double fare,
+    required Map<String, dynamic> deliveryRow,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
+    final quote = RiderBackendPricingQuote.tryFromMap(deliveryRow);
     final init = await _deliveryCloud.initiateFlutterwavePayment(
       deliveryId: deliveryId,
-      amount: fare,
+      amount: quote?.hasAuthoritativeTotal == true
+          ? quote!.totalNgn.toDouble()
+          : (deliveryRow['fare'] as num?)?.toDouble() ?? 0,
       currency: 'NGN',
       customerName: user?.displayName,
       email: user?.email,
@@ -745,6 +750,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       case 'pickup_location_out_of_region':
       case 'dropoff_location_out_of_region':
         return RiderLaunchScope.tripRequestAvailabilityMessage;
+      case 'pickup_mismatch_service_city':
+      case 'pickup_outside_selected_service_area':
+      case 'pickup_outside_enabled_city':
+      case 'no_service_area_for_pickup':
+      case 'service_area_unsupported':
+      case 'rollout_hint_invalid':
+        return riderIdentityServerRejectionUserMessage(reason) ??
+            RiderLaunchScope.tripRequestAvailabilityMessage;
       case 'invalid_fare':
       case 'fare_above_limit':
         return 'The delivery fare could not be calculated. Try again.';
@@ -1587,7 +1600,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       if (!_deliveryPaymentVerified(workingPayload)) {
         final paidRow = await _runFlutterwaveDeliveryCheckout(
           deliveryId: effectiveRequestId,
-          fare: fareBreakdown.totalFare,
+          deliveryRow: workingPayload,
         );
         if (paidRow == null) {
           await _deliveryCloud.cancelDeliveryRequest(
@@ -1661,6 +1674,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     setState(() {
       _activeRequestId = null;
       _activeRequest = null;
+      _dispatchFarePreview = null;
       _packagePhotoAsset = null;
       _packagePhotoUploadProgress = 0;
     });
@@ -1904,6 +1918,25 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             ),
           ),
           const SizedBox(height: 16),
+          Builder(
+            builder: (context) {
+              final pricing = RiderBackendPricingQuote.tryFromMap(activeRequest);
+              if (pricing == null || !pricing.hasAuthoritativeTotal) {
+                return const SizedBox.shrink();
+              }
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  RiderBackendPricingBreakdown(
+                    quote: pricing,
+                    tripFareLabel: 'Delivery fare',
+                    compact: true,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              );
+            },
+          ),
           _DispatchInfoRow(
             icon: Icons.my_location,
             label: 'Pickup',
@@ -2241,6 +2274,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                               icon: Icons.call_outlined,
                             ),
                           ),
+                          if (_dispatchFarePreview != null) ...<Widget>[
+                            const SizedBox(height: 12),
+                            RiderBackendPricingBreakdown(
+                              quote: _dispatchFarePreview!,
+                              tripFareLabel: 'Delivery fare',
+                              compact: true,
+                            ),
+                          ],
                           const SizedBox(height: 20),
                           SizedBox(
                             width: double.infinity,

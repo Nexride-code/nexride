@@ -28,6 +28,7 @@ import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'services/rider_ride_cloud_functions_service.dart';
+import 'services/nexride_official_bank_account_service.dart';
 import 'services/rider_push_notification_service.dart';
 import 'services/rider_prepaid_intent_recovery_store.dart';
 import 'services/trip_safety_service.dart';
@@ -36,6 +37,7 @@ import 'payment_methods_screen.dart';
 import 'bank_transfer_receipt_screen.dart';
 import 'service_type.dart';
 import 'share_trip_rtdb.dart';
+import 'support/rider_backend_pricing.dart';
 import 'support/rider_fare_support.dart';
 import 'support/ride_chat_support.dart';
 import 'support/rider_trust_support.dart';
@@ -50,6 +52,7 @@ import 'widgets/native_places_autocomplete_field.dart';
 import 'widgets/ride_chat_sheet.dart';
 import 'onboarding/rider_selfie_verification_screen.dart';
 import 'services/rider_compliance_service.dart';
+import 'services/region_pricing_service.dart';
 import 'widgets/rider_identity_verification_banner.dart';
 import 'widgets/rider_updated_terms_dialog.dart';
 import 'widgets/rider_rollout_area_sheet.dart';
@@ -271,6 +274,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   String? _rolloutRegionId;
   String? _rolloutCityId;
   String? _rolloutDispatchMarketId;
+  StreamSubscription<User?>? _riderAuthRolloutSubscription;
   /// `flutterwave` / `bank_transfer` — must match Cloud Function allow-list.
   String _riderTripPaymentMethod = 'flutterwave';
 
@@ -935,8 +939,51 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     required String source,
   }) async {
-    // Assignment release previously used client RTDB transactions; lifecycle is
-    // server-owned now. Do not mutate `ride_requests` from the rider client.
+    final canonicalState = TripStateMachine.canonicalStateFromSnapshot(rideData);
+    if (canonicalState != TripLifecycleState.driverAssigned) {
+      return false;
+    }
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    // Already past server-side start timeout → stale.
+    final timeoutDecision = TripStateMachine.timeoutCancellationDecision(rideData);
+    if (timeoutDecision != null) {
+      _logRideFlow(
+        'STALE_ASSIGNED_CLEARED source=$source rideId=$rideId '
+        'reason=${timeoutDecision.reason}',
+      );
+      await _clearStaleActiveTripArtifacts(
+        rideId: rideId,
+        reason: 'expired_assignment_$source',
+        clearRideRequestNode: false,
+      );
+      return true;
+    }
+
+    // No accepted_at — driver was assigned but never confirmed. If last activity
+    // is more than 15 minutes old, treat as stale.
+    const kUnconfirmedAssignmentStalenessMs = 15 * 60 * 1000;
+    final activityTs = _rideActivityTimestamp(rideData);
+    if (activityTs > 0 &&
+        nowMs - activityTs > kUnconfirmedAssignmentStalenessMs) {
+      final acceptedAt = _asInt(rideData['accepted_at']) ??
+          _asInt(rideData['acceptedAt']) ??
+          0;
+      if (acceptedAt <= 0) {
+        _logRideFlow(
+          'STALE_UNCONFIRMED_ASSIGNMENT_CLEARED source=$source rideId=$rideId '
+          'ageMs=${nowMs - activityTs}',
+        );
+        await _clearStaleActiveTripArtifacts(
+          rideId: rideId,
+          reason: 'unconfirmed_assignment_stale_$source',
+          clearRideRequestNode: false,
+        );
+        return true;
+      }
+    }
+
     return false;
   }
 
@@ -1284,19 +1331,39 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         return;
       }
     } catch (_) {}
+    final pricingQuote = RiderBackendPricingQuote.tryFromMap(rideData);
     final fare = _asDouble(rideData['fare']) ?? _fare;
+    final serverTotal = pricingQuote?.totalNgn ?? 0;
+    final transferNgn = serverTotal > 0
+        ? serverTotal
+        : fare.round() + RiderBackendPricingQuote.policyPlatformFeeNgn;
     final refText = _bankTransferReferenceFromRide(rideData);
+    NexrideOfficialBankAccount? official;
+    try {
+      official = await NexrideOfficialBankAccountService.instance.fetch();
+    } catch (_) {}
     final text = StringBuffer()
       ..writeln('Official NexRide bank transfer')
       ..writeln('')
       ..writeln(
-        'Transfer ₦${fare.toStringAsFixed(0)} to:',
+        'Transfer ₦$transferNgn to (trip fare + platform fee):',
       )
-      ..writeln('')
-      ..writeln(RiderBankTransferConfig.bankName)
-      ..writeln(RiderBankTransferConfig.accountName)
-      ..writeln(RiderBankTransferConfig.accountNumber)
-      ..writeln('')
+      ..writeln('');
+    if (official != null) {
+      text
+        ..writeln(official.bankName)
+        ..writeln(official.accountName)
+        ..writeln(official.accountNumber)
+        ..writeln('');
+    } else {
+      text
+        ..writeln(
+          'Bank details are not available in the app right now. '
+          'Contact NexRide support at support@nexride.africa for official transfer instructions.',
+        )
+        ..writeln('');
+    }
+    text
       ..writeln('Reference / narration (required): $refText')
       ..writeln('')
       ..writeln(
@@ -1622,10 +1689,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               '[RiderPayment][prepaid_recovery] createRideRequest failed reason=$reason',
             );
           }
-          _showSnackBar(
-            'We could not finish your trip request (${reason.replaceAll('_', ' ')}). '
-            'Please try again shortly.',
-          );
+          if (!_handleRideCreateStructuredFailure(
+            Map<String, dynamic>.from(createRes),
+          )) {
+            _showSnackBar(
+              riderIdentityServerRejectionUserMessage(reason) ??
+                  'We could not finish your trip request. Please try again shortly.',
+            );
+          }
         }
         return;
       }
@@ -2149,6 +2220,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         return 'We could not load your active trip. Check your connection, then try again '
             'or open your trip from the home screen.';
       }
+      if (error.message == 'total_mismatch' ||
+          error.message == 'pricing_total_mismatch') {
+        return RiderBackendPricingQuote.pricingMismatchUserMessage();
+      }
       final mapped = riderIdentityServerRejectionUserMessage(error.message);
       if (mapped != null) {
         return mapped;
@@ -2550,6 +2625,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     debugPrint('[RideType] MapScreen initState');
+    _riderAuthRolloutSubscription =
+        FirebaseAuth.instance.authStateChanges().listen((User? user) {
+      if (user == null || user.uid.trim().isEmpty) {
+        return;
+      }
+      unawaited(_loadRolloutCatalogForRider());
+    });
     WidgetsBinding.instance.addObserver(this);
     _riderLocation = _selectedLaunchCityCenter;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -2942,6 +3024,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _callDurationTimer?.cancel();
     _callRingTimeoutTimer?.cancel();
     _rideListener?.cancel();
+    _riderAuthRolloutSubscription?.cancel();
     _riderActiveRidePointerSubscription?.cancel();
     _driversSubscription?.cancel();
     _stopRiderChatListener();
@@ -4680,12 +4763,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               ),
               _buildMetricPill(
                 icon: Icons.credit_card_rounded,
-                label: 'Fare',
+                label: 'Trip fare',
                 value: '₦${_fare.toStringAsFixed(0)}',
                 accentColor: _gold,
               ),
             ],
           ),
+          if (_fare > 0) ...[
+            const SizedBox(height: 12),
+            RiderBackendPricingBreakdown(
+              quote: RiderBackendPricingQuote.previewTripFare(_fare.round()),
+              compact: true,
+            ),
+          ],
           if (stopAddresses.length > 1) ...[
             const SizedBox(height: 14),
             Text(
@@ -5881,6 +5971,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (moveCamera) {
       _moveCamera();
     }
+
+    final syncPoint = _pickupLocation ?? _riderLocation;
+    unawaited(_maybeSyncRolloutSelectionToPickup(syncPoint));
   }
 
   void _resetMarkersForIdleState() {
@@ -6067,11 +6160,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
     if (city != null) {
+      RiderFareRule? liveRule;
+      try {
+        liveRule = await RegionPricingService.instance.ruleForCity(city);
+      } catch (_) {
+        liveRule = RiderFareSettings.maybeForCity(city);
+      }
+      if (!_isRoutePreviewComputationCurrent(routeComputationGeneration)) {
+        return;
+      }
       final fareBreakdown = calculateRiderFare(
         serviceKey: RiderServiceType.ride.key,
         city: city,
         distanceKm: totalDistanceKm,
         durationSeconds: totalDurationSeconds,
+        liveRule: liveRule,
       );
       _distanceKm = fareBreakdown.distanceKm;
       _estimatedDurationMin = fareBreakdown.durationMin;
@@ -6274,6 +6377,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         addressHint: description,
         point: point,
       );
+      if (isPickup) {
+        unawaited(_maybeSyncRolloutSelectionToPickup(point));
+      }
       _syncTripLocationMarkers();
 
       if (mounted) {
@@ -6500,6 +6606,209 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// When the server resolves a rollout from GPS (hint bubble mismatch), persist it so
+  /// the next request uses the same service city the backend enforced.
+  Future<void> _persistResolvedRolloutFromServerResponse(
+    Map<String, dynamic> res,
+  ) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid.trim();
+    if (uid == null || uid.isEmpty) {
+      return;
+    }
+    final region = _firstNonEmptyText(<dynamic>[
+      res['resolved_service_region_id'],
+      res['resolved_rollout_region_id'],
+    ]);
+    final city = _firstNonEmptyText(<dynamic>[
+      res['resolved_service_city_id'],
+      res['resolved_rollout_city_id'],
+    ]);
+    final market = _firstNonEmptyText(<dynamic>[
+      res['resolved_dispatch_market_id'],
+    ]);
+    if (region.isEmpty || city.isEmpty || market.isEmpty) {
+      return;
+    }
+    try {
+      await RiderRolloutProfileStore.instance.saveSelection(
+        uid: uid,
+        regionId: region,
+        cityId: city,
+        dispatchMarketId: market,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _rolloutRegionId = region;
+        _rolloutCityId = city;
+        _rolloutDispatchMarketId = market;
+        _selectedLaunchCity =
+            RiderServiceAreaConfig.marketForCity(market).city;
+      });
+    } catch (error) {
+      _logRideFlow('resolved rollout persist skipped error=$error');
+    }
+  }
+
+  Future<void> _maybeSyncRolloutSelectionToPickup(LatLng point) async {
+    if (!_rolloutCatalogHydrated ||
+        _rolloutCatalog.isEmpty ||
+        !_rolloutSelectionComplete) {
+      return;
+    }
+    final match = matchRideAreaForPickupCoordinates(
+      _rolloutCatalog,
+      lat: point.latitude,
+      lng: point.longitude,
+    );
+    if (match == null) {
+      return;
+    }
+    final curR = (_rolloutRegionId ?? '').trim();
+    final curC = (_rolloutCityId ?? '').trim();
+    if (curR == match.regionId && curC == match.cityId) {
+      return;
+    }
+    final uid = FirebaseAuth.instance.currentUser?.uid.trim();
+    if (uid == null || uid.isEmpty) {
+      return;
+    }
+    try {
+      await RiderRolloutProfileStore.instance.saveSelection(
+        uid: uid,
+        regionId: match.regionId,
+        cityId: match.cityId,
+        dispatchMarketId: match.dispatchMarketId,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _rolloutRegionId = match.regionId;
+        _rolloutCityId = match.cityId;
+        _rolloutDispatchMarketId = match.dispatchMarketId;
+        _selectedLaunchCity =
+            RiderServiceAreaConfig.marketForCity(match.dispatchMarketId).city;
+      });
+      _logRideFlow(
+        'rollout auto-synced to pickup city=${match.cityId} region=${match.regionId}',
+      );
+    } catch (e) {
+      _logRideFlow('rollout auto-sync skipped error=$e');
+    }
+  }
+
+  Future<void> _applySuggestedServiceAreaFromCreateResponse(
+    Map<String, dynamic> res,
+  ) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid.trim();
+    if (uid == null || uid.isEmpty) {
+      return;
+    }
+    final region = _firstNonEmptyText(<dynamic>[
+      res['suggested_service_region_id'],
+    ]);
+    final city = _firstNonEmptyText(<dynamic>[
+      res['suggested_service_area_id'],
+    ]);
+    final market = _firstNonEmptyText(<dynamic>[
+      res['suggested_dispatch_market_id'],
+    ]);
+    if (region.isEmpty || city.isEmpty || market.isEmpty) {
+      return;
+    }
+    try {
+      await RiderRolloutProfileStore.instance.saveSelection(
+        uid: uid,
+        regionId: region,
+        cityId: city,
+        dispatchMarketId: market,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _rolloutRegionId = region;
+        _rolloutCityId = city;
+        _rolloutDispatchMarketId = market;
+        _selectedLaunchCity = RiderServiceAreaConfig.marketForCity(market).city;
+      });
+    } catch (e) {
+      _logRideFlow('apply suggested rollout failed error=$e');
+    }
+  }
+
+  Future<void> _applySuggestedServiceAreaThenAck(Map<String, dynamic> res) async {
+    await _applySuggestedServiceAreaFromCreateResponse(res);
+    if (!mounted) {
+      return;
+    }
+    _showSnackBar(
+      'Service area updated to match your pickup. Request your ride again when ready.',
+    );
+  }
+
+  bool _handleRideCreateStructuredFailure(Map<String, dynamic> res) {
+    final reason = riderRideCallableReason(res);
+    if (reason == 'pickup_outside_selected_service_area') {
+      final areaName = _firstNonEmptyText(<dynamic>[
+        res['suggested_service_area_name'],
+        res['suggested_service_area_id'],
+      ], fallback: 'another NexRide area');
+      if (!mounted) {
+        return true;
+      }
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      if (messenger == null) {
+        return true;
+      }
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Switch to the service area that contains this pickup ($areaName).',
+          ),
+          action: SnackBarAction(
+            label: 'SWITCH AREA',
+            onPressed: () {
+              unawaited(_applySuggestedServiceAreaThenAck(res));
+            },
+          ),
+        ),
+      );
+      return true;
+    }
+    if (reason == 'no_service_area_for_pickup') {
+      _showSnackBar(
+        riderIdentityServerRejectionUserMessage(reason) ??
+            'NexRide is not available in this pickup area yet.',
+      );
+      return true;
+    }
+    if (reason == 'location_required_for_service_area' ||
+        reason == 'location_required') {
+      _showSnackBar(
+        riderIdentityServerRejectionUserMessage(reason) ??
+            RiderLaunchScope.currentLocationPrompt,
+      );
+      return true;
+    }
+    if (RiderBackendPricingQuote.isPricingTotalMismatch(res)) {
+      _showSnackBar(RiderBackendPricingQuote.pricingMismatchUserMessage(res));
+      unawaited(_refreshRoutePreviewAfterPricingMismatch());
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _refreshRoutePreviewAfterPricingMismatch() async {
+    if (_pickupLocation == null || _destinationLocation == null) {
+      return;
+    }
+    await _ensureRouteMetrics();
+  }
+
   Future<String?> _validateRideCreationInputs() async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) {
@@ -6526,6 +6835,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _showSnackBar('Select your service area before requesting a ride.');
         return null;
       }
+    }
+
+    if (_pickupLocation != null &&
+        _rolloutCatalogHydrated &&
+        _rolloutCatalog.isNotEmpty &&
+        _rolloutSelectionComplete) {
+      await _maybeSyncRolloutSelectionToPickup(_pickupLocation!);
     }
 
     final typedPickup = _pickupController.text.trim();
@@ -6561,28 +6877,57 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final selectedCity = RiderLaunchScope.normalizeSupportedCity(
       _selectedLaunchCity,
     );
-    final pickupCity = _normalizeServiceCity(_pickupAddress) ?? selectedCity;
-    final destinationCity =
-        _normalizeServiceCity(_destinationAddress) ??
-        pickupCity ??
-        selectedCity;
-    if (pickupCity == null || destinationCity == null) {
-      _logRideFlow(
-        'request blocked: unsupported city pickup=$pickupCity destination=$destinationCity selected=$selectedCity',
-      );
-      _showSnackBar(
-        'Pickup and destination must both be in ${RiderLaunchScope.launchCitiesLabel} before requesting a ride.',
-      );
-      return null;
-    }
-    if (pickupCity != destinationCity) {
-      _logRideFlow(
-        'request blocked: cross-city trip pickup=$pickupCity destination=$destinationCity',
-      );
-      _showSnackBar(
-        'Pickup and destination must stay within the same launch city for now.',
-      );
-      return null;
+    final pickupMatch = matchRideAreaForPickupCoordinates(
+      _rolloutCatalog,
+      lat: _pickupLocation!.latitude,
+      lng: _pickupLocation!.longitude,
+    );
+    final destMatch = matchRideAreaForPickupCoordinates(
+      _rolloutCatalog,
+      lat: _destinationLocation!.latitude,
+      lng: _destinationLocation!.longitude,
+    );
+
+    String? pickupCity;
+    String? destinationCity;
+    if (pickupMatch != null && destMatch != null) {
+      if (pickupMatch.dispatchMarketId != destMatch.dispatchMarketId) {
+        _logRideFlow(
+          'request blocked: cross-market trip pickup_market=${pickupMatch.dispatchMarketId} '
+          'destination_market=${destMatch.dispatchMarketId}',
+        );
+        _showSnackBar(
+          'Pickup and destination must stay within the same launch city for now.',
+        );
+        return null;
+      }
+      pickupCity =
+          RiderServiceAreaConfig.marketForCity(pickupMatch.dispatchMarketId).city;
+      destinationCity = pickupCity;
+    } else {
+      pickupCity = _normalizeServiceCity(_pickupAddress) ?? selectedCity;
+      destinationCity =
+          _normalizeServiceCity(_destinationAddress) ??
+          pickupCity ??
+          selectedCity;
+      if (pickupCity == null || destinationCity == null) {
+        _logRideFlow(
+          'request blocked: unsupported city pickup=$pickupCity destination=$destinationCity selected=$selectedCity',
+        );
+        _showSnackBar(
+          'Pickup and destination must both be in ${RiderLaunchScope.launchCitiesLabel} before requesting a ride.',
+        );
+        return null;
+      }
+      if (pickupCity != destinationCity) {
+        _logRideFlow(
+          'request blocked: cross-city trip pickup=$pickupCity destination=$destinationCity',
+        );
+        _showSnackBar(
+          'Pickup and destination must stay within the same launch city for now.',
+        );
+        return null;
+      }
     }
 
     return pickupCity;
@@ -6820,11 +7165,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final searchTimeoutAt =
           DateTime.now().millisecondsSinceEpoch +
           _rideSearchTimeoutDuration.inMilliseconds;
+      RiderFareRule? livePricingRule;
+      try {
+        livePricingRule = await RegionPricingService.instance.ruleForCity(dispatchMarket);
+      } catch (_) {
+        livePricingRule = RiderFareSettings.maybeForCity(dispatchMarket);
+      }
       final fareBreakdown = calculateRiderFare(
         serviceKey: RiderServiceType.ride.key,
         city: dispatchMarket,
         distanceKm: _distanceKm,
         durationMin: _estimatedDurationMin,
+        liveRule: livePricingRule,
       );
       final pickupScope = _buildServiceAreaFields(city: dispatchMarket, area: '');
       final destinationScope =
@@ -7094,6 +7446,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         debugPrint('[RIDER_CREATE_DEBUG] callable_response=$createRes');
       }
       if (!riderRideCallableSucceeded(createRes)) {
+        if (_handleRideCreateStructuredFailure(
+          Map<String, dynamic>.from(createRes),
+        )) {
+          return;
+        }
         var reason = riderRideCallableReason(createRes);
         final recoveredRideId = _firstNonEmptyText(<dynamic>[
           createRes['rideId'],
@@ -7147,11 +7504,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 rethrow;
               }
               if (!riderRideCallableSucceeded(createRes)) {
-                // Do not throw "Bad state: rider_active_trip" to production users.
                 final retryReason = riderRideCallableReason(createRes);
                 _logRideFlow(
                   '[RIDER_REQ] create_retry_failed reason=$retryReason',
                 );
+                if (_handleRideCreateStructuredFailure(
+                  Map<String, dynamic>.from(createRes),
+                )) {
+                  return;
+                }
                 _showSnackBar(
                   _rideRequestErrorMessage(StateError(retryReason)),
                 );
@@ -7181,6 +7542,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             if (!riderRideCallableSucceeded(createRes)) {
               final retryReason = riderRideCallableReason(createRes);
               _logRideFlow('[RIDER_REQ] create_retry_failed reason=$retryReason');
+              if (_handleRideCreateStructuredFailure(
+                Map<String, dynamic>.from(createRes),
+              )) {
+                return;
+              }
               _showSnackBar(_rideRequestErrorMessage(StateError(retryReason)));
               return;
             }
@@ -7190,6 +7556,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             ]);
           }
         } else {
+          if (_handleRideCreateStructuredFailure(
+            Map<String, dynamic>.from(createRes),
+          )) {
+            return;
+          }
           throw StateError(reason);
         }
       } else {
@@ -7201,6 +7572,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           createRes['ride_id'],
         ]);
       }
+      unawaited(
+        _persistResolvedRolloutFromServerResponse(
+          Map<String, dynamic>.from(createRes),
+        ),
+      );
       if (rideId.isEmpty) {
         throw StateError('missing_ride_id_in_create_response');
       }

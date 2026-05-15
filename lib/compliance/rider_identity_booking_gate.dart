@@ -12,6 +12,20 @@ String? riderIdentityServerRejectionUserMessage(String? reason) {
     case 'identity_gate_unavailable':
     case 'identity_denied':
       return 'Unable to verify your identity right now. Check your connection and try again.';
+    case 'pickup_mismatch_service_city':
+    case 'pickup_outside_selected_service_area':
+      return 'Your pickup is in a different NexRide service area than the one you selected. '
+          'Use “Switch service area” when it appears, or open “Choose service area” and pick the area that contains your pickup.';
+    case 'no_service_area_for_pickup':
+      return 'NexRide is not available in this pickup area yet.';
+    case 'location_required':
+    case 'location_required_for_service_area':
+      return 'Turn on location permission for pickup, or drop a pin / search to set your pickup manually.';
+    case 'pickup_outside_enabled_city':
+    case 'service_area_unsupported':
+    case 'rollout_hint_invalid':
+    case 'rollout_denied':
+      return 'That pickup is outside the NexRide service area for your selected city. Adjust your pickup or choose a different service area.';
     default:
       return null;
   }

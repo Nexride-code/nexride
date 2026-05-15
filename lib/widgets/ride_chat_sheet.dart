@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../config/rider_app_config.dart';
+import '../services/nexride_official_bank_account_service.dart';
 import '../support/friendly_firebase_errors.dart';
 import '../support/ride_chat_support.dart';
 
@@ -99,6 +99,8 @@ class _RideChatSheetState extends State<RideChatSheet> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   int _lastMessageCount = 0;
+  NexrideOfficialBankAccount? _officialBank;
+  bool _officialBankLoaded = false;
 
   Future<void> _copyReference(String reference) async {
     await Clipboard.setData(ClipboardData(text: reference));
@@ -116,6 +118,23 @@ class _RideChatSheetState extends State<RideChatSheet> {
     widget.messagesListenable.addListener(_onRemoteMessagesChanged);
     WidgetsBinding.instance
         .addPostFrameCallback((_) => _scrollToBottom(animated: false));
+    unawaited(_loadOfficialBank());
+  }
+
+  Future<void> _loadOfficialBank() async {
+    try {
+      final b = await NexrideOfficialBankAccountService.instance.fetch();
+      if (!mounted) return;
+      setState(() {
+        _officialBank = b;
+        _officialBankLoaded = true;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _officialBankLoaded = true;
+      });
+    }
   }
 
   @override
@@ -142,6 +161,32 @@ class _RideChatSheetState extends State<RideChatSheet> {
       _lastMessageCount = nextCount;
       _scrollToBottom(animated: true);
     }
+  }
+
+  String _bankTransferInstructionsBody() {
+    final ref = widget.bankTransferReference.trim();
+    final amt = widget.bankTransferAmountLabel.isNotEmpty
+        ? widget.bankTransferAmountLabel
+        : '₦--';
+    if (!_officialBankLoaded) {
+      return 'Please transfer your fare of $amt to NexRide.\n'
+          'Loading official bank details…\n'
+          'Reference: $ref (include this exactly in your narration)\n'
+          'Upload your payment proof during or after the trip so your driver can verify.';
+    }
+    final ob = _officialBank;
+    if (ob == null) {
+      return 'Please transfer your fare of $amt to the official NexRide account.\n'
+          'Bank details could not be loaded. Contact support@nexride.africa for instructions.\n'
+          'Reference: $ref (include this exactly in your narration)\n'
+          'Upload your payment proof during or after the trip so your driver can verify.';
+    }
+    return 'Please transfer your fare of $amt to:\n'
+        'Bank: ${ob.bankName}\n'
+        'Account name: ${ob.accountName}\n'
+        'Account number: ${ob.accountNumber}\n'
+        'Reference: $ref (include this exactly in your narration)\n'
+        'Upload your payment proof during or after the trip so your driver can verify.';
   }
 
   Future<void> _handleSend() async {
@@ -350,12 +395,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Please transfer your fare of ${widget.bankTransferAmountLabel.isNotEmpty ? widget.bankTransferAmountLabel : '₦--'} to:\n'
-                        'Bank: ${RiderBankTransferConfig.bankName}\n'
-                        'Account name: ${RiderBankTransferConfig.accountName}\n'
-                        'Account number: ${RiderBankTransferConfig.accountNumber}\n'
-                        'Reference: ${widget.bankTransferReference.trim()} (include this exactly in your narration)\n'
-                        'Upload your payment proof during or after the trip so your driver can verify.',
+                        _bankTransferInstructionsBody(),
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: const Color(0xFF6B5A2B),
                           height: 1.35,

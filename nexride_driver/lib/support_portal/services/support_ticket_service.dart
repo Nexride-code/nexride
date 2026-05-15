@@ -27,15 +27,13 @@ class SupportTicketService {
     Map<String, dynamic> ticketMap = <String, dynamic>{};
     Map<String, dynamic> staffMap = <String, dynamic>{};
     Map<String, dynamic> logsMap = <String, dynamic>{};
+
     try {
-      final responses = await Future.wait<DataSnapshot>(<Future<DataSnapshot>>[
-        _ticketsRef.get(),
-        _staffRef.get(),
-        _logsRef.get(),
-      ]);
-      ticketMap = _map(responses[0].value);
-      staffMap = _map(responses[1].value);
-      logsMap = _map(responses[2].value);
+      final ticketSnap = await _ticketsRef
+          .orderByChild('updatedAt')
+          .limitToLast(400)
+          .get();
+      ticketMap = _map(ticketSnap.value);
     } catch (error) {
       if (!_isPermissionDenied(error)) {
         rethrow;
@@ -52,6 +50,22 @@ class SupportTicketService {
             'callable_${i + 1}': rows[i],
         };
       }
+    }
+
+    try {
+      final staffSnap = await _staffRef.get();
+      staffMap = _map(staffSnap.value);
+    } catch (error) {
+      debugPrint('[SupportTicketService] staff directory read failed: $error');
+      staffMap = <String, dynamic>{};
+    }
+
+    try {
+      final logsSnap = await _logsRef.orderByKey().limitToLast(200).get();
+      logsMap = _map(logsSnap.value);
+    } catch (error) {
+      debugPrint('[SupportTicketService] activity logs read failed: $error');
+      logsMap = <String, dynamic>{};
     }
 
     final tickets = ticketMap.entries
@@ -537,6 +551,21 @@ class SupportTicketService {
     final message = error.toString().toLowerCase();
     return message.contains('permission-denied') ||
         message.contains('permission denied');
+  }
+
+  Future<Map<String, dynamic>> fetchMerchantOrderContext({
+    required String orderId,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'supportGetMerchantOrderContext',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'order_id': orderId.trim(),
+    });
+    return _map(result.data);
   }
 
   Map<String, dynamic> _map(dynamic value) {

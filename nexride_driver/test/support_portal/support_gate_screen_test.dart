@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nexride_driver/support_portal/models/support_models.dart';
 import 'package:nexride_driver/support_portal/screens/support_gate_screen.dart';
 import 'package:nexride_driver/support_portal/services/support_auth_service.dart';
+import 'package:nexride_driver/support_portal/support_config.dart';
 
 void main() {
   testWidgets(
@@ -19,13 +20,14 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           routes: <String, WidgetBuilder>{
-            '/support/login': (_) => const Scaffold(body: SizedBox.shrink()),
+            SupportRoutePaths.login: (_) =>
+                const Scaffold(body: SizedBox.shrink()),
           },
           home: SupportGateScreen(
             mode: SupportGateMode.dashboard,
             authService: authService,
-            loginRoute: '/support/login',
-            dashboardRoute: '/support/dashboard',
+            loginRoute: SupportRoutePaths.login,
+            dashboardRoute: SupportRoutePaths.dashboard,
           ),
         ),
       );

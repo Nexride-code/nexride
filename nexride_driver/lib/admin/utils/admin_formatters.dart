@@ -81,6 +81,51 @@ Color adminStatusColor(String status) {
   };
 }
 
+/// Settings-friendly line: groups merchant channels under "Merchant orders".
+String formatAdminActiveRequestServiceSummary(List<String> keys) {
+  final normalized =
+      keys.map((String e) => e.trim().toLowerCase()).where((String e) => e.isNotEmpty).toSet();
+  if (normalized.isEmpty) {
+    return 'None configured';
+  }
+  final parts = <String>[];
+  if (normalized.contains('ride')) {
+    parts.add('Rides');
+  }
+  if (normalized.contains('dispatch_delivery')) {
+    parts.add('Dispatch / delivery');
+  }
+  if (normalized.contains('groceries_mart') ||
+      normalized.contains('restaurants_food')) {
+    final m = <String>[];
+    if (normalized.contains('groceries_mart')) {
+      m.add('groceries / mart');
+    }
+    if (normalized.contains('restaurants_food')) {
+      m.add('restaurants / food');
+    }
+    parts.add('Merchant orders (${m.join(', ')})');
+  }
+  final unknown = (normalized
+          .where(
+            (String k) => !<String>{
+              'ride',
+              'dispatch_delivery',
+              'groceries_mart',
+              'restaurants_food',
+            }.contains(k),
+          )
+          .toList())
+      ..sort();
+  for (final String k in unknown) {
+    parts.add(k);
+  }
+  final raw = (keys.map((String e) => e.trim()).where((String e) => e.isNotEmpty).toList()
+        ..sort())
+      .join(', ');
+  return '${parts.join(' · ')} — keys: $raw';
+}
+
 String sentenceCaseStatus(String status) {
   final normalized = status.trim().replaceAll('_', ' ');
   if (normalized.isEmpty) {

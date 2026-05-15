@@ -5,37 +5,43 @@ import '../portal_security/portal_security_theme.dart';
 import 'models/support_models.dart';
 
 class SupportRoutePaths {
-  static const String prefix = '/support';
-  static const String root = prefix;
-  static const String login = '$prefix/login';
-  static const String dashboard = '$prefix/dashboard';
-  static const String openTickets = '$prefix/open';
-  static const String assignedToMe = '$prefix/assigned';
-  static const String pendingUser = '$prefix/pending-user';
-  static const String escalated = '$prefix/escalated';
-  static const String resolved = '$prefix/resolved';
-  static const String ticketPrefix = '$prefix/tickets';
-  static const String accountSecurity = '$prefix/account/security';
-  static const String changePassword = '$prefix/account/change-password';
+  /// Browser / hosting mount — strip in [normalize] only. Do **not** use as a
+  /// [Navigator] route name with `<base href="/support/">` + path URL strategy.
+  static const String hostingPrefix = '/support';
 
-  static const Set<String> _relativeRoutes = <String>{
-    '/login',
-    '/dashboard',
-    '/open',
-    '/assigned',
-    '/pending-user',
-    '/escalated',
-    '/resolved',
-    '/account/security',
-    '/account/change-password',
-  };
+  /// Public URL prefix (emails, docs). Same as [hostingPrefix].
+  static const String prefix = hostingPrefix;
+
+  static const String login = '/login';
+  static const String dashboard = '/dashboard';
+  static const String openTickets = '/open';
+  static const String assignedToMe = '/assigned';
+  static const String pendingUser = '/pending-user';
+  static const String escalated = '/escalated';
+  static const String resolved = '/resolved';
+  static const String ticketPrefix = '/tickets';
+  static const String accountSecurity = '/account/security';
+  static const String changePassword = '/account/change-password';
+
+  static bool _isKnownSupportPath(String path) {
+    return path == login ||
+        path == dashboard ||
+        path == openTickets ||
+        path == assignedToMe ||
+        path == pendingUser ||
+        path == escalated ||
+        path == resolved ||
+        path == accountSecurity ||
+        path == changePassword ||
+        path.startsWith('$ticketPrefix/');
+  }
 
   static String normalize(String rawPath) {
     var path = rawPath.trim();
     if (path.startsWith('#')) {
-      path = path.substring(1);
+      path = path.substring(1).trim();
     }
-    if (path.isEmpty || path == '/' || path == prefix) {
+    if (path.isEmpty) {
       return login;
     }
     if (!path.startsWith('/')) {
@@ -44,11 +50,23 @@ class SupportRoutePaths {
     if (path.length > 1 && path.endsWith('/')) {
       path = path.substring(0, path.length - 1);
     }
-    if (path == prefix) {
+    while (path.startsWith('$hostingPrefix/')) {
+      path = path.substring(hostingPrefix.length);
+      if (!path.startsWith('/')) {
+        path = '/$path';
+      }
+    }
+    if (path == hostingPrefix) {
       return login;
     }
-    if (_relativeRoutes.contains(path) || path.startsWith('/tickets/')) {
-      return '$prefix$path';
+    if (!path.startsWith('/')) {
+      path = '/$path';
+    }
+    if (path.isEmpty || path == '/') {
+      return login;
+    }
+    if (_isKnownSupportPath(path)) {
+      return path;
     }
     return path;
   }
@@ -67,9 +85,6 @@ class SupportRoutePaths {
         normalized.startsWith('$ticketPrefix/');
   }
 
-  /// True when [path] is the change-password or account-security route.
-  /// `support_app.dart` checks this to bypass the regular dashboard
-  /// rendering and render the shared portal_security screens instead.
   static bool isAccountRoute(String path) {
     final normalized = normalize(path);
     return normalized == accountSecurity || normalized == changePassword;
@@ -124,7 +139,7 @@ class SupportRoutePaths {
     final pathCandidate = normalize(startupUri.path);
 
     final shouldPreferStartupUri =
-        requestedRoute == null || requested == login || requested == root;
+        requestedRoute == null || requested == login;
 
     String resolvedPath;
     if (!shouldPreferStartupUri) {

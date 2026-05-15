@@ -7,21 +7,36 @@ import 'package:flutter/foundation.dart';
 import '../models/admin_models.dart';
 import '../../portal_security/portal_password_service.dart';
 import '../../support/nexride_contact_constants.dart';
+import '../admin_rbac.dart';
+
+class _AdminsGate {
+  const _AdminsGate({
+    required this.portal,
+    this.adminRoleHint,
+    this.legacyBooleanTrue = false,
+  });
+
+  final bool portal;
+  final String? adminRoleHint;
+  final bool legacyBooleanTrue;
+}
 
 class AdminAuthService {
   AdminAuthService({
     FirebaseAuth? auth,
     FirebaseDatabase? database,
-  })  : _auth = auth,
-        _database = database;
+  })  : _auth = auth ?? FirebaseAuth.instance,
+        _database = database ?? FirebaseDatabase.instance;
 
-  final FirebaseAuth? _auth;
-  final FirebaseDatabase? _database;
+  final FirebaseAuth _auth;
+  final FirebaseDatabase _database;
 
-  FirebaseAuth get auth => _auth ?? FirebaseAuth.instance;
-  FirebaseDatabase get database => _database ?? FirebaseDatabase.instance;
+  FirebaseAuth get auth => _auth;
+  FirebaseDatabase get database => _database;
+
   bool get hasAuthenticatedUser => auth.currentUser != null;
-  String get authenticatedUid => auth.currentUser?.uid ?? '';
+
+  String? get authenticatedUid => auth.currentUser?.uid;
   String get authenticatedEmail => auth.currentUser?.email?.trim() ?? '';
 
   Stream<User?> get authStateChanges => auth.authStateChanges();
@@ -67,10 +82,8 @@ class AdminAuthService {
         debugPrint(
           '[AdminAuth] signIn denied uid=${user.uid} email=${user.email ?? 'none'}',
         );
-        // Important: don't sign out here. The gate's
-        // `_scheduleUnauthorizedReset` is the one place that signs the
-        // unauthorized user out — keeping that single chokepoint makes
-        // the deny logs reproducible.
+        // Don't sign out here: [AdminLoginScreen] and protected-route gate
+        // decide when to clear the Firebase session after surfacing the error.
         throw StateError(
           'Your account is signed in but does not have access. '
           'Contact the NexRide system administrator ($kNexRideAdminEmail).',
@@ -102,7 +115,9 @@ class AdminAuthService {
       'allow=false reasons=DENY:no_matched_path -> forcing token refresh',
     );
     try {
-      await user.getIdToken(true);
+      await user
+          .getIdToken(true)
+          .timeout(const Duration(seconds: 8));
     } catch (error) {
       debugPrint('[AdminAuth] forced token refresh failed: $error');
       return null;
@@ -129,22 +144,30 @@ class AdminAuthService {
         ? user.displayName!.trim()
         : (email.isNotEmpty ? email.split('@').first : 'Admin');
 
-    final claims = await _readClaims(user);
+    // Parallelize: worst-case wall time is max(claims, RTDB), not sum — keeps
+    // AdminGate under its outer timeout in normal network conditions.
+    final results = await Future.wait<Object>(<Future<Object>>[
+      _readClaims(user),
+      _readAdminsGate(user.uid),
+    ]);
+    final claims = results[0] as Map<String, dynamic>;
+    final adminsGate = results[1] as _AdminsGate;
+
     final claimAdmin = claims['admin'] == true;
     final claimRoleAdmin = claims['role'] == 'admin';
-    final hasDatabaseAccess = await _hasDatabaseAdminAccess(user.uid);
-    final finalAllowed = claimAdmin || claimRoleAdmin || hasDatabaseAccess;
+    final rtdbPortal = adminsGate.portal;
+    final finalAllowed = claimAdmin || claimRoleAdmin || rtdbPortal;
 
     final reasons = <String>[];
     if (claimAdmin) reasons.add('claim:admin=true');
     if (claimRoleAdmin) reasons.add('claim:role=admin');
-    if (hasDatabaseAccess) reasons.add('rtdb:/admins/{uid}=true');
+    if (rtdbPortal) reasons.add('rtdb:admins_gate');
     if (!finalAllowed) reasons.add('DENY:no_matched_path[attempt=$attempt]');
 
     debugPrint(
       'ADMIN_AUTH_DEBUG attempt=$attempt uid=${user.uid} email=$email '
       'allow=$finalAllowed reasons=${reasons.join('|')} '
-      'claims=$claims rtdbAdmin=$hasDatabaseAccess',
+      'claims=$claims rtdbAdmin=$rtdbPortal',
     );
     if (!finalAllowed) {
       return null;
@@ -152,6 +175,29 @@ class AdminAuthService {
 
     final accessMode =
         claimAdmin || claimRoleAdmin ? 'custom_claim_admin' : 'admins_node';
+
+    String roleFromClaims =
+        '${claims['admin_role'] ?? ''}'.trim().toLowerCase();
+    if (!kNexrideAdminRoles.contains(roleFromClaims)) {
+      roleFromClaims = '';
+    }
+    String roleFromRtdb = adminsGate.adminRoleHint ?? '';
+    if (!kNexrideAdminRoles.contains(roleFromRtdb)) {
+      roleFromRtdb = '';
+    }
+    String resolvedRole = roleFromClaims.isNotEmpty
+        ? roleFromClaims
+        : (roleFromRtdb.isNotEmpty
+            ? roleFromRtdb
+            : ((claimAdmin || claimRoleAdmin || adminsGate.legacyBooleanTrue)
+                ? 'super_admin'
+                : 'ops_admin'));
+
+    if (!kNexrideAdminRoles.contains(resolvedRole)) {
+      resolvedRole = 'ops_admin';
+    }
+
+    final Set<String> perms = permissionsForAdminRole(resolvedRole);
     debugPrint('[AdminAuth] admin access granted via $accessMode');
 
     // Probe whether the operator is on a temporary password — drives the
@@ -170,12 +216,16 @@ class AdminAuthService {
       displayName: displayName,
       accessMode: accessMode,
       mustChangePassword: mustChangePassword,
+      adminRole: resolvedRole,
+      permissions: perms,
     );
   }
 
   Future<Map<String, dynamic>> _readClaims(User user) async {
     try {
-      final idToken = await user.getIdTokenResult();
+      final idToken = await user
+          .getIdTokenResult()
+          .timeout(const Duration(seconds: 5));
       final claims = idToken.claims;
       if (claims == null) {
         return const <String, dynamic>{};
@@ -209,33 +259,57 @@ class AdminAuthService {
       return;
     }
     try {
-      await auth.setPersistence(Persistence.LOCAL);
+      await auth
+          .setPersistence(Persistence.LOCAL)
+          .timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      debugPrint('[AdminAuth] setPersistence timed out — continuing');
     } catch (error) {
       debugPrint('[AdminAuth] unable to set web auth persistence: $error');
     }
   }
 
-  Future<bool> _hasDatabaseAdminAccess(String uid) async {
+  Future<_AdminsGate> _readAdminsGate(String uid) async {
     try {
-      final snapshot = await database.ref('admins/$uid').get();
-      return snapshot.value == true;
+      final snapshot = await database
+          .ref('admins/$uid')
+          .get()
+          .timeout(const Duration(seconds: 5));
+      final Object? v = snapshot.value;
+      if (v == true) {
+        return const _AdminsGate(portal: true, legacyBooleanTrue: true);
+      }
+      if (v is Map) {
+        final Map<Object?, Object?> m = v;
+        final bool disabled =
+            m['disabled'] == true || m['enabled'] == false;
+        if (disabled) {
+          return const _AdminsGate(portal: false);
+        }
+        final String ar =
+            '${m['admin_role'] ?? m['role'] ?? ''}'.trim().toLowerCase();
+        if (kNexrideAdminRoles.contains(ar)) {
+          return _AdminsGate(portal: true, adminRoleHint: ar);
+        }
+        if (m['admin'] == true || m['enabled'] == true) {
+          return const _AdminsGate(portal: true);
+        }
+        return const _AdminsGate(portal: false);
+      }
+      return const _AdminsGate(portal: false);
+    } on TimeoutException {
+      debugPrint(
+        '[AdminAuth] admins lookup timed out uid=$uid — treating as no RTDB admin flag',
+      );
+      return const _AdminsGate(portal: false);
     } catch (error, stackTrace) {
       debugPrint('[AdminAuth] admins lookup failed uid=$uid error=$error');
       debugPrintStack(
         label: '[AdminAuth] admins lookup stack',
         stackTrace: stackTrace,
       );
-      if (_isPermissionDenied(error)) {
-        return false;
-      }
-      rethrow;
+      return const _AdminsGate(portal: false);
     }
-  }
-
-  bool _isPermissionDenied(Object error) {
-    final message = error.toString().toLowerCase();
-    return message.contains('permission-denied') ||
-        message.contains('permission denied');
   }
 
   String _friendlyAuthMessage(FirebaseAuthException error) {

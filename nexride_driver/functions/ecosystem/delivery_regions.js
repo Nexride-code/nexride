@@ -8,7 +8,9 @@
 const admin = require("firebase-admin");
 const { FieldValue } = require("firebase-admin/firestore");
 const { logger } = require("firebase-functions");
-const { isNexRideAdmin, normUid } = require("../admin_auth");
+const { normUid } = require("../admin_auth");
+const adminPerms = require("../admin_permissions");
+const { writeAdminAuditLog } = require("../admin_audit_log");
 
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
@@ -42,6 +44,34 @@ function dispatchMarketToRegionId(marketId) {
   if (m === "edo") return "edo";
   if (m === "anambra") return "anambra";
   if (m === "delta") return "delta";
+  return "";
+}
+
+/**
+ * Resolve Firestore `delivery_regions` doc id from RTDB `dispatch_market_id` /
+ * ride `market_pool` (admin-managed; not hardcoded beyond legacy aliases above).
+ * @param {import('firebase-admin').firestore.Firestore} fs
+ */
+async function resolveRegionIdByDispatchMarket(fs, marketId) {
+  const m = trim(marketId, 80).toLowerCase();
+  if (!m) return "";
+  const legacy = dispatchMarketToRegionId(m);
+  if (legacy) return legacy;
+  try {
+    const snap = await fs.collection("delivery_regions").where("dispatch_market_id", "==", m).limit(8).get();
+    for (const d of snap.docs) {
+      const row = d.data() || {};
+      if (row.enabled !== false) {
+        return d.id;
+      }
+    }
+    const snapAny = await fs.collection("delivery_regions").where("dispatch_market_id", "==", m).limit(1).get();
+    if (!snapAny.empty) {
+      return snapAny.docs[0].id;
+    }
+  } catch (e) {
+    logger.warn("DELIVERY_REGION_RESOLVE_MARKET_FAILED", { marketId: m, error: String(e) });
+  }
   return "";
 }
 
@@ -124,16 +154,32 @@ function serviceKey(service) {
   if (s === "food") return "supports_food";
   if (s === "package" || s === "parcel") return "supports_package";
   if (s === "merchant") return "supports_merchant";
+  if (s === "delivery" || s === "dispatch" || s === "dispatch_delivery") return "supports_delivery";
   return "";
+}
+
+/** Explicit `supports_delivery` or legacy food/package toggles. */
+function effectiveSupportsDelivery(row) {
+  const r = row || {};
+  if (r.supports_delivery === true || r.supports_delivery === false) {
+    return r.supports_delivery !== false;
+  }
+  return r.supports_food !== false || r.supports_package !== false;
 }
 
 function parentSupports(row, key) {
   if (!key) return false;
+  if (key === "supports_delivery") {
+    return effectiveSupportsDelivery(row);
+  }
   return row[key] !== false;
 }
 
 function citySupports(cityRow, key) {
   if (!key) return false;
+  if (key === "supports_delivery") {
+    return effectiveSupportsDelivery(cityRow);
+  }
   return cityRow[key] !== false;
 }
 
@@ -153,15 +199,38 @@ async function loadCityDoc(fs, regionId, cityId) {
 }
 
 /**
+ * @param {import('firebase-admin').firestore.Firestore} fs
+ * @param {{ region_id: string, city_id: string, dispatch_market_id?: string }} geo
+ */
+async function buildRiderPickupAreaSuggestion(fs, geo) {
+  const rid = trim(geo?.region_id, 80);
+  const cid = trim(geo?.city_id, 80);
+  if (!rid || !cid) {
+    return {};
+  }
+  const reg = await loadRegionDoc(fs, rid);
+  const city = await loadCityDoc(fs, rid, cid);
+  const c = city?.data || {};
+  const name =
+    String(c.display_name ?? c.city_name ?? cid ?? "").trim() || cid;
+  const state = String(reg?.data?.state ?? "").trim();
+  const dm = String(geo.dispatch_market_id ?? reg?.data?.dispatch_market_id ?? "").trim();
+  return {
+    suggested_service_area_id: cid,
+    suggested_service_area_name: name,
+    suggested_service_region_id: rid,
+    suggested_state: state,
+    suggested_dispatch_market_id: dm,
+  };
+}
+
+/**
  * Validates region + city exist and services are enabled at both levels.
  */
 async function validateRolloutSelection(fs, regionId, cityId, opts = {}) {
   const rid = trim(regionId, 80);
   const cid = trim(cityId, 80);
   const sk = serviceKey(opts.service || "merchant");
-  if (!ROLLOUT_REGION_IDS.includes(rid)) {
-    return { ok: false, reason: "region_not_in_rollout" };
-  }
   const reg = await loadRegionDoc(fs, rid);
   if (!reg || reg.data.enabled === false) {
     return { ok: false, reason: "region_disabled" };
@@ -190,7 +259,10 @@ async function validateRolloutSelection(fs, regionId, cityId, opts = {}) {
  * Pickup / driver position: must fall inside an enabled city service bubble for the service.
  */
 async function assertRolloutGeoForDispatch(fs, dispatchMarketId, lat, lng, service) {
-  const regionId = dispatchMarketToRegionId(dispatchMarketId);
+  let regionId = dispatchMarketToRegionId(dispatchMarketId);
+  if (!regionId) {
+    regionId = await resolveRegionIdByDispatchMarket(fs, dispatchMarketId);
+  }
   if (!regionId) {
     logDeliveryRegionBlock("dispatch_market_not_in_rollout", { dispatch_market_id: dispatchMarketId });
     return { ok: false, reason: "service_area_unsupported", message: "NexRide is not available in your area yet." };
@@ -250,8 +322,10 @@ async function assertRolloutGeoForDispatch(fs, dispatchMarketId, lat, lng, servi
 
 /**
  * When client passes explicit rollout ids, verify coords lie in that city bubble (or skip coords if strict=false).
+ * @param {{ strict_ride_request_hints?: boolean }} [opts]
  */
-async function assertRolloutWithHints(fs, dispatchMarketId, lat, lng, service, hints = {}) {
+async function assertRolloutWithHints(fs, dispatchMarketId, lat, lng, service, hints = {}, opts = {}) {
+  const strictRideRequestHints = opts.strict_ride_request_hints === true;
   const regionHint = trim(hints.region_id ?? hints.rollout_region_id, 80);
   const cityHint = trim(hints.city_id ?? hints.service_city_id ?? hints.rollout_city_id, 80);
   if (regionHint && cityHint) {
@@ -269,7 +343,53 @@ async function assertRolloutWithHints(fs, dispatchMarketId, lat, lng, service, h
       if (Number.isFinite(clat) && Number.isFinite(clng) && Number.isFinite(rad) && rad > 0) {
         const d = haversineKm(lat, lng, clat, clng);
         if (d > rad) {
-          logDeliveryRegionBlock("hint_coords_outside_city", { regionHint, cityHint, d_km: d });
+          logDeliveryRegionBlock("hint_coords_outside_city_try_geo", {
+            regionHint,
+            cityHint,
+            d_km: d,
+            dispatch_market_id: dispatchMarketId,
+          });
+          const geo = await assertRolloutGeoForDispatch(fs, dispatchMarketId, lat, lng, service);
+          const sk = serviceKey(service);
+          if (strictRideRequestHints && sk === "supports_rides") {
+            if (geo.ok && (geo.region_id !== regionHint || geo.city_id !== cityHint)) {
+              const sug = await buildRiderPickupAreaSuggestion(fs, geo);
+              logDeliveryRegionBlock("ride_hint_mismatch_suggest_area", {
+                regionHint,
+                cityHint,
+                suggested_region: sug.suggested_service_region_id,
+                suggested_city: sug.suggested_service_area_id,
+              });
+              return {
+                ok: false,
+                reason: "pickup_outside_selected_service_area",
+                message: "Your pickup is in a different NexRide service area than the one you selected.",
+                ...sug,
+              };
+            }
+            if (!geo.ok) {
+              logDeliveryRegionBlock("ride_hint_geo_no_active_bubble", {
+                regionHint,
+                cityHint,
+                geo_reason: geo.reason || null,
+              });
+              return {
+                ok: false,
+                reason: "no_service_area_for_pickup",
+                message: "NexRide is not available in this pickup area yet.",
+              };
+            }
+            return geo;
+          }
+          if (geo.ok) {
+            return geo;
+          }
+          logDeliveryRegionBlock("hint_coords_outside_city_geo_failed", {
+            regionHint,
+            cityHint,
+            d_km: d,
+            geo_reason: geo.reason || null,
+          });
           return {
             ok: false,
             reason: "pickup_mismatch_service_city",
@@ -282,7 +402,10 @@ async function assertRolloutWithHints(fs, dispatchMarketId, lat, lng, service, h
       ok: true,
       region_id: regionHint,
       city_id: cityHint,
-      dispatch_market_id: v.dispatch_market_id || dispatchMarketToRegionId(dispatchMarketId),
+      dispatch_market_id:
+        v.dispatch_market_id ||
+        String((await loadRegionDoc(fs, regionHint))?.data?.dispatch_market_id || "").trim() ||
+        trim(dispatchMarketId, 80),
     };
   }
   return assertRolloutGeoForDispatch(fs, dispatchMarketId, lat, lng, service);
@@ -290,6 +413,22 @@ async function assertRolloutWithHints(fs, dispatchMarketId, lat, lng, service, h
 
 function logDeliveryRegionBlock(reason, meta) {
   logger.warn("DELIVERY_REGION_BLOCK", { reason, ...meta });
+}
+
+function validateGeoInputs(center_lat, center_lng, service_radius_km) {
+  const lat = Number(center_lat);
+  const lng = Number(center_lng);
+  const rad = Number(service_radius_km);
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+    return { ok: false, reason: "invalid_center_lat" };
+  }
+  if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
+    return { ok: false, reason: "invalid_center_lng" };
+  }
+  if (!Number.isFinite(rad) || rad <= 0 || rad > 500) {
+    return { ok: false, reason: "invalid_service_radius_km" };
+  }
+  return { ok: true };
 }
 
 function isRolloutDispatchMarket(marketId) {
@@ -302,9 +441,8 @@ function isRolloutDispatchMarket(marketId) {
  * @param {import('firebase-admin').firestore.Firestore} fs
  */
 async function adminUpsertDeliveryRegion(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
-    return { success: false, reason: "unauthorized" };
-  }
+  const denyUr = await adminPerms.enforceCallable(db, context, "adminUpsertDeliveryRegion");
+  if (denyUr) return denyUr;
   const regionId = trim(data?.region_id ?? data?.regionId, 80);
   if (!regionId) {
     return { success: false, reason: "invalid_payload" };
@@ -320,6 +458,7 @@ async function adminUpsertDeliveryRegion(data, context, db) {
   const supports_food = data?.supports_food !== false;
   const supports_package = data?.supports_package !== false;
   const supports_merchant = data?.supports_merchant !== false;
+  const supports_delivery = data?.supports_delivery !== false && data?.supportsDelivery !== false;
   const currency = trim(data?.currency, 8) || "NGN";
   const timezone = trim(data?.timezone, 64) || "Africa/Lagos";
 
@@ -336,6 +475,7 @@ async function adminUpsertDeliveryRegion(data, context, db) {
         supports_food,
         supports_package,
         supports_merchant,
+        supports_delivery,
         dispatch_market_id,
         currency,
         timezone,
@@ -352,24 +492,36 @@ async function adminUpsertDeliveryRegion(data, context, db) {
  * @param {import('firebase-admin').firestore.Firestore} fs
  */
 async function adminUpsertDeliveryCity(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
-    return { success: false, reason: "unauthorized" };
-  }
+  const denyUc = await adminPerms.enforceCallable(db, context, "adminUpsertDeliveryCity");
+  if (denyUc) return denyUc;
   const regionId = trim(data?.region_id ?? data?.regionId, 80);
   const cityId = trim(data?.city_id ?? data?.cityId, 120);
-  const display_name = trim(data?.display_name ?? data?.displayName, 160);
-  if (!regionId || !cityId || !display_name) {
+  let display_name = trim(data?.display_name ?? data?.displayName, 160);
+  if (!regionId || !cityId) {
     return { success: false, reason: "invalid_payload" };
   }
   const fs = admin.firestore();
+  const existing = (await loadCityDoc(fs, regionId, cityId))?.data || {};
+  if (!display_name) {
+    display_name = trim(existing.display_name ?? existing.city_name ?? cityId, 160) || cityId;
+  }
   const enabled = data?.enabled !== false;
   const supports_rides = data?.supports_rides !== false && data?.supports_ride !== false;
   const supports_food = data?.supports_food !== false;
   const supports_package = data?.supports_package !== false;
   const supports_merchant = data?.supports_merchant !== false;
-  const center_lat = Number(data?.center_lat ?? data?.centerLat);
-  const center_lng = Number(data?.center_lng ?? data?.centerLng);
-  const service_radius_km = Number(data?.service_radius_km ?? data?.serviceRadiusKm ?? 25);
+  const supports_delivery = data?.supports_delivery !== false && data?.supportsDelivery !== false;
+
+  const center_lat = Number(data?.center_lat ?? data?.centerLat ?? existing.center_lat ?? existing.centerLat);
+  const center_lng = Number(data?.center_lng ?? data?.centerLng ?? existing.center_lng ?? existing.centerLng);
+  const service_radius_km = Number(
+    data?.service_radius_km ?? data?.serviceRadiusKm ?? existing.service_radius_km ?? existing.serviceRadiusKm ?? 25,
+  );
+
+  const geo = validateGeoInputs(center_lat, center_lng, service_radius_km);
+  if (!geo.ok) {
+    return { success: false, reason: geo.reason || "invalid_geo" };
+  }
 
   await fs
     .collection("delivery_regions")
@@ -385,6 +537,7 @@ async function adminUpsertDeliveryCity(data, context, db) {
         supports_food,
         supports_package,
         supports_merchant,
+        supports_delivery,
         center_lat: Number.isFinite(center_lat) ? center_lat : null,
         center_lng: Number.isFinite(center_lng) ? center_lng : null,
         service_radius_km: Number.isFinite(service_radius_km) && service_radius_km > 0 ? service_radius_km : 25,
@@ -394,13 +547,47 @@ async function adminUpsertDeliveryCity(data, context, db) {
       { merge: true },
     );
   logger.info("DELIVERY_CITY_UPSERT", { region_id: regionId, city_id: cityId, enabled });
+  const adminUid = normUid(context.auth?.uid);
+  const prevEnabled = existing.enabled !== false;
+  const afterEnabled = enabled !== false;
+  let action = "update_service_area";
+  if (!prevEnabled && afterEnabled) {
+    action = "enable_service_area";
+  } else if (prevEnabled && !afterEnabled) {
+    action = "disable_service_area";
+  }
+  const beforeRow = {
+    display_name: existing.display_name ?? existing.displayName ?? existing.city_name ?? null,
+    enabled: prevEnabled,
+    center_lat: existing.center_lat ?? existing.centerLat ?? null,
+    center_lng: existing.center_lng ?? existing.centerLng ?? null,
+    service_radius_km: existing.service_radius_km ?? existing.serviceRadiusKm ?? null,
+  };
+  const afterRow = {
+    display_name,
+    enabled: afterEnabled,
+    center_lat: Number.isFinite(center_lat) ? center_lat : null,
+    center_lng: Number.isFinite(center_lng) ? center_lng : null,
+    service_radius_km: Number.isFinite(service_radius_km) && service_radius_km > 0 ? service_radius_km : 25,
+  };
+  await writeAdminAuditLog(db, {
+    actor_uid: adminUid,
+    action,
+    entity_type: "service_area",
+    entity_id: `${regionId}/${cityId}`,
+    before: beforeRow,
+    after: afterRow,
+    reason: trim(data?.reason ?? data?.note ?? "", 500) || null,
+    source: "delivery_regions.adminUpsertDeliveryCity",
+    type: `admin_${action}`,
+    created_at: Date.now(),
+  });
   return { success: true, region_id: regionId, city_id: cityId };
 }
 
 async function adminSeedRolloutDeliveryRegions(_data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
-    return { success: false, reason: "unauthorized" };
-  }
+  const denySeed = await adminPerms.enforceCallable(db, context, "adminSeedRolloutDeliveryRegions");
+  if (denySeed) return denySeed;
   const fs = admin.firestore();
   const adminUid = normUid(context.auth?.uid);
   for (const row of ROLLOUT_SEED) {
@@ -419,6 +606,7 @@ async function adminSeedRolloutDeliveryRegions(_data, context, db) {
           supports_food: true,
           supports_package: true,
           supports_merchant: true,
+          supports_delivery: true,
           dispatch_market_id: row.dispatch_market_id,
           currency: "NGN",
           timezone: "Africa/Lagos",
@@ -443,6 +631,7 @@ async function adminSeedRolloutDeliveryRegions(_data, context, db) {
             supports_food: true,
             supports_package: true,
             supports_merchant: true,
+            supports_delivery: true,
             center_lat: c.center_lat,
             center_lng: c.center_lng,
             service_radius_km: c.service_radius_km,
@@ -474,9 +663,6 @@ async function listDeliveryRegions(data, context) {
   const regions = [];
   for (const doc of snap.docs) {
     const m = doc.data() || {};
-    if (!ROLLOUT_REGION_IDS.includes(doc.id)) {
-      continue;
-    }
     const citiesSnap = await doc.ref.collection("cities").where("enabled", "==", true).get();
     const cities = [];
     citiesSnap.forEach((cd) => {
@@ -489,6 +675,10 @@ async function listDeliveryRegions(data, context) {
         supports_food: c.supports_food !== false,
         supports_package: c.supports_package !== false,
         supports_merchant: c.supports_merchant !== false,
+        supports_delivery: effectiveSupportsDelivery(c),
+        center_lat: c.center_lat ?? c.centerLat ?? null,
+        center_lng: c.center_lng ?? c.centerLng ?? null,
+        service_radius_km: c.service_radius_km ?? c.serviceRadiusKm ?? null,
       });
     });
     regions.push({
@@ -500,6 +690,7 @@ async function listDeliveryRegions(data, context) {
       supports_food: m.supports_food !== false,
       supports_package: m.supports_package !== false,
       supports_merchant: m.supports_merchant !== false,
+      supports_delivery: effectiveSupportsDelivery(m),
       dispatch_market_id: m.dispatch_market_id ?? "",
       currency: m.currency ?? "NGN",
       timezone: m.timezone ?? "Africa/Lagos",
@@ -511,9 +702,8 @@ async function listDeliveryRegions(data, context) {
 }
 
 async function adminListDeliveryRollout(data, context, db) {
-  if (!(await isNexRideAdmin(db, context))) {
-    return { success: false, reason: "unauthorized" };
-  }
+  const denyLdr = await adminPerms.enforceCallable(db, context, "adminListDeliveryRollout");
+  if (denyLdr) return denyLdr;
   const fs = admin.firestore();
   const snap = await fs.collection("delivery_regions").get();
   const regions = [];
@@ -553,6 +743,188 @@ async function adminListDeliveryRollout(data, context, db) {
   };
 }
 
+function tsMillis(v) {
+  if (v == null) return null;
+  if (typeof v.toMillis === "function") return v.toMillis();
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  return null;
+}
+
+/** One flattened row per city service bubble (admin + API consumers). */
+function normalizeServiceAreaRow(regionDocId, regionRow, cityDocId, cityRow) {
+  const r = regionRow || {};
+  const c = cityRow || {};
+  return {
+    region_id: regionDocId,
+    city_id: cityDocId,
+    display_name: String(c.display_name ?? c.city_name ?? cityDocId),
+    state: String(r.state ?? ""),
+    country: String(r.country ?? "Nigeria"),
+    dispatch_market_id: String(r.dispatch_market_id ?? "").trim(),
+    center_lat: c.center_lat ?? c.centerLat ?? null,
+    center_lng: c.center_lng ?? c.centerLng ?? null,
+    service_radius_km: c.service_radius_km ?? c.serviceRadiusKm ?? null,
+    supports_rides: c.supports_rides !== false,
+    supports_delivery: effectiveSupportsDelivery(c),
+    supports_merchant: c.supports_merchant !== false,
+    supports_food: c.supports_food !== false,
+    supports_package: c.supports_package !== false,
+    region_enabled: r.enabled !== false,
+    enabled: c.enabled !== false,
+    updated_at: tsMillis(c.updated_at),
+    updated_by: String(c.updated_by ?? "").trim(),
+    currency: r.currency ?? "NGN",
+    timezone: r.timezone ?? "Africa/Lagos",
+  };
+}
+
+async function adminListServiceAreas(data, context, db) {
+  const denyLsa = await adminPerms.enforceCallable(db, context, "adminListServiceAreas");
+  if (denyLsa) return denyLsa;
+  const roll = await adminListDeliveryRollout(data, context, db);
+  if (!roll.success) {
+    return roll;
+  }
+  const areas = [];
+  for (const reg of roll.regions || []) {
+    const rid = trim(reg.region_id, 80);
+    if (!rid) {
+      continue;
+    }
+    for (const c of reg.cities || []) {
+      const cid = trim(c.city_id ?? c.cityId, 120);
+      if (!cid) {
+        continue;
+      }
+      areas.push(normalizeServiceAreaRow(rid, reg, cid, c));
+    }
+  }
+  areas.sort((a, b) => {
+    const s = String(a.state).localeCompare(String(b.state));
+    if (s !== 0) return s;
+    return String(a.display_name).localeCompare(String(b.display_name));
+  });
+  return { success: true, areas, regions: roll.regions };
+}
+
+async function adminGetServiceArea(data, context, db) {
+  const denyGsa = await adminPerms.enforceCallable(db, context, "adminGetServiceArea");
+  if (denyGsa) return denyGsa;
+  const regionId = trim(data?.region_id ?? data?.regionId, 80);
+  const cityId = trim(data?.city_id ?? data?.cityId, 120);
+  if (!regionId) {
+    return { success: false, reason: "invalid_payload" };
+  }
+  const fs = admin.firestore();
+  const reg = await loadRegionDoc(fs, regionId);
+  if (!reg) {
+    return { success: false, reason: "region_not_found" };
+  }
+  const rPayload = {
+    ...reg.data,
+    region_id: regionId,
+    updated_at: tsMillis(reg.data.updated_at),
+    seeded_at: tsMillis(reg.data.seeded_at),
+  };
+  if (!cityId) {
+    return { success: true, region: rPayload };
+  }
+  const city = await loadCityDoc(fs, regionId, cityId);
+  if (!city) {
+    return { success: false, reason: "city_not_found" };
+  }
+  return {
+    success: true,
+    region: rPayload,
+    area: normalizeServiceAreaRow(regionId, reg.data, cityId, city.data),
+  };
+}
+
+async function adminUpsertServiceArea(data, context, db) {
+  const denyUsa = await adminPerms.enforceCallable(db, context, "adminUpsertServiceArea");
+  if (denyUsa) return denyUsa;
+  const regionId = trim(data?.region_id ?? data?.regionId, 80);
+  const cityId = trim(data?.city_id ?? data?.cityId, 120);
+  const state = trim(data?.state, 80);
+  const dispatch_market_id = trim(data?.dispatch_market_id ?? data?.dispatchMarketId, 80);
+  if (!regionId || !cityId || !state || !dispatch_market_id) {
+    return { success: false, reason: "invalid_payload" };
+  }
+  const regionPayload = {
+    region_id: regionId,
+    state,
+    country: trim(data?.country, 80) || "Nigeria",
+    dispatch_market_id,
+    enabled: data?.region_enabled !== false && data?.regionEnabled !== false,
+    supports_rides: data?.supports_rides,
+    supports_food: data?.supports_food,
+    supports_package: data?.supports_package,
+    supports_merchant: data?.supports_merchant,
+    supports_delivery: data?.supports_delivery,
+    currency: data?.currency,
+    timezone: data?.timezone,
+  };
+  const r = await adminUpsertDeliveryRegion(regionPayload, context, db);
+  if (!r.success) {
+    return r;
+  }
+  const cityPayload = {
+    region_id: regionId,
+    city_id: cityId,
+    display_name: trim(data?.display_name ?? data?.displayName, 160),
+    enabled: data?.enabled !== false && data?.city_enabled !== false && data?.cityEnabled !== false,
+    center_lat: data?.center_lat ?? data?.centerLat,
+    center_lng: data?.center_lng ?? data?.centerLng,
+    service_radius_km: data?.service_radius_km ?? data?.serviceRadiusKm,
+    supports_rides: data?.supports_rides,
+    supports_food: data?.supports_food,
+    supports_package: data?.supports_package,
+    supports_merchant: data?.supports_merchant,
+    supports_delivery: data?.supports_delivery,
+  };
+  return adminUpsertDeliveryCity(cityPayload, context, db);
+}
+
+async function adminEnableServiceArea(data, context, db) {
+  const denyEna = await adminPerms.enforceCallable(db, context, "adminEnableServiceArea");
+  if (denyEna) return denyEna;
+  const regionId = trim(data?.region_id ?? data?.regionId, 80);
+  const cityId = trim(data?.city_id ?? data?.cityId, 120);
+  if (!regionId || !cityId) {
+    return { success: false, reason: "invalid_payload" };
+  }
+  return adminUpsertDeliveryCity(
+    {
+      region_id: regionId,
+      city_id: cityId,
+      enabled: true,
+      reason: trim(data?.reason ?? data?.note, 500) || null,
+    },
+    context,
+    db,
+  );
+}
+
+async function adminDisableServiceArea(data, context, db) {
+  const denyDis = await adminPerms.enforceCallable(db, context, "adminDisableServiceArea");
+  if (denyDis) return denyDis;
+  const regionId = trim(data?.region_id ?? data?.regionId, 80);
+  const cityId = trim(data?.city_id ?? data?.cityId, 120);
+  if (!regionId || !cityId) {
+    return { success: false, reason: "invalid_payload" };
+  }
+  return adminUpsertDeliveryCity(
+    {
+      region_id: regionId,
+      city_id: cityId,
+      enabled: false,
+      reason: trim(data?.reason ?? data?.note, 500) || null,
+    },
+    context,
+    db,
+  );
+}
+
 async function validateServiceLocation(data, context) {
   if (!context?.auth?.uid) {
     return { success: false, reason: "unauthorized" };
@@ -568,10 +940,13 @@ async function validateServiceLocation(data, context) {
 }
 
 module.exports = {
+  normalizeServiceAreaRow,
   ROLLOUT_REGION_IDS,
   ROLLOUT_DISPATCH_MARKET_IDS,
   ROLLOUT_SEED,
   dispatchMarketToRegionId,
+  resolveRegionIdByDispatchMarket,
+  validateGeoInputs,
   validateRolloutSelection,
   assertRolloutGeoForDispatch,
   assertRolloutWithHints,
@@ -581,6 +956,11 @@ module.exports = {
   adminSeedDefaultNigeriaDeliveryRegions,
   listDeliveryRegions,
   adminListDeliveryRollout,
+  adminListServiceAreas,
+  adminGetServiceArea,
+  adminUpsertServiceArea,
+  adminEnableServiceArea,
+  adminDisableServiceArea,
   validateServiceLocation,
   isRolloutDispatchMarket,
   logDeliveryRegionBlock,

@@ -47,6 +47,9 @@ class AdminRevenueSlice {
 class AdminDashboardMetrics {
   const AdminDashboardMetrics({
     required this.totalRiders,
+    required this.incompleteRiderRegistrations,
+    required this.pendingOnboarding,
+    required this.totalMerchants,
     required this.totalDrivers,
     required this.activeDriversOnline,
     required this.ongoingTrips,
@@ -64,6 +67,11 @@ class AdminDashboardMetrics {
   });
 
   final int totalRiders;
+  /// Classified rider-eligible accounts missing minimum profile fields (directory scan / samples).
+  final int incompleteRiderRegistrations;
+  /// Accounts with a completed profile but onboarding still marked incomplete when known.
+  final int pendingOnboarding;
+  final int totalMerchants;
   final int totalDrivers;
   final int activeDriversOnline;
   final int ongoingTrips;
@@ -103,6 +111,8 @@ class AdminRiderRecord {
     required this.verificationStatus,
     required this.riskStatus,
     required this.paymentStatus,
+    required this.profileCompleted,
+    this.onboardingCompleted,
     required this.createdAt,
     required this.lastActiveAt,
     required this.walletBalance,
@@ -122,6 +132,8 @@ class AdminRiderRecord {
   final String verificationStatus;
   final String riskStatus;
   final String paymentStatus;
+  final bool profileCompleted;
+  final bool? onboardingCompleted;
   final DateTime? createdAt;
   final DateTime? lastActiveAt;
   final double walletBalance;
@@ -139,6 +151,7 @@ class AdminDriverRecord {
     required this.phone,
     required this.email,
     required this.city,
+    required this.stateOrRegion,
     required this.accountStatus,
     required this.status,
     required this.isOnline,
@@ -167,6 +180,7 @@ class AdminDriverRecord {
   final String phone;
   final String email;
   final String city;
+  final String stateOrRegion;
   final String accountStatus;
   final String status;
   final bool isOnline;
@@ -188,6 +202,132 @@ class AdminDriverRecord {
   final DateTime? updatedAt;
   final List<String> serviceTypes;
   final Map<String, dynamic> rawData;
+
+  AdminDriverRecord copyWith({
+    String? accountStatus,
+    String? verificationStatus,
+    Map<String, dynamic>? rawData,
+  }) {
+    return AdminDriverRecord(
+      id: id,
+      name: name,
+      phone: phone,
+      email: email,
+      city: city,
+      stateOrRegion: stateOrRegion,
+      accountStatus: accountStatus ?? this.accountStatus,
+      status: status,
+      isOnline: isOnline,
+      verificationStatus: verificationStatus ?? this.verificationStatus,
+      vehicleName: vehicleName,
+      plateNumber: plateNumber,
+      tripCount: tripCount,
+      completedTripCount: completedTripCount,
+      grossEarnings: grossEarnings,
+      netEarnings: netEarnings,
+      walletBalance: walletBalance,
+      totalWithdrawn: totalWithdrawn,
+      pendingWithdrawals: pendingWithdrawals,
+      monetizationModel: monetizationModel,
+      subscriptionPlanType: subscriptionPlanType,
+      subscriptionStatus: subscriptionStatus,
+      subscriptionActive: subscriptionActive,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      serviceTypes: serviceTypes,
+      rawData: rawData ?? this.rawData,
+    );
+  }
+}
+
+/// One page of drivers from [adminListDriversPage] (or a legacy single-shot fetch).
+class AdminDriversPageResult {
+  const AdminDriversPageResult({
+    required this.drivers,
+    required this.nextCursor,
+    required this.hasMore,
+  });
+
+  final List<AdminDriverRecord> drivers;
+  final String? nextCursor;
+  final bool hasMore;
+}
+
+/// Optional filters for paginated admin list HTTPS callables (drivers, riders, …).
+@immutable
+class AdminListQuery {
+  const AdminListQuery({
+    this.search = '',
+    this.city = '',
+    this.stateOrRegion = '',
+    this.status = '',
+    this.verificationStatus = '',
+    this.createdFromMs = 0,
+    this.createdToMs = 0,
+    this.monetizationModel = '',
+    this.profileCompleteness = '',
+  });
+
+  final String search;
+  final String city;
+  final String stateOrRegion;
+  final String status;
+  final String verificationStatus;
+  final int createdFromMs;
+  final int createdToMs;
+  final String monetizationModel;
+  /// Callable `profileCompleteness`: `completed` | `incomplete` | `all` (empty = server default).
+  final String profileCompleteness;
+
+  Map<String, dynamic> toCallablePayload() {
+    final Map<String, dynamic> payload = <String, dynamic>{};
+
+    if (search.trim().isNotEmpty) {
+      payload['search'] = search.trim();
+    }
+    if (city.trim().isNotEmpty && city.trim().toLowerCase() != 'all') {
+      payload['city'] = city.trim();
+    }
+    if (stateOrRegion.trim().isNotEmpty &&
+        stateOrRegion.trim().toLowerCase() != 'all') {
+      payload['stateOrRegion'] = stateOrRegion.trim();
+    }
+    if (status.trim().isNotEmpty && status.trim().toLowerCase() != 'all') {
+      payload['status'] = status.trim();
+    }
+    if (verificationStatus.trim().isNotEmpty &&
+        verificationStatus.trim().toLowerCase() != 'all') {
+      payload['verificationStatus'] = verificationStatus.trim();
+    }
+    if (monetizationModel.trim().isNotEmpty &&
+        monetizationModel.trim().toLowerCase() != 'all') {
+      payload['monetizationModel'] = monetizationModel.trim();
+    }
+    if (createdFromMs > 0) {
+      payload['createdFrom'] = createdFromMs;
+    }
+    if (createdToMs > 0) {
+      payload['createdTo'] = createdToMs;
+    }
+    final String pc = profileCompleteness.trim().toLowerCase();
+    if (pc.isNotEmpty) {
+      payload['profileCompleteness'] = pc;
+    }
+
+    return payload;
+  }
+}
+
+class AdminRidersPageResult {
+  const AdminRidersPageResult({
+    required this.riders,
+    required this.nextCursor,
+    required this.hasMore,
+  });
+
+  final List<AdminRiderRecord> riders;
+  final String? nextCursor;
+  final bool hasMore;
 }
 
 class AdminTripRecord {
@@ -254,12 +394,63 @@ class AdminTripRecord {
   final DateTime? cancelledAt;
   final Map<String, dynamic> routeLog;
   final Map<String, dynamic> rawData;
+
+  /// Built from [adminListTripsPage] slim row (no route logs / polylines).
+  factory AdminTripRecord.fromAdminTripsPageRow(
+    String id,
+    Map<String, dynamic> m,
+  ) {
+    DateTime? fromMs(dynamic v) {
+      if (v is! num || v <= 0) return null;
+      return DateTime.fromMillisecondsSinceEpoch(v.toInt());
+    }
+
+    String s(dynamic v) => v == null ? '' : v.toString().trim();
+
+    return AdminTripRecord(
+      id: id,
+      source: 'ride_request',
+      status: () {
+        final st = s(m['status']);
+        return st.isNotEmpty ? st : s(m['trip_state']);
+      }(),
+      city: s(m['city']),
+      serviceType: s(m['service_type']),
+      riderId: s(m['rider_id']),
+      riderName: s(m['rider_name']),
+      riderPhone: '',
+      driverId: s(m['driver_id']),
+      driverName: s(m['driver_name']),
+      driverPhone: '',
+      pickupAddress: s(m['pickup_hint']),
+      destinationAddress: s(m['dropoff_hint']),
+      paymentMethod: '',
+      fareAmount: (m['fare'] as num?)?.toDouble() ?? 0,
+      distanceKm: 0,
+      durationMinutes: 0,
+      commissionAmount: 0,
+      driverPayout: 0,
+      appliedMonetizationModel: '',
+      settlementStatus: '',
+      cancellationReason: '',
+      createdAt: fromMs(m['created_at']),
+      acceptedAt: null,
+      arrivedAt: null,
+      startedAt: null,
+      completedAt: null,
+      cancelledAt: null,
+      routeLog: const <String, dynamic>{},
+      rawData: Map<String, dynamic>.from(m),
+    );
+  }
 }
 
 class AdminWithdrawalRecord {
   const AdminWithdrawalRecord({
     required this.id,
+    required this.entityType,
     required this.driverId,
+    required this.merchantId,
     required this.driverName,
     required this.amount,
     required this.status,
@@ -268,6 +459,7 @@ class AdminWithdrawalRecord {
     required this.bankName,
     required this.accountName,
     required this.accountNumber,
+    required this.hasPayoutDestination,
     required this.payoutReference,
     required this.notes,
     required this.sourcePaths,
@@ -275,7 +467,10 @@ class AdminWithdrawalRecord {
   });
 
   final String id;
+  /// `driver` or `merchant` (withdraw_requests.entity_type).
+  final String entityType;
   final String driverId;
+  final String merchantId;
   final String driverName;
   final double amount;
   final String status;
@@ -284,10 +479,111 @@ class AdminWithdrawalRecord {
   final String bankName;
   final String accountName;
   final String accountNumber;
+  /// False when payout bank fields are missing on the withdrawal row (driver).
+  final bool hasPayoutDestination;
   final String payoutReference;
   final String notes;
   final List<String> sourcePaths;
   final Map<String, dynamic> rawData;
+
+  factory AdminWithdrawalRecord.fromAdminListPageEntry(
+    String id,
+    Map<String, dynamic> raw,
+  ) {
+    DateTime? fromMs(dynamic v) {
+      if (v is! num || v <= 0) return null;
+      return DateTime.fromMillisecondsSinceEpoch(v.toInt());
+    }
+
+    final String entity =
+        (raw['entity_type']?.toString() ?? raw['entityType']?.toString() ?? 'driver')
+            .trim()
+            .toLowerCase();
+    final String bank = (raw['bank_name']?.toString() ?? '').trim();
+    final String acct = (raw['account_number']?.toString() ?? '').trim();
+    final String holder = (raw['account_holder_name']?.toString() ?? '').trim();
+    final bool hasDest = raw['has_destination'] == true ||
+        (bank.isNotEmpty && acct.isNotEmpty && holder.isNotEmpty);
+
+    return AdminWithdrawalRecord(
+      id: id,
+      entityType: entity.isEmpty ? 'driver' : entity,
+      driverId: raw['driver_id']?.toString() ?? '',
+      merchantId: raw['merchant_id']?.toString() ?? '',
+      driverName: raw['driver_name']?.toString() ?? '',
+      amount: (raw['amount'] as num?)?.toDouble() ?? 0,
+      status: (raw['status']?.toString() ?? 'pending').toLowerCase(),
+      requestDate: fromMs(raw['requestedAt'] ?? raw['requested_at']),
+      processedDate: fromMs(raw['updated_at'] ?? raw['updatedAt']),
+      bankName: bank,
+      accountName: holder,
+      accountNumber: acct,
+      hasPayoutDestination: entity == 'merchant' ? true : hasDest,
+      payoutReference: '',
+      notes: '',
+      sourcePaths: const <String>[],
+      rawData: Map<String, dynamic>.from(raw),
+    );
+  }
+}
+
+class AdminWithdrawalsPageResult {
+  const AdminWithdrawalsPageResult({
+    required this.withdrawals,
+    required this.nextCursor,
+    required this.hasMore,
+  });
+
+  final List<AdminWithdrawalRecord> withdrawals;
+  final String? nextCursor;
+  final bool hasMore;
+}
+
+/// Slim row from [adminListSupportTicketsPage].
+class AdminSupportTicketListItem {
+  const AdminSupportTicketListItem({
+    required this.id,
+    required this.status,
+    required this.subject,
+    required this.rideId,
+    required this.createdByUserId,
+    required this.updatedAtMs,
+    required this.createdAtMs,
+    required this.raw,
+  });
+
+  final String id;
+  final String status;
+  final String subject;
+  final String rideId;
+  final String createdByUserId;
+  final int updatedAtMs;
+  final int createdAtMs;
+  final Map<String, dynamic> raw;
+}
+
+class AdminSupportTicketsPageResult {
+  const AdminSupportTicketsPageResult({
+    required this.tickets,
+    required this.nextCursor,
+    required this.hasMore,
+  });
+
+  final List<AdminSupportTicketListItem> tickets;
+  final String? nextCursor;
+  final bool hasMore;
+}
+
+class AdminTripsPageResult {
+  const AdminTripsPageResult({
+    required this.trips,
+    required this.nextCursor,
+    required this.hasMore,
+  });
+
+  final List<AdminTripRecord> trips;
+  final String? nextCursor;
+  final bool hasMore;
 }
 
 class AdminSubscriptionRecord {
@@ -447,6 +743,12 @@ class AdminOperationalSettings {
   final Map<String, dynamic> rawData;
 }
 
+/// **Legacy monolith** — aggregates dashboard lists, pricing, subscriptions, and
+/// settings in one object for compatibility while admin sections migrate off
+/// [AdminDataService.fetchSnapshot].
+///
+/// **Do not add new fields or new snapshot consumers.** Prefer narrow DTOs per
+/// section (see `lib/admin/docs/SNAPSHOT_MIGRATION.md` and Phase 2B split plan).
 class AdminPanelSnapshot {
   const AdminPanelSnapshot({
     required this.fetchedAt,
@@ -493,6 +795,35 @@ class AdminPanelSnapshot {
   final List<AdminRevenueSlice> monthlyFinance;
   final List<AdminRevenueSlice> cityFinance;
   final Map<String, bool> liveDataSections;
+
+  AdminPanelSnapshot copyWith({
+    List<AdminDriverRecord>? drivers,
+    List<AdminRiderRecord>? riders,
+  }) {
+    return AdminPanelSnapshot(
+      fetchedAt: fetchedAt,
+      metrics: metrics,
+      riders: riders ?? this.riders,
+      drivers: drivers ?? this.drivers,
+      trips: trips,
+      withdrawals: withdrawals,
+      subscriptions: subscriptions,
+      verificationCases: verificationCases,
+      supportIssues: supportIssues,
+      pricingConfig: pricingConfig,
+      settings: settings,
+      tripTrends: tripTrends,
+      revenueTrends: revenueTrends,
+      cityPerformance: cityPerformance,
+      driverGrowth: driverGrowth,
+      adoptionBreakdown: adoptionBreakdown,
+      dailyFinance: dailyFinance,
+      weeklyFinance: weeklyFinance,
+      monthlyFinance: monthlyFinance,
+      cityFinance: cityFinance,
+      liveDataSections: liveDataSections,
+    );
+  }
 }
 
 @immutable
@@ -503,6 +834,8 @@ class AdminSession {
     required this.displayName,
     required this.accessMode,
     this.mustChangePassword = false,
+    this.adminRole = 'super_admin',
+    this.permissions = const <String>{},
   });
 
   final String uid;
@@ -515,13 +848,27 @@ class AdminSession {
   /// this to force-redirect the operator to the change-password screen.
   final bool mustChangePassword;
 
-  AdminSession copyWith({bool? mustChangePassword}) {
+  /// Resolved NexRide admin role (`super_admin`, `finance_admin`, …).
+  final String adminRole;
+
+  /// Client-side mirror of backend permissions for UI gating only.
+  final Set<String> permissions;
+
+  bool hasPermission(String permission) => permissions.contains(permission);
+
+  AdminSession copyWith({
+    bool? mustChangePassword,
+    String? adminRole,
+    Set<String>? permissions,
+  }) {
     return AdminSession(
       uid: uid,
       email: email,
       displayName: displayName,
       accessMode: accessMode,
       mustChangePassword: mustChangePassword ?? this.mustChangePassword,
+      adminRole: adminRole ?? this.adminRole,
+      permissions: permissions ?? this.permissions,
     );
   }
 }

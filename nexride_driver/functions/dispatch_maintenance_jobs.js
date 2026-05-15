@@ -10,6 +10,7 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const admin = require("firebase-admin");
 const { REGION } = require("./params");
+const { sweepOrphanRideLifecyclePointers } = require("./ride_pointer_orphans");
 
 const STALE_OFFER_GRACE_MS = 5 * 60 * 1000; // 5 min past expires_at
 const ABANDONED_RIDE_GRACE_MS = 10 * 60 * 1000; // 10 min past ride expires_at
@@ -156,10 +157,16 @@ exports.sweepDispatchHealth = onSchedule(
     } catch (e) {
       console.log("DISPATCH_SWEEP_ABANDONED_RIDES_FAIL", String(e?.message || e));
     }
+    try {
+      await sweepOrphanRideLifecyclePointers(db);
+    } catch (e) {
+      console.log("DISPATCH_SWEEP_RIDE_POINTER_ORPHANS_FAIL", String(e?.message || e));
+    }
   },
 );
 
 module.exports = {
   sweepStaleDriverOfferQueue,
   expireAbandonedRidesInPool,
+  sweepOrphanRideLifecyclePointers,
 };

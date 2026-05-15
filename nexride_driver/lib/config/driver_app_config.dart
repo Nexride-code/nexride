@@ -5,10 +5,14 @@ class DriverFeatureFlags {
   /// is required before GO ONLINE. Admins can set approval in the Firebase console.
   static const bool driverKycGateEnabled = true;
 
-  /// Phase 1: car rides only (no dispatch / mart / food offers).
+  /// Live requests drivers can receive: rides, dispatch/delivery, and **merchant
+  /// orders** (modelled as `groceries_mart` + `restaurants_food` — there is no
+  /// separate `merchant_orders` service key in dispatch).
   static const Set<String> activeRequestServiceTypes = <String>{
     'ride',
     'dispatch_delivery',
+    'groceries_mart',
+    'restaurants_food',
   };
 
   static bool serviceCanReceiveRequestsWithoutVerification(String serviceType) {

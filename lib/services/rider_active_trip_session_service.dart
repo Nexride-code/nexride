@@ -45,8 +45,9 @@ class RiderActiveTripSessionService {
   StreamSubscription<rtdb.DatabaseEvent>? _rideSubscription;
   String? _attachedRideId;
   bool _isRestoring = false;
-  // Dev/test recovery: ignore stale open-pool rides so rider can create a new request.
   static const Duration _staleSearchingRestoreTimeout = Duration(minutes: 3);
+  // A driver-assigned ride that hasn't progressed to arriving/on_trip in 30 min is stale.
+  static const Duration _staleAssignedTimeout = Duration(minutes: 30);
 
   static const Set<String> _activeStatuses = <String>{
     'requested',
@@ -154,6 +155,14 @@ class RiderActiveTripSessionService {
             '[RIDER_ACTIVE_TRIP_RESTORE] source=$source '
             'rideId=${rawId?.toString() ?? ''} '
             'status=$status action=ignore_stale_searching',
+          );
+          return;
+        }
+        if (_isStaleAssignedRideForRecovery(status: status, rideData: rideData)) {
+          debugPrint(
+            '[RIDER_ACTIVE_TRIP_RESTORE] source=$source '
+            'rideId=${rawId?.toString() ?? ''} '
+            'status=$status action=ignore_stale_assigned',
           );
           return;
         }
@@ -265,6 +274,20 @@ class RiderActiveTripSessionService {
   }) {
     final status = _canonicalRiderUiStatus(rideData);
     final tripState = _readText(rideData['trip_state']);
+    // Suppress stale assigned/accepted rides — driver was assigned but never
+    // progressed to arriving/on_trip within the expected window.
+    if (_isStaleAssignedRideForRecovery(status: status, rideData: rideData)) {
+      debugPrint(
+        '[RIDER_ACTIVE_TRIP_UPDATE] source=$source rideId=$rideId status=$status '
+        'action=suppress_stale_assigned',
+      );
+      clearSession(
+        reason: 'stale_assigned_suppressed',
+        source: source,
+        cancelListener: false,
+      );
+      return;
+    }
     if (_terminalStatuses.contains(status)) {
       if (_readText(rideData['cancel_reason']) == 'driver_cancelled') {
         debugPrint(
@@ -346,5 +369,36 @@ class RiderActiveTripSessionService {
       return false;
     }
     return now - updatedAt > _staleSearchingRestoreTimeout.inMilliseconds;
+  }
+
+  /// A driver-assigned ride is stale when it has been in accepted/assigned state
+  /// for longer than [_staleAssignedTimeout] without progressing to arriving or on_trip.
+  static bool _isStaleAssignedRideForRecovery({
+    required String status,
+    required Map<String, dynamic> rideData,
+  }) {
+    const assignedStatuses = <String>{
+      'accepted',
+      'assigned',
+      'pending_driver_action',
+    };
+    if (!assignedStatuses.contains(status)) {
+      return false;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // Prefer accepted_at; fall back to updated_at / created_at.
+    int ts = 0;
+    for (final key in <String>['accepted_at', 'updated_at', 'created_at']) {
+      final v = rideData[key];
+      final parsed = v is num ? v.toInt() : int.tryParse(v?.toString() ?? '');
+      if (parsed != null && parsed > 0) {
+        ts = parsed;
+        break;
+      }
+    }
+    if (ts <= 0) {
+      return false;
+    }
+    return now - ts > _staleAssignedTimeout.inMilliseconds;
   }
 }

@@ -249,17 +249,37 @@ function DriversPage() {
 }
 
 function RidersPage() {
-  const call = useCall<object, { success?: boolean; riders?: unknown[]; reason?: string }>("adminListRiders");
+  const call = useCall<object, { success?: boolean; riders?: unknown; reason?: string }>("adminListRidersPage");
   const [rows, setRows] = useState<unknown[]>([]);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     let c = false;
     (async () => {
+      const callableName = "adminListRidersPage";
+      const payload = { limit: 200, cursor: "" };
       try {
-        const a = await call({});
+        const a = await call(payload);
         if (c) return;
-        if (!a.success) setErr(a.reason || "failed");
-        else setRows(a.riders || []);
+        console.debug("[AdminRidersDebug]", { callable: callableName, request: payload, raw: a });
+        const ok = a.success === true || a.success === 1;
+        if (!ok) {
+          setErr(a.reason || "failed");
+          setRows([]);
+          console.debug("[AdminRidersDebug] callable not ok", { reason: a.reason });
+          return;
+        }
+        const raw = a.riders as unknown;
+        const normalized = Array.isArray(raw)
+          ? raw
+          : raw && typeof raw === "object"
+            ? Object.entries(raw as Record<string, unknown>).map(([uid, row]) => ({
+                uid,
+                ...(typeof row === "object" && row !== null ? (row as Record<string, unknown>) : {}),
+              }))
+            : [];
+        console.debug("[AdminRidersDebug] parsed riders", { count: normalized.length, normalized });
+        setErr(null);
+        setRows(normalized);
       } catch (e) {
         if (!c) setErr(e instanceof Error ? e.message : "failed");
       }

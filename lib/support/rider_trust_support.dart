@@ -628,6 +628,75 @@ Map<String, dynamic> buildRiderProfileDefaults({
   };
 }
 
+/// True when Firestore `users/{uid}.verificationStatus` reflects admin clearance.
+bool riderFirestoreIdentityIsApproved(String? verificationStatus) {
+  final s = (verificationStatus ?? '').trim().toLowerCase();
+  return s == 'approved' ||
+      s == 'verified' ||
+      s == 'cleared' ||
+      s == 'complete' ||
+      s == 'completed';
+}
+
+/// Merges admin Firestore identity status into RTDB-shaped verification maps so
+/// profile / verification screens show green "Approved" after admin review.
+Map<String, dynamic> applyAdminFirestoreVerificationToRiderDisplayMap({
+  required Map<String, dynamic> verification,
+  String? firestoreVerificationStatus,
+}) {
+  if (!riderFirestoreIdentityIsApproved(firestoreVerificationStatus)) {
+    return verification;
+  }
+  final out = Map<String, dynamic>.from(verification);
+  out['overallStatus'] = 'verified';
+  out['status'] = 'verified';
+  out['verifiedBadgeEligible'] = true;
+  out['badgeLabel'] = 'Verified rider';
+  out['result'] = 'approved';
+
+  final docsRaw = out['documents'];
+  if (docsRaw is Map) {
+    final docs = <String, dynamic>{};
+    for (final MapEntry<dynamic, dynamic> e in docsRaw.entries) {
+      final key = e.key.toString();
+      final v = e.value;
+      if (v is Map) {
+        final row = Map<String, dynamic>.from(
+          v.map((dynamic k, dynamic val) => MapEntry(k.toString(), val)),
+        );
+        row['status'] = 'verified';
+        row['result'] = 'verified';
+        docs[key] = row;
+      } else {
+        docs[key] = v;
+      }
+    }
+    out['documents'] = docs;
+  }
+
+  final checksRaw = out['checks'];
+  if (checksRaw is Map) {
+    final checks = <String, dynamic>{};
+    for (final MapEntry<dynamic, dynamic> e in checksRaw.entries) {
+      final key = e.key.toString();
+      final v = e.value;
+      if (v is Map) {
+        final row = Map<String, dynamic>.from(
+          v.map((dynamic k, dynamic val) => MapEntry(k.toString(), val)),
+        );
+        row['status'] = 'verified';
+        row['result'] = 'verified';
+        checks[key] = row;
+      } else {
+        checks[key] = v;
+      }
+    }
+    out['checks'] = checks;
+  }
+
+  return out;
+}
+
 double riderVerificationProgressValue(Map<String, dynamic> verification) {
   final normalized = buildRiderVerificationDefaults(verification);
   final overallStatus = _normalizeRiderVerificationStatus(

@@ -31,7 +31,14 @@
     },
 
     "drivers": {
-      ".indexOn": ["dispatch_market", "market_pool", "market", "city"],
+      ".indexOn": [
+        "dispatch_market",
+        "market_pool",
+        "market",
+        "city",
+        "subscription_pending",
+        "subscription_status"
+      ],
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
         ".write": "auth != null && auth.uid === $uid"
@@ -138,6 +145,10 @@
     },
 
     "app_config": {
+      "nexride_official_bank_account": {
+        ".read": false,
+        ".write": false
+      },
       "rider_trust_rules": {
         ".read": "auth != null",
         ".write": "auth != null && root.child('users/' + auth.uid + '/role').val() === 'admin'"
@@ -230,13 +241,17 @@
     "ride_requests": {
       ".indexOn": [
         "rider_id",
+        "riderId",
         "driver_id",
+        "driverId",
         "matched_driver_id",
+        "matchedDriverId",
         "status",
         "trip_state",
-        "updated_at"
+        "updated_at",
+        "payment_status"
       ],
-      ".read": "auth != null && ((query.orderByChild == 'rider_id' && query.equalTo == auth.uid) || (query.orderByChild == 'driver_id' && query.equalTo == auth.uid) || (query.orderByChild == 'matched_driver_id' && query.equalTo == auth.uid))",
+      ".read": "auth != null && ((query.orderByChild == 'rider_id' && query.equalTo == auth.uid) || (query.orderByChild == 'riderId' && query.equalTo == auth.uid) || (query.orderByChild == 'driver_id' && query.equalTo == auth.uid) || (query.orderByChild == 'driverId' && query.equalTo == auth.uid) || (query.orderByChild == 'matched_driver_id' && query.equalTo == auth.uid) || (query.orderByChild == 'matchedDriverId' && query.equalTo == auth.uid))",
       "$rideId": {
         ".read": "auth != null && ((data.child('rider_id').val() === auth.uid) || (data.child('riderId').val() === auth.uid) || (data.child('driver_id').val() === auth.uid) || (data.child('driverId').val() === auth.uid) || (data.child('matched_driver_id').val() === auth.uid) || (data.child('matchedDriverId').val() === auth.uid))",
         ".write": false
@@ -351,6 +366,34 @@
       }
     },
 
+    "trip_settlement_hooks": {
+      ".indexOn": ["driver_id", "driverId", "updated_at", "updatedAt"],
+      "$hookId": {
+        ".read": "auth != null && ((data.child('driver_id').val() === auth.uid) || (data.child('driverId').val() === auth.uid) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))",
+        ".write": false
+      }
+    },
+    "driver_trips": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "rider_trips": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "support_logs": {
+      "$ticketId": {
+        "$logId": {
+          ".read": "auth != null && ((root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))",
+          ".write": false
+        }
+      }
+    },
+
     "support_queue": {
       "$rideId": {
         ".read": "auth != null && ((root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (data.child('rider_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid))",
@@ -376,6 +419,33 @@
         "$messageId": {
           ".read": "auth != null && ((root.child('support_tickets/' + $ticketId + '/createdByUserId').val() === auth.uid) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))",
           ".write": "auth != null && ((root.child('support_tickets/' + $ticketId + '/createdByUserId').val() === auth.uid) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))"
+        }
+      }
+    },
+
+    "admin_audit_logs": {
+      ".read": false,
+      ".write": false,
+      ".indexOn": ["driver_id", "created_at"]
+    },
+    "verification_audits": {
+      ".read": false,
+      ".write": false,
+      ".indexOn": ["driverId", "driver_id", "createdAt", "created_at"]
+    },
+
+    "merchant_public_teaser": {
+      "$merchantId": {
+        ".read": "auth != null",
+        ".write": false
+      }
+    },
+
+    "merchant_portal_presence": {
+      "$merchantId": {
+        "$sessionKey": {
+          ".read": "auth != null && ((auth.token.admin === true) || (auth.token.super_admin === true) || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin'))",
+          ".write": false
         }
       }
     }

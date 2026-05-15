@@ -9,6 +9,7 @@ import '../portal_security/portal_account_security_screen.dart';
 import '../portal_security/portal_change_password_screen.dart';
 import 'admin_config.dart';
 import 'screens/admin_gate_screen.dart';
+import 'screens/admin_login_screen.dart';
 import 'services/admin_auth_service.dart';
 import 'services/admin_data_service.dart';
 import 'widgets/admin_components.dart';
@@ -141,15 +142,12 @@ class AdminApp extends StatelessWidget {
         if (resolvedRoute == AdminPortalRoutePaths.login) {
           return _buildAdminRoute(
             routeName: resolvedRoute,
-            child: AdminGateScreen(
-              mode: AdminGateMode.login,
+            arguments: settings.arguments,
+            child: AdminLoginScreen(
               authService: authService,
-              dataService: dataService,
-              inlineMessage: settings.arguments?.toString(),
-              loginRoute: AdminPortalRoutePaths.login,
+              inlineMessage: adminLoginBannerFromArguments(settings.arguments),
               dashboardRoute: AdminPortalRoutePaths.dashboard,
-              routeForSection: AdminPortalRoutePaths.pathForSection,
-              enableRealtimeBadgeListeners: enableRealtimeBadgeListeners,
+              changePasswordRoute: AdminPortalRoutePaths.changePassword,
             ),
           );
         }
@@ -157,6 +155,7 @@ class AdminApp extends StatelessWidget {
         if (resolvedRoute == AdminPortalRoutePaths.changePassword) {
           return _buildAdminRoute(
             routeName: resolvedRoute,
+            arguments: settings.arguments,
             child: const PortalChangePasswordScreen(
               theme: AdminThemeTokens.portalSecurityTheme,
               loginRoute: AdminPortalRoutePaths.login,
@@ -168,6 +167,7 @@ class AdminApp extends StatelessWidget {
         if (resolvedRoute == AdminPortalRoutePaths.accountSecurity) {
           return _buildAdminRoute(
             routeName: resolvedRoute,
+            arguments: settings.arguments,
             child: const PortalAccountSecurityScreen(
               theme: AdminThemeTokens.portalSecurityTheme,
               changePasswordRoute: AdminPortalRoutePaths.changePassword,
@@ -178,14 +178,18 @@ class AdminApp extends StatelessWidget {
 
         if (resolvedRoute == AdminPortalRoutePaths.root ||
             AdminPortalRoutePaths.isProtectedRoute(resolvedRoute)) {
+          final Uri routeUri = kIsWeb ? Uri.base : startupUri;
+          final AdminDriverDeepLink? driverLink =
+              AdminPortalRoutePaths.parseDriverDeepLinkUri(routeUri);
           return _buildAdminRoute(
             routeName: resolvedRoute,
+            arguments: settings.arguments,
             child: AdminGateScreen(
-              mode: AdminGateMode.dashboard,
               authService: authService,
               dataService: dataService,
               initialSection:
                   AdminPortalRoutePaths.sectionForPath(resolvedRoute),
+              initialDriverDeepLink: driverLink,
               loginRoute: AdminPortalRoutePaths.login,
               dashboardRoute: AdminPortalRoutePaths.dashboard,
               routeForSection: AdminPortalRoutePaths.pathForSection,
@@ -196,27 +200,23 @@ class AdminApp extends StatelessWidget {
 
         return _buildAdminRoute(
           routeName: AdminPortalRoutePaths.login,
-          child: AdminGateScreen(
-            mode: AdminGateMode.login,
+          arguments: settings.arguments,
+          child: AdminLoginScreen(
             authService: authService,
-            dataService: dataService,
-            loginRoute: AdminPortalRoutePaths.login,
+            inlineMessage: adminLoginBannerFromArguments(settings.arguments),
             dashboardRoute: AdminPortalRoutePaths.dashboard,
-            routeForSection: AdminPortalRoutePaths.pathForSection,
-            enableRealtimeBadgeListeners: enableRealtimeBadgeListeners,
+            changePasswordRoute: AdminPortalRoutePaths.changePassword,
           ),
         );
       },
       onUnknownRoute: (RouteSettings settings) => _buildAdminRoute(
         routeName: AdminPortalRoutePaths.login,
-        child: AdminGateScreen(
-          mode: AdminGateMode.login,
+        arguments: settings.arguments,
+        child: AdminLoginScreen(
           authService: authService,
-          dataService: dataService,
-          loginRoute: AdminPortalRoutePaths.login,
+          inlineMessage: adminLoginBannerFromArguments(settings.arguments),
           dashboardRoute: AdminPortalRoutePaths.dashboard,
-          routeForSection: AdminPortalRoutePaths.pathForSection,
-          enableRealtimeBadgeListeners: enableRealtimeBadgeListeners,
+          changePasswordRoute: AdminPortalRoutePaths.changePassword,
         ),
       ),
     );
@@ -225,6 +225,7 @@ class AdminApp extends StatelessWidget {
   MaterialPageRoute<void> _buildAdminRoute({
     required String routeName,
     required Widget child,
+    Object? arguments,
   }) {
     return MaterialPageRoute<void>(
       builder: (_) => _AdminBootstrapRoute(
@@ -232,7 +233,7 @@ class AdminApp extends StatelessWidget {
         routeName: routeName,
         child: child,
       ),
-      settings: RouteSettings(name: routeName),
+      settings: RouteSettings(name: routeName, arguments: arguments),
     );
   }
 }
@@ -246,8 +247,16 @@ String _resolveAdminRoute(
     requestedRoute ?? AdminPortalRoutePaths.login,
   );
 
+  if (requestedRoute != null &&
+      normalizedRequested == AdminPortalRoutePaths.login) {
+    return AdminPortalRoutePaths.login;
+  }
+
+  // Do NOT treat [AdminPortalRoutePaths.root] (same string as [dashboard])
+  // as "prefer browser URL" — after sign-in we pushReplacementNamed(dashboard)
+  // while the address bar can still be /admin/login; preferring the path would
+  // resolve back to /login and trap the gate on "Opening NexRide control center".
   final shouldPreferStartupUri = requestedRoute == null ||
-      normalizedRequested == AdminPortalRoutePaths.root ||
       normalizedRequested == AdminPortalRoutePaths.login;
 
   if (!shouldPreferStartupUri) {

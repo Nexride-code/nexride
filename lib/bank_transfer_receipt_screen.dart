@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import 'services/rider_ride_cloud_functions_service.dart';
+import 'services/nexride_official_bank_account_service.dart';
 import 'support/friendly_firebase_errors.dart';
 
 /// Mandatory bank-transfer receipt capture after trip completion.
@@ -40,6 +41,8 @@ class _BankTransferReceiptScreenState extends State<BankTransferReceiptScreen> {
   String? _pickedPath;
   String? _error;
   String _resolvedBankTransferReference = '';
+  NexrideOfficialBankAccount? _officialBank;
+  bool _officialBankLoaded = false;
 
   Future<void> _copyReference() async {
     final reference = _resolvedBankTransferReference.trim();
@@ -57,6 +60,23 @@ class _BankTransferReceiptScreenState extends State<BankTransferReceiptScreen> {
     _resolvedBankTransferReference = widget.bankTransferReference.trim();
     if (_resolvedBankTransferReference.isEmpty) {
       unawaited(_loadBankReferenceFromRide());
+    }
+    unawaited(_loadOfficialBank());
+  }
+
+  Future<void> _loadOfficialBank() async {
+    try {
+      final b = await NexrideOfficialBankAccountService.instance.fetch();
+      if (!mounted) return;
+      setState(() {
+        _officialBank = b;
+        _officialBankLoaded = true;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _officialBankLoaded = true;
+      });
     }
   }
 
@@ -82,6 +102,27 @@ class _BankTransferReceiptScreenState extends State<BankTransferReceiptScreen> {
         _resolvedBankTransferReference = ref;
       });
     } catch (_) {}
+  }
+
+  String _bankInstructionsText() {
+    final ref = _resolvedBankTransferReference;
+    if (!_officialBankLoaded) {
+      return 'Bank: loading…\n'
+          'Account details: loading…\n'
+          'Reference: $ref (include this exactly in your narration)\n'
+          'Upload your payment proof after the trip to complete your booking.';
+    }
+    final ob = _officialBank;
+    if (ob == null) {
+      return 'Official bank details could not be loaded. Contact support@nexride.africa.\n'
+          'Reference: $ref (include this exactly in your narration)\n'
+          'Upload your payment proof after the trip to complete your booking.';
+    }
+    return 'Bank: ${ob.bankName}\n'
+        'Account Name: ${ob.accountName}\n'
+        'Account Number: ${ob.accountNumber}\n'
+        'Reference: $ref (include this exactly in your narration)\n'
+        'Upload your payment proof after the trip to complete your booking.';
   }
 
   Future<void> _pick(ImageSource source) async {
@@ -234,11 +275,7 @@ class _BankTransferReceiptScreenState extends State<BankTransferReceiptScreen> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Bank: UNITED BANK OF AFRICA\n'
-                          'Account Name: NEXRIDE DYNAMIC JOURNEY LTD\n'
-                          'Account Number: 1029983699\n'
-                          'Reference: $_resolvedBankTransferReference (include this exactly in your narration)\n'
-                          'Upload your payment proof after the trip to complete your booking.',
+                          _bankInstructionsText(),
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: const Color(0xFF6B5A2B),
                             height: 1.35,

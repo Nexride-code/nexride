@@ -80,6 +80,11 @@ async function supportCreateTicket(data, context, db) {
   const subject = String(data?.subject ?? "").trim().slice(0, 200);
   const body = String(data?.body ?? data?.message ?? "").trim().slice(0, 8000);
   const rideId = normUid(data?.rideId ?? data?.ride_id);
+  const merchantId = normUid(data?.merchantId ?? data?.merchant_id);
+  const merchantOrderId = String(data?.merchant_order_id ?? data?.merchantOrderId ?? "")
+    .trim()
+    .slice(0, 128);
+  const deliveryId = normUid(data?.deliveryId ?? data?.delivery_id);
   if (subject.length < 4) {
     return { success: false, reason: "invalid_subject" };
   }
@@ -89,11 +94,16 @@ async function supportCreateTicket(data, context, db) {
   if (!ticketId) {
     return { success: false, reason: "ticket_id_failed" };
   }
+  const userType = String(data?.userType ?? data?.user_type ?? "").trim().slice(0, 32) || null;
   await ticketRef.set({
     createdByUserId: uid,
     subject,
     status: "open",
     ride_id: rideId || null,
+    merchant_id: merchantId || null,
+    merchant_order_id: merchantOrderId || null,
+    delivery_id: deliveryId || null,
+    user_type: userType,
     createdAt: now,
     created_at: now,
     updatedAt: now,
@@ -136,7 +146,96 @@ async function supportGetTicket(data, context, db) {
   if (owner !== uid && !staff) {
     return { success: false, reason: "forbidden" };
   }
-  return { success: true, ticket: row, ticketId };
+  let messages = [];
+  try {
+    const allSnap = await db.ref("support_ticket_messages").orderByKey().limitToLast(250).get();
+    const val = allSnap.val() && typeof allSnap.val() === "object" ? allSnap.val() : {};
+    messages = Object.entries(val)
+      .map(([id, m]) => ({ id, ...(typeof m === "object" && m ? m : {}) }))
+      .filter((m) => normUid(m.ticketId) === ticketId)
+      .sort((a, b) => (Number(a.createdAt ?? a.created_at ?? 0) || 0) - (Number(b.createdAt ?? b.created_at ?? 0) || 0));
+  } catch (e) {
+    logger.warn("supportGetTicket messages load failed", { ticketId, err: String(e?.message || e) });
+    messages = [];
+  }
+  return { success: true, ticket: row, ticketId, messages };
+}
+
+/**
+ * Merchant / end-user: list tickets created by the signed-in account (no support_staff role).
+ */
+async function merchantListMySupportTickets(_data, context, db) {
+  if (!context.auth?.uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const uid = normUid(context.auth.uid);
+  let snap;
+  try {
+    snap = await db.ref("support_tickets").orderByKey().limitToLast(500).get();
+  } catch (e) {
+    logger.warn("merchantListMySupportTickets query failed", { err: String(e?.message || e) });
+    return { success: false, reason: "query_failed" };
+  }
+  const val = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
+  const tickets = Object.entries(val)
+    .map(([id, t]) => ({
+      id,
+      status: t?.status ?? null,
+      subject: String(t?.subject ?? "").slice(0, 200) || null,
+      merchant_id: t?.merchant_id ?? null,
+      merchant_order_id: t?.merchant_order_id ?? null,
+      createdAt: Number(t?.createdAt ?? t?.created_at ?? 0) || 0,
+      updatedAt: Number(t?.updatedAt ?? t?.updated_at ?? 0) || 0,
+      createdByUserId: normUid(t?.createdByUserId),
+      user_type: t?.user_type ?? null,
+    }))
+    .filter((row) => row.createdByUserId === uid)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return { success: true, tickets };
+}
+
+/**
+ * Ticket owner: append a follow-up message (merchant app / riders / drivers).
+ */
+async function merchantAppendSupportTicketMessage(data, context, db) {
+  if (!context.auth?.uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const uid = normUid(context.auth.uid);
+  const ticketId = normUid(data?.ticketId ?? data?.ticket_id);
+  const body = String(data?.body ?? data?.message ?? "").trim().slice(0, 8000);
+  if (!ticketId || body.length < 1) {
+    return { success: false, reason: "invalid_input" };
+  }
+  const snap = await db.ref(`support_tickets/${ticketId}`).get();
+  const row = snap.val();
+  if (!row || typeof row !== "object") {
+    return { success: false, reason: "not_found" };
+  }
+  if (normUid(row.createdByUserId) !== uid) {
+    return { success: false, reason: "forbidden" };
+  }
+  const now = Date.now();
+  const msgKey = db.ref("support_ticket_messages").push().key;
+  if (!msgKey) {
+    return { success: false, reason: "message_id_failed" };
+  }
+  await db.ref(`support_ticket_messages/${msgKey}`).set({
+    ticketId,
+    body,
+    authorUid: uid,
+    createdAt: now,
+    role: "merchant",
+    user_type: "merchant",
+  });
+  await db.ref(`support_tickets/${ticketId}`).update({
+    updatedAt: now,
+    updated_at: now,
+    last_message: body.slice(0, 500),
+    last_message_at: now,
+  });
+  logger.info("merchantAppendSupportTicketMessage", { ticketId, uid });
+  return { success: true, ticketId, messageId: msgKey };
 }
 
 async function supportSearchRide(data, context, db) {
@@ -300,4 +399,6 @@ module.exports = {
   supportSearchUser,
   supportListTickets,
   supportUpdateTicket,
+  merchantListMySupportTickets,
+  merchantAppendSupportTicketMessage,
 };

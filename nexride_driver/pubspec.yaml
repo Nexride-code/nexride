@@ -35,6 +35,7 @@ dependencies:
 
   # HTTP (Google Directions API)
   http: ^1.2.1
+  web: ^1.1.0
   agora_rtc_engine: 6.5.3
   permission_handler: ^11.4.0
   image_picker: ^1.1.2

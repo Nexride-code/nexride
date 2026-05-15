@@ -267,7 +267,11 @@ void main() {
     );
     expect(
       driverServiceCanReceiveRequests(verification, 'groceries_mart'),
-      isFalse,
+      isTrue,
+    );
+    expect(
+      driverServiceCanReceiveRequests(verification, 'restaurants_food'),
+      isTrue,
     );
   });
 

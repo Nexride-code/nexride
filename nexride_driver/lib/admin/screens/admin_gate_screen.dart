@@ -5,22 +5,25 @@ import '../models/admin_models.dart';
 import '../services/admin_auth_service.dart';
 import '../services/admin_data_service.dart';
 import '../widgets/admin_components.dart';
-import 'admin_login_screen.dart';
 import 'admin_panel_screen.dart';
 
-enum AdminGateMode {
-  dashboard,
-  login,
+/// Thrown when [AdminAuthService.currentSession] does not finish within the
+/// gate timeout — avoids an indefinite loading spinner on protected routes.
+class AdminAccessCheckTimedOut implements Exception {
+  const AdminAccessCheckTimedOut();
 }
 
+/// Session + admin-privilege gate for **protected** admin routes only.
+///
+/// `/admin/login` must not use this widget — it renders [AdminLoginScreen]
+/// directly so the sign-in form is never blocked on [currentSession].
 class AdminGateScreen extends StatefulWidget {
   const AdminGateScreen({
-    required this.mode,
     super.key,
     this.authService,
-    this.inlineMessage,
     this.dataService,
     this.initialSection = AdminSection.dashboard,
+    this.initialDriverDeepLink,
     this.loginRoute = AdminRoutePaths.adminLogin,
     this.dashboardRoute = AdminRoutePaths.admin,
     this.changePasswordRoute = AdminPortalRoutePaths.changePassword,
@@ -28,17 +31,12 @@ class AdminGateScreen extends StatefulWidget {
     this.enableRealtimeBadgeListeners = true,
   });
 
-  final AdminGateMode mode;
   final AdminAuthService? authService;
-  final String? inlineMessage;
   final AdminDataService? dataService;
   final AdminSection initialSection;
+  final AdminDriverDeepLink? initialDriverDeepLink;
   final String loginRoute;
   final String dashboardRoute;
-
-  /// Where to send the user when their account is flagged
-  /// `temporaryPassword=true`. Defaults to the admin portal's change-password
-  /// route. Override for tests or alternate hosts.
   final String changePasswordRoute;
   final String Function(AdminSection section)? routeForSection;
   final bool enableRealtimeBadgeListeners;
@@ -54,12 +52,50 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
   bool _unauthorizedResetScheduled = false;
   String? _lastDecision;
 
+  static const Duration _kSessionCheckTimeout = Duration(seconds: 25);
+
+  Future<AdminSession?> _sessionFutureWithGateTimeout() {
+    return _authService.currentSession().timeout(
+      _kSessionCheckTimeout,
+      onTimeout: () {
+        debugPrint(
+          '[AdminGate] currentSession exceeded ${_kSessionCheckTimeout.inSeconds}s',
+        );
+        throw const AdminAccessCheckTimedOut();
+      },
+    );
+  }
+
+  void _retrySessionCheck() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _redirectScheduled = false;
+      _unauthorizedResetScheduled = false;
+      _lastDecision = null;
+      _sessionFuture = _sessionFutureWithGateTimeout();
+    });
+  }
+
+  Future<void> _signOutAfterTimeout() async {
+    try {
+      await _authService.signOut();
+    } catch (e) {
+      debugPrint('[AdminGate] signOut after timeout failed: $e');
+    }
+    if (!mounted) {
+      return;
+    }
+    _retrySessionCheck();
+  }
+
   @override
   void initState() {
     super.initState();
     _authService = widget.authService ?? AdminAuthService();
-    _logDecision('init mode=${widget.mode.name}');
-    _sessionFuture = _authService.currentSession();
+    _logDecision('init protected gate');
+    _sessionFuture = _sessionFutureWithGateTimeout();
   }
 
   @override
@@ -80,6 +116,9 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
 
         if (snapshot.hasError) {
           _logDecision('session check failed error=${snapshot.error}');
+          if (snapshot.error is AdminAccessCheckTimedOut) {
+            return _buildAccessTimeoutScreen(context);
+          }
           return AdminFullscreenState(
             title: 'Admin screen failed to load',
             message:
@@ -94,71 +133,34 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
         final signedInButUnauthorized =
             session == null && _authService.hasAuthenticatedUser;
         if (signedInButUnauthorized) {
-          const message =
-              'Your account is signed in but does not have access. Contact the NexRide system administrator.';
-          if (widget.mode == AdminGateMode.dashboard) {
-            _logDecision(
-              'signed-in but unauthorized for dashboard uid=${_authService.authenticatedUid}',
-            );
-            _scheduleUnauthorizedReset(
-              route: widget.loginRoute,
-              arguments: message,
-            );
-            return const AdminFullscreenState(
-              title: 'Admin access not authorized',
+          _logDecision(
+            'signed-in but unauthorized for protected route uid=${_authService.authenticatedUid ?? 'unknown'}',
+          );
+          _scheduleUnauthorizedReset(
+            route: widget.loginRoute,
+            arguments: const AdminLoginIntent(
               message:
                   'Your account is signed in but does not have access. Contact the NexRide system administrator.',
-              icon: Icons.lock_outline_rounded,
-              isLoading: true,
-            );
-          }
-          _logDecision(
-            'signed-in but unauthorized on login route uid=${_authService.authenticatedUid}',
+            ),
           );
-          _scheduleUnauthorizedReset();
-          return AdminLoginScreen(
-            authService: _authService,
-            inlineMessage: message,
-            dashboardRoute: widget.dashboardRoute,
-          );
-        }
-
-        if (session != null && widget.mode == AdminGateMode.login) {
-          if (session.mustChangePassword) {
-            _logDecision(
-              'signed-in admin on login route with temp password -> '
-              '${widget.changePasswordRoute}',
-            );
-            _redirectTo(widget.changePasswordRoute);
-            return const AdminFullscreenState(
-              title: 'Password change required',
-              message:
-                  'You\'re using a temporary password. Redirecting to the change-password screen.',
-              icon: Icons.lock_clock_rounded,
-              isLoading: true,
-            );
-          }
-          _logDecision(
-            'signed-in admin on login route -> redirect ${widget.dashboardRoute}',
-          );
-          _redirectTo(widget.dashboardRoute);
           return const AdminFullscreenState(
-            title: 'Opening NexRide control center',
+            title: 'Admin access not authorized',
             message:
-                'Admin access confirmed. Redirecting you to the dashboard now.',
-            icon: Icons.dashboard_outlined,
+                'Your account is signed in but does not have access. Contact the NexRide system administrator.',
+            icon: Icons.lock_outline_rounded,
             isLoading: true,
           );
         }
 
-        if (session == null && widget.mode == AdminGateMode.dashboard) {
-          _logDecision(
-            'not signed in for dashboard -> redirect ${widget.loginRoute}',
-          );
+        if (session == null) {
+          _logDecision('not signed in for protected route -> ${widget.loginRoute}');
           _redirectTo(
             widget.loginRoute,
-            arguments:
-                'Admin authentication is required before you can open the control center.',
+            arguments: AdminLoginIntent(
+              message:
+                  'Admin authentication is required before you can open the control center.',
+              returnRoute: ModalRoute.of(context)?.settings.name,
+            ),
           );
           return const AdminFullscreenState(
             title: 'Redirecting to admin login',
@@ -169,38 +171,31 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
           );
         }
 
-        if (session != null) {
-          if (session.mustChangePassword) {
-            _logDecision(
-              'admin session ready uid=${session.uid} but mustChangePassword=true '
-              '-> ${widget.changePasswordRoute}',
-            );
-            _redirectTo(widget.changePasswordRoute);
-            return const AdminFullscreenState(
-              title: 'Password change required',
-              message:
-                  'You\'re using a temporary password. Redirecting to the change-password screen.',
-              icon: Icons.lock_clock_rounded,
-              isLoading: true,
-            );
-          }
-          _logDecision('admin session ready uid=${session.uid}');
-          return AdminPanelScreen(
-            session: session,
-            dataService: widget.dataService,
-            authService: _authService,
-            initialSection: widget.initialSection,
-            loginRoute: widget.loginRoute,
-            routeForSection: widget.routeForSection,
-            enableRealtimeBadgeListeners: widget.enableRealtimeBadgeListeners,
+        if (session.mustChangePassword) {
+          _logDecision(
+            'admin session ready uid=${session.uid} but mustChangePassword=true '
+            '-> ${widget.changePasswordRoute}',
+          );
+          _redirectTo(widget.changePasswordRoute);
+          return const AdminFullscreenState(
+            title: 'Password change required',
+            message:
+                'You\'re using a temporary password. Redirecting to the change-password screen.',
+            icon: Icons.lock_clock_rounded,
+            isLoading: true,
           );
         }
 
-        _logDecision('signed out on login route -> render login screen');
-        return AdminLoginScreen(
+        _logDecision('admin session ready uid=${session.uid}');
+        return AdminPanelScreen(
+          session: session,
+          dataService: widget.dataService,
           authService: _authService,
-          inlineMessage: widget.inlineMessage,
-          dashboardRoute: widget.dashboardRoute,
+          initialSection: widget.initialSection,
+          initialDriverDeepLink: widget.initialDriverDeepLink,
+          loginRoute: widget.loginRoute,
+          routeForSection: widget.routeForSection,
+          enableRealtimeBadgeListeners: widget.enableRealtimeBadgeListeners,
         );
       },
     );
@@ -246,5 +241,62 @@ class _AdminGateScreenState extends State<AdminGateScreen> {
     }
     _lastDecision = decision;
     debugPrint('[AdminGate] $decision');
+  }
+
+  Widget _buildAccessTimeoutScreen(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AdminThemeTokens.canvas,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Icon(
+                    Icons.timer_off_outlined,
+                    size: 56,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Could not verify admin access',
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'The admin access check took longer than '
+                    '${_kSessionCheckTimeout.inSeconds} seconds and was stopped '
+                    'so this page would not load forever. Retry, or sign out and '
+                    'try again.',
+                    style: const TextStyle(
+                      color: Color(0xFF6F675D),
+                      fontSize: 14,
+                      height: 1.55,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 28),
+                  FilledButton(
+                    onPressed: _retrySessionCheck,
+                    child: const Text('Retry'),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton(
+                    onPressed: _signOutAfterTimeout,
+                    child: const Text('Log out'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

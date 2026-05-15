@@ -12,7 +12,7 @@
 
 const admin = require("firebase-admin");
 const { ServerValue } = require("firebase-admin/database");
-const { evaluateDriverForOffer, loadDispatchGates } = require("./driver_dispatch_gates");
+const { evaluateDriverForOffer, evaluateDriverGeoAndMode, loadDispatchGates } = require("./driver_dispatch_gates");
 const ride = require("./ride_callables");
 const riderFirestoreIdentity = require("./rider_firestore_identity");
 const { sendPushToUser } = require("./push_notifications");
@@ -197,6 +197,11 @@ async function clearDeliveryFanoutAndOffers(db, deliveryId, winnerDriverId = "")
 
 function buildDeliveryOfferPayload(deliveryId, customerId, market, row, now, expiresAt) {
   const mirror = deliveryUiMirrorFields(row.delivery_state, row.driver_id);
+  const pickupObj = row.pickup && typeof row.pickup === "object" ? row.pickup : {};
+  const pickupAddr =
+    typeof pickupObj.address === "string" && pickupObj.address.trim()
+      ? pickupObj.address.trim()
+      : "";
   return {
     __nexride_request_kind: "delivery",
     delivery_id: deliveryId,
@@ -208,6 +213,7 @@ function buildDeliveryOfferPayload(deliveryId, customerId, market, row, now, exp
     market_pool: market,
     pickup: row.pickup,
     dropoff: row.dropoff,
+    pickup_address: pickupAddr || null,
     fare: row.fare,
     currency: row.currency,
     distance_km: row.distance_km,
@@ -215,6 +221,9 @@ function buildDeliveryOfferPayload(deliveryId, customerId, market, row, now, exp
     payment_method: row.payment_method,
     payment_status: row.payment_status,
     package_description: row.package_description,
+    food_order_summary: row.food_order_summary != null ? String(row.food_order_summary) : null,
+    merchant_id: row.merchant_id != null ? normUid(row.merchant_id) : null,
+    merchant_order_id: row.merchant_order_id != null ? normUid(row.merchant_order_id) : null,
     recipient_name: row.recipient_name,
     recipient_phone: row.recipient_phone,
     category: row.category,
@@ -281,6 +290,15 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
     });
     if (!el.ok) {
       console.log("DELIVERY_DRIVER_FILTERED", `uid=${d}`, `reason=${el.log || "gate"}`);
+      continue;
+    }
+    const geo = evaluateDriverGeoAndMode(profile, { ...row, market_pool: market, market }, now);
+    if (!geo.ok) {
+      console.log(
+        "DELIVERY_DRIVER_FILTERED",
+        `uid=${d}`,
+        `reason=${geo.log || "geo"}:${geo.detail || ""}`,
+      );
       continue;
     }
     console.log("DELIVERY_DRIVER_ELIGIBLE", `uid=${d}`);
@@ -462,6 +480,22 @@ async function createDeliveryRequest(data, context, db) {
     return { success: false, reason: "fare_above_limit" };
   }
 
+  const { computeRiderPricing, assertClientTotalMatches } = require("./pricing_calculator");
+  const pricing = computeRiderPricing({
+    flow: "dispatch_request",
+    trip_fare_ngn: fare,
+  });
+  const totalMismatch = assertClientTotalMatches(pricing, data?.total_ngn ?? data?.totalNgn);
+  if (!totalMismatch.ok) {
+    return {
+      success: false,
+      reason: totalMismatch.reason,
+      reason_code: totalMismatch.reason_code,
+      message: totalMismatch.message,
+      retryable: totalMismatch.retryable,
+    };
+  }
+
   const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
   const paymentMethod = String(data?.payment_method ?? data?.paymentMethod ?? "flutterwave")
     .trim()
@@ -509,6 +543,10 @@ async function createDeliveryRequest(data, context, db) {
     recipient_phone: recipientPhone,
     category,
     fare,
+    platform_fee_ngn: pricing.platform_fee_ngn,
+    small_order_fee_ngn: pricing.small_order_fee_ngn,
+    total_ngn: pricing.total_ngn,
+    fee_breakdown: pricing.fee_breakdown,
     currency,
     distance_km: distanceKm,
     eta_minutes: etaMin,
@@ -524,6 +562,9 @@ async function createDeliveryRequest(data, context, db) {
     completed_at: null,
     cancelled_at: null,
     cancel_reason: "",
+    resolved_service_region_id: rolloutGate.region_id || null,
+    resolved_service_city_id: rolloutGate.city_id || null,
+    resolved_dispatch_market_id: rolloutGate.dispatch_market_id || null,
   };
 
   await delRef.set(row);
@@ -542,7 +583,14 @@ async function createDeliveryRequest(data, context, db) {
     actor_uid: customerId,
   });
 
-  return { success: true, deliveryId, reason: "created" };
+  return {
+    success: true,
+    deliveryId,
+    reason: "created",
+    resolved_service_region_id: rolloutGate.region_id || null,
+    resolved_service_city_id: rolloutGate.city_id || null,
+    resolved_dispatch_market_id: rolloutGate.dispatch_market_id || null,
+  };
 }
 
 /**
@@ -837,9 +885,75 @@ async function cancelDeliveryRequest(data, context, db) {
   return { success: true, reason: "cancelled" };
 }
 
+/**
+ * Trusted server path: create a food delivery row for an existing merchant order
+ * (customer already validated by caller). Used by merchant commerce dispatch.
+ *
+ * @param {import("firebase-admin/database").Database} db
+ * @param {object} row Pre-built delivery_requests payload including delivery_id, customer_id, pickup, dropoff, fare, payment_*, category "food", etc.
+ * @returns {Promise<{ ok: true, deliveryId: string } | { ok: false, reason: string, deliveryId?: string }>}
+ */
+async function createFoodDeliveryForMerchantOrder(db, row) {
+  if (!row || typeof row !== "object") {
+    return { ok: false, reason: "invalid_row" };
+  }
+  const deliveryId = normUid(row.delivery_id);
+  const customerId = normUid(row.customer_id);
+  if (!deliveryId || !customerId) {
+    return { ok: false, reason: "invalid_ids" };
+  }
+  const slot = await assertCustomerDeliverySlot(db, customerId);
+  if (!slot.ok) {
+    return { ok: false, reason: slot.reason || "customer_active_delivery", deliveryId: slot.deliveryId };
+  }
+  const ref = db.ref(`delivery_requests/${deliveryId}`);
+  const ts = nowMs();
+  const exp = Number(row.expires_at) > 0 ? Number(row.expires_at) : ts + 180000;
+  const mirror = deliveryUiMirrorFields(DELIVERY_STATE.searching, "");
+  const full = {
+    ...row,
+    delivery_id: deliveryId,
+    customer_id: customerId,
+    rider_id: customerId,
+    service_type: "dispatch_delivery",
+    delivery_state: DELIVERY_STATE.searching,
+    trip_state: mirror.trip_state,
+    status: mirror.status,
+    driver_id: mirror.driver_id,
+    matched_driver_id: null,
+    category: "food",
+    created_at: row.created_at ?? ts,
+    updated_at: ts,
+    expires_at: exp,
+    search_timeout_at: row.search_timeout_at ?? exp,
+    request_expires_at: row.request_expires_at ?? exp,
+  };
+  await ref.set(full);
+  await db.ref(`user_active_delivery/${customerId}`).set({
+    delivery_id: deliveryId,
+    phase: "searching",
+    updated_at: ts,
+  });
+  await fanOutDeliveryOffersIfEligible(db, deliveryId, full);
+  await writeAudit(db, {
+    type: "delivery_create",
+    delivery_id: deliveryId,
+    customer_id: customerId,
+    actor_uid: customerId,
+    merchant_id: normUid(row.merchant_id) || null,
+    merchant_order_id: normUid(row.merchant_order_id) || null,
+    source: "merchant_food_order",
+  });
+  return { ok: true, deliveryId };
+}
+
 module.exports = {
   DELIVERY_STATE,
+  TERMINAL_DELIVERY,
+  deliveryUiMirrorFields,
+  clearDeliveryFanoutAndOffers,
   createDeliveryRequest,
+  createFoodDeliveryForMerchantOrder,
   acceptDeliveryRequest,
   updateDeliveryState,
   expireDeliveryRequest,

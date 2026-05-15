@@ -10,6 +10,7 @@ import '../../admin/admin_config.dart';
 import '../../admin/utils/admin_formatters.dart';
 import '../../admin/widgets/admin_components.dart';
 import '../models/support_models.dart';
+import '../support_config.dart';
 import '../services/support_attachment_upload_service.dart';
 import '../services/support_auth_service.dart';
 import '../services/support_ticket_service.dart';
@@ -26,7 +27,7 @@ class SupportWorkspaceScreen extends StatefulWidget {
     this.initialTicketDocumentId,
     this.routeForView,
     this.routeForTicket,
-    this.loginRoute = '/support/login',
+    this.loginRoute = SupportRoutePaths.login,
   });
 
   final SupportSession session;
@@ -73,6 +74,9 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
   String? _assigneeDraft;
   SupportAttachmentSelection? _selectedAttachment;
   double? _uploadProgress;
+  Map<String, dynamic>? _merchantOrderContextPayload;
+  String? _merchantOrderContextError;
+  bool _merchantOrderContextLoading = false;
 
   @override
   void initState() {
@@ -108,7 +112,7 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
     try {
       if (!_tokenRefreshedForDashboardLoad) {
         if (_authService != null) {
-          await _authService!.forceTokenRefresh();
+          await _authService.forceTokenRefresh();
         } else {
           await FirebaseAuth.instance.currentUser?.getIdToken(true);
         }
@@ -149,6 +153,9 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
         _selectedTicketDocumentId = ticketDocumentId;
         _isLoadingDetail = true;
         _detailErrorMessage = null;
+        _merchantOrderContextPayload = null;
+        _merchantOrderContextError = null;
+        _merchantOrderContextLoading = false;
         if (_view == SupportInboxView.dashboard) {
           _view = SupportInboxView.open;
         }
@@ -176,6 +183,7 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
         _updateRouteForTicket(ticketDocumentId);
       }
       unawaited(_loadSnapshot());
+      unawaited(_loadMerchantOrderContext(detail.ticket));
     } catch (error) {
       if (!mounted) {
         return;
@@ -183,6 +191,48 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
       setState(() {
         _isLoadingDetail = false;
         _detailErrorMessage = _friendlySupportDetailFailureMessage(error);
+      });
+    }
+  }
+
+  Future<void> _loadMerchantOrderContext(SupportTicketSummary ticket) async {
+    final raw = ticket.rawData;
+    final oid =
+        (raw['merchant_order_id'] ?? raw['merchantOrderId'])?.toString().trim() ??
+            '';
+    if (oid.isEmpty) {
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _merchantOrderContextLoading = true;
+        _merchantOrderContextError = null;
+        _merchantOrderContextPayload = null;
+      });
+    }
+    try {
+      final r = await _ticketService.fetchMerchantOrderContext(orderId: oid);
+      if (!mounted) {
+        return;
+      }
+      if (r['success'] == true) {
+        setState(() {
+          _merchantOrderContextPayload = r;
+          _merchantOrderContextLoading = false;
+        });
+      } else {
+        setState(() {
+          _merchantOrderContextError = r['reason']?.toString() ?? 'load_failed';
+          _merchantOrderContextLoading = false;
+        });
+      }
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _merchantOrderContextError = e.toString();
+        _merchantOrderContextLoading = false;
       });
     }
   }
@@ -1365,6 +1415,8 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
           const SizedBox(height: 18),
           _buildSupportMetadataRow(ticket),
           const SizedBox(height: 18),
+          _buildMerchantCommerceContext(ticket),
+          const SizedBox(height: 18),
           _buildDetailResponsiveRow(
             compact: compact,
             left: _buildParticipantSnapshotCard(
@@ -1539,6 +1591,85 @@ class _SupportWorkspaceScreenState extends State<SupportWorkspaceScreen> {
         ],
       ],
     );
+  }
+
+  Widget _buildMerchantCommerceContext(SupportTicketSummary ticket) {
+    final raw = ticket.rawData;
+    final oid =
+        (raw['merchant_order_id'] ?? raw['merchantOrderId'])?.toString().trim() ??
+            '';
+    if (oid.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    if (_merchantOrderContextLoading) {
+      return const AdminSurfaceCard(
+        child: Padding(
+          padding: EdgeInsets.all(16),
+          child: Row(
+            children: <Widget>[
+              SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 12),
+              Text('Loading merchant order context…'),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_merchantOrderContextError != null) {
+      return AdminSurfaceCard(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            'Merchant order lookup failed: ${_merchantOrderContextError!}',
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+        ),
+      );
+    }
+    final payload = _merchantOrderContextPayload;
+    if (payload == null || payload['success'] != true) {
+      return const SizedBox.shrink();
+    }
+    final order = _mapDynamic(payload['order']);
+    final merchant = _mapDynamic(payload['merchant']);
+    final lines = <String>[
+      'Order: ${order['order_id'] ?? oid}',
+      'Status: ${order['order_status'] ?? ''}',
+      'Customer: ${order['customer_uid'] ?? ''}',
+      'Payment: ${order['payment_status'] ?? ''} · ref ${order['prepaid_flutterwave_ref'] ?? ''}',
+      'Total ₦${order['total_ngn'] ?? ''} · commission ₦${order['commission_ngn'] ?? ''}',
+      if (merchant.isNotEmpty) 'Merchant: ${merchant['business_name'] ?? merchant['merchant_id']}',
+    ];
+    return AdminSurfaceCard(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text(
+              'Merchant / order (support)',
+              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+            ),
+            const SizedBox(height: 10),
+            ...lines.map((l) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(l, style: const TextStyle(height: 1.35)),
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Map<String, dynamic> _mapDynamic(dynamic v) {
+    if (v is Map) {
+      return v.map((k, dynamic val) => MapEntry(k.toString(), val));
+    }
+    return <String, dynamic>{};
   }
 
   Widget _buildSupportMetadataRow(SupportTicketSummary ticket) {

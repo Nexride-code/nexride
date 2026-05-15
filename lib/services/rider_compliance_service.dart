@@ -45,15 +45,21 @@ class RiderComplianceSnapshot {
     if (fetchFailed) {
       return RiderIdentityBookingPhase.statusUnavailable;
     }
-    if (!selfieUploaded) {
-      return RiderIdentityBookingPhase.missingSelfie;
-    }
     final status = _normStatus(verificationStatus);
-    if (status == 'approved') {
+    // Admin approval in Firestore unlocks booking even when no selfie was stored
+    // (legacy riders or manual clearance).
+    if (status == 'approved' ||
+        status == 'verified' ||
+        status == 'cleared' ||
+        status == 'complete' ||
+        status == 'completed') {
       return RiderIdentityBookingPhase.approved;
     }
     if (status == 'rejected') {
       return RiderIdentityBookingPhase.rejected;
+    }
+    if (!selfieUploaded) {
+      return RiderIdentityBookingPhase.missingSelfie;
     }
     return RiderIdentityBookingPhase.pendingReview;
   }

@@ -1,3 +1,4 @@
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 
@@ -45,19 +46,24 @@ class DriverPayoutDestination {
     required this.bankName,
     required this.accountName,
     required this.accountNumber,
+    this.bankCode = '',
   });
 
   const DriverPayoutDestination.empty()
       : bankName = '',
         accountName = '',
-        accountNumber = '';
+        accountNumber = '',
+        bankCode = '';
 
   final String bankName;
   final String accountName;
   final String accountNumber;
+  final String bankCode;
 
   bool get isConfigured =>
-      bankName.isNotEmpty || accountName.isNotEmpty || accountNumber.isNotEmpty;
+      bankName.trim().isNotEmpty &&
+      accountName.trim().isNotEmpty &&
+      accountNumber.trim().isNotEmpty;
 
   String get maskedAccountNumber {
     final digitsOnly = accountNumber.replaceAll(RegExp(r'\s+'), '');
@@ -77,6 +83,7 @@ class DriverPayoutDestination {
       if (bankName.isNotEmpty) bankName,
       if (maskedAccountNumber.isNotEmpty) maskedAccountNumber,
       if (accountName.isNotEmpty) accountName,
+      if (bankCode.trim().isNotEmpty) 'Code $bankCode',
     ];
     return parts.join(' - ');
   }
@@ -204,7 +211,7 @@ class DriverFinanceService {
   static const String payoutNoticeText =
       'Withdrawals above ₦300,000 may take 2-3 working days to process. '
       'Withdrawals below ₦300,000 are typically processed within 48 hours. '
-      'All withdrawals are processed directly by NEXRIDE DYNAMIC JOURNEY LTD.';
+      'Approved withdrawals are paid to the bank account you provide.';
 
   Future<DriverFinanceSnapshot> fetchDriverFinanceSnapshot({
     required String driverId,
@@ -314,10 +321,13 @@ class DriverFinanceService {
       ];
 
       final payoutDestination = _resolvePayoutDestination(
-        _parseDestinationFromRecord(walletData),
+        _parseDestinationFromRecord(_map(driverData['withdrawal_destination'])),
         _resolvePayoutDestination(
-          _parseDestinationFromRecord(driverData),
-          const DriverPayoutDestination.empty(),
+          _parseDestinationFromRecord(walletData),
+          _resolvePayoutDestination(
+            _parseDestinationFromRecord(driverData),
+            const DriverPayoutDestination.empty(),
+          ),
         ),
       );
       final normalizedBusinessModel =
@@ -576,7 +586,6 @@ class DriverFinanceService {
   Future<void> createWithdrawalRequest({
     required String driverId,
     required double amount,
-    required DriverPayoutDestination payoutDestination,
   }) async {
     final normalizedDriverId = driverId.trim();
     if (normalizedDriverId.isEmpty) {
@@ -586,29 +595,55 @@ class DriverFinanceService {
       throw StateError('Withdrawal amount must be greater than zero.');
     }
 
-    final requestRef = _rootRef.child('withdraw_requests').push();
-    final withdrawalAccount = payoutDestination.isConfigured
-        ? <String, dynamic>{
-            'bankName': payoutDestination.bankName,
-            'accountName': payoutDestination.accountName,
-            'accountNumber': payoutDestination.accountNumber,
-          }
-        : null;
-    await requestRef.set(<String, dynamic>{
-      'withdrawalId': requestRef.key,
-      'driver_id': normalizedDriverId,
-      'driverId': normalizedDriverId,
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'requestWithdrawal',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+    );
+    final result = await callable.call(<String, dynamic>{
       'amount': amount,
-      'status': 'pending',
-      'requestedAt': rtdb.ServerValue.timestamp,
-      'createdAt': rtdb.ServerValue.timestamp,
-      'updatedAt': rtdb.ServerValue.timestamp,
-      if (withdrawalAccount != null) ...<String, dynamic>{
-        'destination': withdrawalAccount,
-        // Admin / ops readers expect this shape on withdrawal rows.
-        'withdrawalAccount': withdrawalAccount,
-      },
     });
+    final data = result.data;
+    if (data is! Map) {
+      throw StateError('withdrawal_invalid_response');
+    }
+    final map = Map<String, dynamic>.from(data);
+    if (map['success'] != true && map['success'] != 1) {
+      final reason = '${map['reason'] ?? 'withdrawal_failed'}'.trim();
+      throw StateError(reason.isEmpty ? 'withdrawal_failed' : reason);
+    }
+  }
+
+  /// Persists payout account via [driverUpdateWithdrawalDestination] (authoritative).
+  Future<void> saveWithdrawalDestination({
+    required DriverPayoutDestination destination,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'driverUpdateWithdrawalDestination',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final payload = <String, dynamic>{
+      'bank_name': destination.bankName.trim(),
+      'account_holder_name': destination.accountName.trim(),
+      'account_number': destination.accountNumber.trim().replaceAll(RegExp(r'\s+'), ''),
+    };
+    final bc = destination.bankCode.trim();
+    if (bc.isNotEmpty) {
+      payload['bank_code'] = bc;
+    }
+    final result = await callable.call(payload);
+    final data = result.data;
+    if (data is! Map) {
+      throw StateError('destination_invalid_response');
+    }
+    final map = Map<String, dynamic>.from(data);
+    if (map['success'] != true && map['success'] != 1) {
+      final reason = '${map['reason'] ?? 'destination_save_failed'}'.trim();
+      throw StateError(reason.isEmpty ? 'destination_save_failed' : reason);
+    }
   }
 
   Future<rtdb.DataSnapshot?> _optionalSnapshot({
@@ -640,10 +675,13 @@ class DriverFinanceService {
       withdrawals: const <DriverWithdrawalRecord>[],
       walletTransactions: const <DriverWalletTransaction>[],
       payoutDestination: _resolvePayoutDestination(
-        _parseDestinationFromRecord(_map(driverData['wallet'])),
+        _parseDestinationFromRecord(_map(driverData['withdrawal_destination'])),
         _resolvePayoutDestination(
-          _parseDestinationFromRecord(driverData),
-          const DriverPayoutDestination.empty(),
+          _parseDestinationFromRecord(_map(driverData['wallet'])),
+          _resolvePayoutDestination(
+            _parseDestinationFromRecord(driverData),
+            const DriverPayoutDestination.empty(),
+          ),
         ),
       ),
       hasLiveBackendData: false,
@@ -1023,6 +1061,8 @@ class DriverFinanceService {
         <String>[
           'accountName',
           'account_name',
+          'account_holder_name',
+          'accountHolderName',
           'beneficiaryName',
           'beneficiary_name',
           'holderName',
@@ -1034,6 +1074,10 @@ class DriverFinanceService {
       accountNumber: _firstMappedText(
         candidateMaps,
         <String>['accountNumber', 'account_number', 'accountNo', 'account_no'],
+      ),
+      bankCode: _firstMappedText(
+        candidateMaps,
+        <String>['bankCode', 'bank_code'],
       ),
     );
   }
@@ -1051,6 +1095,7 @@ class DriverFinanceService {
       accountNumber: primary.accountNumber.isNotEmpty
           ? primary.accountNumber
           : fallback.accountNumber,
+      bankCode: primary.bankCode.isNotEmpty ? primary.bankCode : fallback.bankCode,
     );
   }
 

@@ -4,6 +4,8 @@
 const assert = require("node:assert/strict");
 const {
   evaluateDriverForOffer,
+  evaluateDriverForOfferSoft,
+  evaluateDriverGeoAndMode,
   summarizeDriverForFanout,
 } = require("../driver_dispatch_gates");
 
@@ -70,5 +72,71 @@ assert.equal(
   evaluateDriverForOffer(spacedDriver, { soft_verification: false }, rideSpaced).ok,
   true,
 );
+
+const onlineDocDriver = {
+  ...docOk,
+  is_online: true,
+  status: "available",
+  dispatch_state: "available",
+  dispatch_market: "lagos",
+};
+const softWithVerify = evaluateDriverForOfferSoft(onlineDocDriver, ride, {
+  require_bvn: false,
+});
+assert.equal(softWithVerify.ok, true);
+
+const unverifiedOnline = {
+  ...unverifiedNoDocs,
+  is_online: true,
+  status: "available",
+  dispatch_state: "available",
+  dispatch_market: "lagos",
+};
+const softBlocked = evaluateDriverForOfferSoft(unverifiedOnline, ride, {
+  require_bvn: false,
+});
+assert.equal(softBlocked.ok, false);
+
+const now = Date.now();
+const rideLekki = {
+  market_pool: "lagos",
+  service_type: "ride",
+  resolved_service_city_id: "lekki",
+  pickup: { lat: 6.45, lng: 3.39 },
+};
+const saMismatch = evaluateDriverGeoAndMode(
+  {
+    driver_availability_mode: "service_area",
+    selected_service_area_id: "yaba",
+    dispatch_market: "lagos",
+  },
+  rideLekki,
+  now,
+);
+assert.equal(saMismatch.ok, false);
+
+const saOk = evaluateDriverGeoAndMode(
+  {
+    driver_availability_mode: "service_area",
+    selected_service_area_id: "lekki",
+    dispatch_market: "lagos",
+  },
+  rideLekki,
+  now,
+);
+assert.equal(saOk.ok, true);
+
+const gpsOk = evaluateDriverGeoAndMode(
+  {
+    driver_availability_mode: "current_location",
+    lat: 6.451,
+    lng: 3.391,
+    last_location_updated_at: now - 60_000,
+    dispatch_market: "lagos",
+  },
+  { market_pool: "lagos", pickup: { lat: 6.45, lng: 3.39 } },
+  now,
+);
+assert.equal(gpsOk.ok, true);
 
 console.log("driver_dispatch_gates.selftest: ok");

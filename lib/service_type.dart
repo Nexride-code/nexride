@@ -31,9 +31,9 @@ extension RiderServiceTypeX on RiderServiceType {
     RiderServiceType.dispatchDelivery =>
       'Send parcels and errands with live dispatch tracking.',
     RiderServiceType.groceriesMart =>
-      'Fresh groceries and market runs are on the way.',
+      'Order groceries, pharmacy items, and mart essentials.',
     RiderServiceType.restaurantsFood =>
-      'Food ordering and delivery is coming soon.',
+      'Order from restaurants, food vendors, and local eateries.',
   };
 
   IconData get icon => switch (this) {

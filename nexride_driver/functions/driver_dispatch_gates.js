@@ -18,12 +18,158 @@ function canonicalMarketSlug(raw) {
     .replace(/-+/g, "_");
 }
 
+/** @param {unknown} raw */
+function normalizeDriverAvailabilityMode(raw) {
+  const m = String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+  if (m === "current_location" || m === "gps" || m === "current") return "current_location";
+  if (m === "service_area" || m === "servicearea" || m === "city") return "service_area";
+  if (m === "offline") return "offline";
+  return "";
+}
+
+const STALE_DRIVER_LOCATION_MS = 12 * 60 * 1000;
+const MAX_DRIVER_PICKUP_DISTANCE_KM = 45;
+
+function toRad(deg) {
+  return (deg * Math.PI) / 180;
+}
+
+/**
+ * @param {number} lat1
+ * @param {number} lon1
+ * @param {number} lat2
+ * @param {number} lon2
+ */
+function haversineKm(lat1, lon1, lat2, lon2) {
+  if (
+    !Number.isFinite(lat1) ||
+    !Number.isFinite(lon1) ||
+    !Number.isFinite(lat2) ||
+    !Number.isFinite(lon2)
+  ) {
+    return NaN;
+  }
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * @param {Record<string, unknown>} ridePayload
+ * @returns {{ lat: number, lng: number }}
+ */
+function pickupCoordsFromRide(ridePayload) {
+  const r = ridePayload && typeof ridePayload === "object" ? ridePayload : {};
+  const p = r.pickup && typeof r.pickup === "object" ? r.pickup : {};
+  const lat = Number(p.lat ?? p.latitude ?? p.Latitude ?? "");
+  const lng = Number(p.lng ?? p.longitude ?? p.Longitude ?? "");
+  return { lat, lng };
+}
+
+/**
+ * @param {Record<string, unknown>} driverProfile
+ * @returns {{ lat: number, lng: number }}
+ */
+function driverLastKnownCoords(driverProfile) {
+  const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
+  const ll = d.last_location && typeof d.last_location === "object" ? d.last_location : {};
+  const lat0 = Number(ll.lat ?? ll.latitude ?? "");
+  const lng0 = Number(ll.lng ?? ll.longitude ?? "");
+  if (
+    Number.isFinite(lat0) &&
+    Number.isFinite(lng0) &&
+    !(lat0 === 0 && lng0 === 0)
+  ) {
+    return { lat: lat0, lng: lng0 };
+  }
+  const lat = Number(d.lat ?? d.latitude ?? "");
+  const lng = Number(d.lng ?? d.longitude ?? "");
+  return { lat, lng };
+}
+
+/**
+ * Availability mode + distance / service-city alignment for fan-out.
+ * Legacy drivers (no `driver_availability_mode`) keep prior market-only behaviour.
+ *
+ * @param {Record<string, unknown>} driverProfile
+ * @param {Record<string, unknown>} ridePayload
+ * @param {number} nowMs
+ * @returns {{ ok: true } | { ok: false, log: string, detail: string }}
+ */
+function evaluateDriverGeoAndMode(driverProfile, ridePayload, nowMs) {
+  const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
+  const mode = normalizeDriverAvailabilityMode(
+    d.driver_availability_mode ?? d.availability_mode ?? "",
+  );
+  if (!mode) {
+    return { ok: true, log: "GEO_LEGACY", detail: "skipped" };
+  }
+  if (mode === "offline") {
+    return { ok: false, log: "DRIVER_FILTERED_MODE", detail: "offline_mode" };
+  }
+
+  if (mode === "service_area") {
+    const sel = String(
+      d.selected_service_area_id ?? d.rollout_city_id ?? d.service_city_id ?? "",
+    ).trim();
+    if (!sel) {
+      return { ok: false, log: "DRIVER_FILTERED_SERVICE_AREA", detail: "service_area_required" };
+    }
+    const rideCity = String(
+      ridePayload.resolved_service_city_id ??
+        ridePayload.service_city_id ??
+        ridePayload.rollout_city_id ??
+        "",
+    ).trim();
+    if (!rideCity) {
+      return { ok: true, log: "GEO_SERVICE_AREA_FALLBACK", detail: "ride_city_unresolved" };
+    }
+    if (canonicalMarketSlug(sel) !== canonicalMarketSlug(rideCity)) {
+      return { ok: false, log: "DRIVER_FILTERED_SERVICE_AREA", detail: "city_mismatch" };
+    }
+    return { ok: true };
+  }
+
+  if (mode === "current_location") {
+    const pickup = pickupCoordsFromRide(ridePayload);
+    if (!Number.isFinite(pickup.lat) || !Number.isFinite(pickup.lng)) {
+      return { ok: true, log: "GEO_PICKUP_MISSING", detail: "pickup_unavailable" };
+    }
+    const drv = driverLastKnownCoords(d);
+    if (!Number.isFinite(drv.lat) || !Number.isFinite(drv.lng)) {
+      return { ok: false, log: "DRIVER_FILTERED_LOCATION", detail: "location_required" };
+    }
+    const ts = Number(d.last_location_updated_at ?? 0) || 0;
+    if (ts > 0 && nowMs - ts > STALE_DRIVER_LOCATION_MS) {
+      return { ok: false, log: "DRIVER_FILTERED_STALE_GPS", detail: "stale_location" };
+    }
+    const dist = haversineKm(drv.lat, drv.lng, pickup.lat, pickup.lng);
+    if (!Number.isFinite(dist)) {
+      return { ok: false, log: "DRIVER_FILTERED_LOCATION", detail: "location_invalid" };
+    }
+    if (dist > MAX_DRIVER_PICKUP_DISTANCE_KM) {
+      return { ok: false, log: "DRIVER_FILTERED_DISTANCE", detail: "too_far" };
+    }
+    return { ok: true };
+  }
+
+  return { ok: true, log: "GEO_UNKNOWN_MODE", detail: "skipped" };
+}
+
 /**
  * Stabilization mode: no verification / subscription / BVN gates.
  * Requires session online + market alignment + optional status/dispatch_state.
  * @returns {{ ok: true } | { ok: false, log: string, detail: string }}
  */
-function evaluateDriverForOfferSoft(driverProfile, ridePayload) {
+function evaluateDriverForOfferSoft(driverProfile, ridePayload, gates = {}) {
   const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
   const suspended =
     boolTrue(d.suspended) ||
@@ -65,6 +211,14 @@ function evaluateDriverForOfferSoft(driverProfile, ridePayload) {
   if (ds && ds !== "available") {
     return { ok: false, log: "DISPATCH_STATE_NOT_AVAILABLE", detail: ds };
   }
+  const verifyGates = {
+    soft_verification: false,
+    require_bvn: gates.require_bvn === true,
+  };
+  const vEl = evaluateDriverVerificationForOffer(d, verifyGates, ridePayload);
+  if (!vEl.ok) {
+    return vEl;
+  }
   return { ok: true };
 }
 
@@ -97,36 +251,11 @@ function bvnApproved(verificationRoot) {
 }
 
 /**
+ * Verification-only leg (used by strict + soft dispatch paths).
  * @returns {{ ok: true } | { ok: false, log: string, detail: string }}
  */
-function evaluateDriverForOffer(driverProfile, gates, ridePayload) {
+function evaluateDriverVerificationForOffer(driverProfile, gates, ridePayload) {
   const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
-
-  const suspended =
-    boolTrue(d.suspended) ||
-    boolTrue(d.account_suspended) ||
-    String(d.driver_status ?? "")
-      .trim()
-      .toLowerCase() === "suspended";
-  if (suspended) {
-    return { ok: false, log: "DRIVER_FILTERED_SUSPENDED", detail: "suspended" };
-  }
-
-  const marketRide = String(
-    ridePayload.market_pool ?? ridePayload.market ?? "",
-  )
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_");
-  const dm = String(d.dispatch_market ?? d.market ?? d.market_pool ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_");
-  if (marketRide && dm && marketRide !== dm) {
-    return { ok: false, log: "DRIVER_FILTERED_MARKET", detail: "market_pool_mismatch" };
-  }
 
   if (gates.soft_verification === true) {
     return { ok: true };
@@ -162,6 +291,41 @@ function evaluateDriverForOffer(driverProfile, gates, ridePayload) {
   }
 
   return { ok: false, log: "DRIVER_FILTERED_VERIFICATION", detail: "documents_incomplete" };
+}
+
+/**
+ * @returns {{ ok: true } | { ok: false, log: string, detail: string }}
+ */
+function evaluateDriverForOffer(driverProfile, gates, ridePayload) {
+  const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
+
+  const suspended =
+    boolTrue(d.suspended) ||
+    boolTrue(d.account_suspended) ||
+    String(d.driver_status ?? "")
+      .trim()
+      .toLowerCase() === "suspended";
+  if (suspended) {
+    return { ok: false, log: "DRIVER_FILTERED_SUSPENDED", detail: "suspended" };
+  }
+
+  const marketRide = String(
+    ridePayload.market_pool ?? ridePayload.market ?? "",
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "_");
+  const dm = String(d.dispatch_market ?? d.market ?? d.market_pool ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "_");
+  if (marketRide && dm && marketRide !== dm) {
+    return { ok: false, log: "DRIVER_FILTERED_MARKET", detail: "market_pool_mismatch" };
+  }
+
+  return evaluateDriverVerificationForOffer(d, gates, ridePayload);
 }
 
 async function loadDispatchGates(db) {
@@ -225,6 +389,10 @@ function summarizeDriverForFanout(driverId, profile) {
     .replace(/\s+/g, "_")
     .replace(/-+/g, "_");
   const city = String(d.city ?? "").trim();
+  const availabilityMode = normalizeDriverAvailabilityMode(
+    d.driver_availability_mode ?? d.availability_mode ?? "",
+  );
+  const lastLocTs = Number(d.last_location_updated_at ?? 0) || 0;
   return {
     uid: normUid(driverId),
     dispatch_market: dm || "missing",
@@ -237,13 +405,21 @@ function summarizeDriverForFanout(driverId, profile) {
     suspended,
     status: status || "(empty)",
     dispatch_state: dispatchState || "(empty)",
+    driver_availability_mode: availabilityMode || "(legacy)",
+    last_location_updated_at: lastLocTs,
+    selected_service_area_id: String(d.selected_service_area_id ?? "").trim() || "(empty)",
   };
 }
 
 module.exports = {
   normUid,
+  normalizeDriverAvailabilityMode,
   evaluateDriverForOffer,
   evaluateDriverForOfferSoft,
+  evaluateDriverVerificationForOffer,
+  evaluateDriverGeoAndMode,
   loadDispatchGates,
   summarizeDriverForFanout,
+  STALE_DRIVER_LOCATION_MS,
+  MAX_DRIVER_PICKUP_DISTANCE_KM,
 };

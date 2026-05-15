@@ -6,7 +6,9 @@ import 'package:flutter/material.dart';
 
 import 'config/rider_app_config.dart';
 import 'dispatch_request_screen.dart';
+import 'food/merchant_food_hub_screen.dart';
 import 'map_screen.dart';
+import 'models/rollout_delivery_region_model.dart';
 import 'rider_profile_screen.dart';
 import 'rider_login.dart';
 import 'service_type.dart';
@@ -16,7 +18,9 @@ import 'services/rider_active_trip_session_service.dart';
 import 'support/rider_trust_support.dart';
 import 'support/startup_rtdb_support.dart';
 import 'widgets/rider_highlights_carousel.dart';
+import 'widgets/rider_rollout_area_sheet.dart';
 import 'services/rider_compliance_service.dart';
+import 'services/rider_rollout_profile_store.dart';
 import 'widgets/rider_updated_terms_dialog.dart';
 
 class RideTypeScreen extends StatefulWidget {
@@ -275,6 +279,96 @@ class _RideTypeScreenState extends State<RideTypeScreen>
     );
   }
 
+  /// Ensures rider has selected a service area before entering merchant services.
+  /// Shows the area picker if city is not yet set. Returns true if city is set.
+  Future<bool> _requireServiceArea() async {
+    final riderId = _currentRiderId ?? '';
+    if (riderId.isEmpty) return false;
+
+    var selection = await RiderRolloutProfileStore.instance.fetchSelection(riderId);
+    var cityId = selection?[RiderRolloutProfileStore.kCityId] ?? '';
+    if (cityId.isNotEmpty) return true;
+
+    if (!mounted) return false;
+
+    List<RolloutDeliveryRegionModel> regions = const <RolloutDeliveryRegionModel>[];
+    try {
+      final raw = await RiderRideCloudFunctionsService.instance
+          .listDeliveryRegions()
+          .timeout(const Duration(seconds: 22));
+      if (raw['success'] == true) {
+        regions = parseRolloutRegionsResponse(raw);
+      }
+    } catch (_) {}
+
+    if (!mounted) return false;
+    await RiderRolloutAreaSheet.show(
+      context,
+      regions: regions,
+      initialRegionId: selection?[RiderRolloutProfileStore.kRegionId],
+      initialCityId: cityId.isEmpty ? null : cityId,
+      onReloadCatalog: () async {
+        final raw = await RiderRideCloudFunctionsService.instance
+            .listDeliveryRegions()
+            .timeout(const Duration(seconds: 22));
+        if (raw['success'] != true) {
+          throw StateError('listDeliveryRegions_failed');
+        }
+        return parseRolloutRegionsResponse(raw);
+      },
+    );
+
+    selection = await RiderRolloutProfileStore.instance.fetchSelection(riderId);
+    cityId = selection?[RiderRolloutProfileStore.kCityId] ?? '';
+    if (cityId.isEmpty) {
+      _showMessage('Please select your service area to continue.');
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _openFoodFlow() async {
+    final riderId = _currentRiderId ?? '';
+    if (riderId.isEmpty) return;
+    if (!await _requireServiceArea()) return;
+    final selection = await RiderRolloutProfileStore.instance.fetchSelection(riderId);
+    final cityId = selection?[RiderRolloutProfileStore.kCityId] ?? '';
+    final regionId = selection?[RiderRolloutProfileStore.kRegionId];
+    final dispatchMarketId = selection?[RiderRolloutProfileStore.kDispatchMarketId];
+    await _openServiceRoute(
+      serviceLabel: 'Food & Stores',
+      routeName: '/rider/food',
+      errorMessage: 'Unable to open Food & Stores right now.',
+      builder: (_) => MerchantFoodHubScreen(
+        riderId: riderId,
+        cityId: cityId.trim(),
+        regionId: regionId,
+        dispatchMarketId: dispatchMarketId,
+      ),
+    );
+  }
+
+  Future<void> _openMartFlow() async {
+    final riderId = _currentRiderId ?? '';
+    if (riderId.isEmpty) return;
+    if (!await _requireServiceArea()) return;
+    final selection = await RiderRolloutProfileStore.instance.fetchSelection(riderId);
+    final cityId = selection?[RiderRolloutProfileStore.kCityId] ?? '';
+    final regionId = selection?[RiderRolloutProfileStore.kRegionId];
+    final dispatchMarketId = selection?[RiderRolloutProfileStore.kDispatchMarketId];
+    await _openServiceRoute(
+      serviceLabel: 'Groceries & Mart',
+      routeName: '/rider/mart',
+      errorMessage: 'Unable to open Groceries & Mart right now.',
+      builder: (_) => MerchantFoodHubScreen(
+        riderId: riderId,
+        cityId: cityId.trim(),
+        regionId: regionId,
+        dispatchMarketId: dispatchMarketId,
+      ),
+    );
+  }
+
   Future<void> _openServiceRoute({
     required String serviceLabel,
     required String routeName,
@@ -410,6 +504,20 @@ class _RideTypeScreenState extends State<RideTypeScreen>
               background: const Color(0xFF161616),
               border: _gold.withValues(alpha: 0.85),
               onTap: () => unawaited(_openDispatchFlow()),
+            ),
+          if (RiderServiceType.restaurantsFood.isEnabled)
+            (
+              type: RiderServiceType.restaurantsFood,
+              background: const Color(0xFF1A3A2A),
+              border: const Color(0xFF2D7A4F).withValues(alpha: 0.85),
+              onTap: () => unawaited(_openFoodFlow()),
+            ),
+          if (RiderServiceType.groceriesMart.isEnabled)
+            (
+              type: RiderServiceType.groceriesMart,
+              background: const Color(0xFF1A2A3A),
+              border: const Color(0xFF2D5F8A).withValues(alpha: 0.85),
+              onTap: () => unawaited(_openMartFlow()),
             ),
         ];
 

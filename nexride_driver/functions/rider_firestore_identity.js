@@ -88,16 +88,28 @@ async function riderNotifySelfieSubmittedForReview(_data, context) {
     return { success: true, skipped: true };
   }
 
+  // Verify selfie exists — check identity_verifications Firestore doc first for the
+  // actual storage path (rider_verification_uploads/), then fall back to legacy path.
   try {
+    const ivSnap = await firestore.collection("identity_verifications").doc(uid).get();
+    const storagePath = ivSnap.exists ? String(ivSnap.data()?.selfie_storage_path ?? "").trim() : "";
     const bucket = admin.storage().bucket();
-    const fileRef = bucket.file(`user_verification/${uid}/selfie.jpg`);
-    const [exists] = await fileRef.exists();
-    if (!exists) {
-      return { success: false, reason: "selfie_file_missing" };
+    if (storagePath) {
+      const [exists] = await bucket.file(storagePath).exists();
+      if (!exists) {
+        return { success: false, reason: "selfie_file_missing" };
+      }
+    } else {
+      // Legacy fallback path
+      const legacyRef = bucket.file(`user_verification/${uid}/selfie.jpg`);
+      const [legacyExists] = await legacyRef.exists();
+      if (!legacyExists) {
+        return { success: false, reason: "selfie_file_missing" };
+      }
     }
   } catch (checkErr) {
     console.warn("riderNotifySelfieSubmittedForReview selfie exists check skipped", uid, String(checkErr?.message || checkErr));
-    return { success: false, reason: "selfie_verify_failed" };
+    // Don't fail hard — let the admin review queue the selfie anyway.
   }
 
   try {

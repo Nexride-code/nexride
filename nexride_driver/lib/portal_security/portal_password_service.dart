@@ -252,7 +252,9 @@ class PortalPasswordService {
   Future<bool> readMustChangePassword({required User user}) async {
     bool fromClaim = false;
     try {
-      final tokenResult = await user.getIdTokenResult();
+      final tokenResult = await user
+          .getIdTokenResult()
+          .timeout(const Duration(seconds: 8));
       fromClaim = tokenResult.claims?['temporaryPassword'] == true;
     } catch (_) {
       fromClaim = false;
@@ -262,7 +264,8 @@ class PortalPasswordService {
     try {
       final snapshot = await _resolvedDatabase
           .ref('$_kAccountSecurityRtdbRoot/${user.uid}')
-          .get();
+          .get()
+          .timeout(const Duration(seconds: 8));
       final value = snapshot.value;
       if (value is Map && value['temporaryPassword'] == true) {
         fromRtdb = true;

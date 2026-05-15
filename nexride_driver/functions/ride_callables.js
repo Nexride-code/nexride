@@ -6,13 +6,16 @@
 const admin = require("firebase-admin");
 const { platformFeeNgn } = require("./params");
 const { syncRideTrackPublic } = require("./track_public");
-const { isNexRideAdmin } = require("./admin_auth");
+const adminPerms = require("./admin_permissions");
 const { createWalletTransactionInternal } = require("./wallet_core");
 const { ServerValue } = require("firebase-admin/database");
 const {
   evaluateDriverForOffer,
   evaluateDriverForOfferSoft,
+  evaluateDriverGeoAndMode,
+  evaluateDriverVerificationForOffer,
   loadDispatchGates,
+  normalizeDriverAvailabilityMode,
   summarizeDriverForFanout,
 } = require("./driver_dispatch_gates");
 const { ensureRideChatThread } = require("./ride_chat_admin");
@@ -65,6 +68,21 @@ const LEGACY_OPEN_STATUS = new Set([
 
 function normUid(uid) {
   return String(uid ?? "").trim();
+}
+
+function boolTrueGate(v) {
+  return v === true || v === "true" || v === 1 || v === "1";
+}
+
+function isDriverSuspendedProfile(d) {
+  const p = d && typeof d === "object" ? d : {};
+  return (
+    boolTrueGate(p.suspended) ||
+    boolTrueGate(p.account_suspended) ||
+    String(p.driver_status ?? "")
+      .trim()
+      .toLowerCase() === "suspended"
+  );
 }
 
 /** Normalize Firebase push-id style keys (trim, unicode dash → ASCII "-"). */
@@ -489,6 +507,27 @@ async function riderProfileRequirementOk(db, riderId, gates, authLike) {
   }
 }
 
+/**
+ * Driver declines an offer popup: clear this driver's queue row + fanout bit.
+ */
+async function withdrawDriverOffer(data, context, db) {
+  const driverId = normUid(context?.auth?.uid);
+  if (!driverId) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const rideId = normUid(data?.rideId ?? data?.ride_id);
+  if (!rideId) {
+    return { success: false, reason: "invalid_ride_id" };
+  }
+  await db.ref().update({
+    [`driver_offer_queue/${driverId}/${rideId}`]: null,
+    [`driver_offer_queue_debug/${driverId}/${rideId}`]: null,
+    [`ride_offer_fanout/${rideId}/${driverId}`]: null,
+  });
+  console.log("DRIVER_WITHDRAW_OFFER", { driverId, rideId });
+  return { success: true, rideId, driverId };
+}
+
 async function clearFanoutAndOffers(db, rideId, alsoDriverId = "") {
   const rid = normUid(rideId);
   if (!rid) return;
@@ -732,7 +771,7 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload) {
     }
 
     if (useSoft) {
-      const softEl = evaluateDriverForOfferSoft(profile, ridePayload);
+      const softEl = evaluateDriverForOfferSoft(profile, ridePayload, gates);
       if (!softEl.ok) {
         const reason = `${softEl.log || "filtered"}:${softEl.detail || "unknown"}`;
         console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, `reason=${reason}`);
@@ -754,6 +793,13 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload) {
         console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, `reason=${reason}`);
         return;
       }
+    }
+
+    const geo = evaluateDriverGeoAndMode(profile, ridePayload, now);
+    if (!geo.ok) {
+      const reason = `${geo.log || "filtered"}:${geo.detail || "unknown"}`;
+      console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, `reason=${reason}`);
+      return;
     }
 
     console.log("MATCH_DRIVER_ELIGIBLE", `uid=${d}`);
@@ -1169,14 +1215,29 @@ async function createRideRequest(data, context, db) {
       region_id: data?.service_region_id ?? data?.rollout_region_id,
       city_id: data?.service_city_id ?? data?.rollout_city_id,
     },
+    { strict_ride_request_hints: true },
   );
   if (!rolloutGate.ok) {
     console.log("RIDER_CREATE_FAIL", riderId, rolloutGate.reason || "rollout_denied");
+    let reason = rolloutGate.reason || "service_area_unsupported";
+    let message =
+      rolloutGate.message || "NexRide is not available in your area yet.";
+    if (
+      reason === "pickup_outside_enabled_city" ||
+      reason === "service_area_unsupported"
+    ) {
+      reason = "no_service_area_for_pickup";
+      message = "NexRide is not available in this pickup area yet.";
+    }
     return {
       success: false,
-      reason: rolloutGate.reason || "service_area_unsupported",
-      message:
-        rolloutGate.message || "NexRide is not available in your area yet.",
+      reason,
+      message,
+      suggested_service_area_id: rolloutGate.suggested_service_area_id ?? null,
+      suggested_service_area_name: rolloutGate.suggested_service_area_name ?? null,
+      suggested_service_region_id: rolloutGate.suggested_service_region_id ?? null,
+      suggested_state: rolloutGate.suggested_state ?? null,
+      suggested_dispatch_market_id: rolloutGate.suggested_dispatch_market_id ?? null,
     };
   }
 
@@ -1188,6 +1249,26 @@ async function createRideRequest(data, context, db) {
   if (fare > riderGates.max_fare_ngn) {
     console.log("RIDER_CREATE_FAIL", riderId, "fare_above_limit");
     return { success: false, reason: "fare_above_limit" };
+  }
+
+  const { computeRiderPricing, assertClientTotalMatches } = require("./pricing_calculator");
+  const pricing = computeRiderPricing({
+    flow: "ride_booking",
+    trip_fare_ngn: fare,
+  });
+  const totalMismatch = assertClientTotalMatches(
+    pricing,
+    data?.total_ngn ?? data?.totalNgn ?? intentMerged?.total_ngn,
+  );
+  if (!totalMismatch.ok) {
+    console.log("RIDER_CREATE_FAIL", riderId, totalMismatch.reason);
+    return {
+      success: false,
+      reason: totalMismatch.reason,
+      reason_code: totalMismatch.reason_code,
+      message: totalMismatch.message,
+      retryable: totalMismatch.retryable,
+    };
   }
 
   const currency =
@@ -1265,6 +1346,10 @@ async function createRideRequest(data, context, db) {
     destination: dropoff && typeof dropoff === "object" ? dropoff : null,
     dropoff: dropoff && typeof dropoff === "object" ? dropoff : null,
     fare,
+    platform_fee_ngn: pricing.platform_fee_ngn,
+    small_order_fee_ngn: pricing.small_order_fee_ngn,
+    total_ngn: pricing.total_ngn,
+    fee_breakdown: pricing.fee_breakdown,
     currency,
     distance_km: distanceKm,
     eta_min: etaMin,
@@ -1288,6 +1373,9 @@ async function createRideRequest(data, context, db) {
     service_type: String(
       intentMerged?.service_type ?? data?.service_type ?? data?.serviceType ?? "ride",
     ).trim(),
+    resolved_service_region_id: rolloutGate.region_id || null,
+    resolved_service_city_id: rolloutGate.city_id || null,
+    resolved_dispatch_market_id: rolloutGate.dispatch_market_id || null,
   };
 
   if (paymentNormalized === "bank_transfer" && !prepaidFwRef) {
@@ -1420,7 +1508,15 @@ async function createRideRequest(data, context, db) {
 
   await syncRideTrackPublic(db, rideId);
 
-  return { success: true, rideId, trackToken, reason: "created" };
+  return {
+    success: true,
+    rideId,
+    trackToken,
+    reason: "created",
+    resolved_service_region_id: rolloutGate.region_id || null,
+    resolved_service_city_id: rolloutGate.city_id || null,
+    resolved_dispatch_market_id: rolloutGate.dispatch_market_id || null,
+  };
 }
 
 async function acceptRideRequest(data, context, db) {
@@ -2242,10 +2338,7 @@ async function cancelRideRequest(data, context, db) {
     return { success: false, reason: "unauthorized" };
   }
   const uid = normUid(context.auth.uid);
-  let isAdminUser = context.auth?.token?.admin === true;
-  if (!isAdminUser) {
-    isAdminUser = await isNexRideAdmin(db, context);
-  }
+  let isAdminUser = await adminPerms.canAdmin(db, context, "trips.write");
   const rideRef = db.ref(`ride_requests/${rideId}`);
   let reason = "unknown";
   const tx = await rideRef.transaction((cur) => {
@@ -2514,6 +2607,15 @@ async function setDriverOnline(data, context, db) {
 
   const snap = await db.ref(`drivers/${driverId}`).get();
   const d = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
+
+  if (isDriverSuspendedProfile(d)) {
+    return {
+      success: false,
+      reason: "driver_suspended",
+      message: "Your account is suspended. Contact support if you believe this is a mistake.",
+    };
+  }
+
   const dmRaw = String(
     data?.dispatch_market ??
       data?.dispatchMarket ??
@@ -2532,28 +2634,100 @@ async function setDriverOnline(data, context, db) {
     };
   }
 
-  const lat = Number(data?.latitude ?? data?.lat ?? "");
-  const lng = Number(data?.longitude ?? data?.lng ?? "");
+  const gates = await loadDispatchGates(db);
+  const dPreview = { ...d, dispatch_market: market, market_pool: market, market };
+  const approval = evaluateDriverVerificationForOffer(
+    dPreview,
+    { soft_verification: false, require_bvn: gates.require_bvn === true },
+    { market_pool: market, market, service_type: "ride" },
+  );
+  if (!approval.ok) {
+    if (approval.log === "DRIVER_FILTERED_VERIFICATION") {
+      return {
+        success: false,
+        reason: "driver_not_approved",
+        message:
+          "Your account must be approved before going online. Complete verification in the Driver Hub.",
+      };
+    }
+    return {
+      success: false,
+      reason: String(approval.detail || approval.log || "not_eligible").trim() || "not_eligible",
+      message: "You are not eligible to go online yet.",
+    };
+  }
+
+  let mode = normalizeDriverAvailabilityMode(
+    data?.driver_availability_mode ??
+      data?.availability_mode ??
+      data?.availabilityMode ??
+      "",
+  );
+  const latIn = Number(data?.latitude ?? data?.lat ?? "");
+  const lngIn = Number(data?.longitude ?? data?.lng ?? "");
+  const regionHint = String(data?.service_region_id ?? data?.rollout_region_id ?? "").trim();
+  const cityHint = String(data?.service_city_id ?? data?.rollout_city_id ?? "").trim();
+
+  if (!mode) {
+    if (Number.isFinite(latIn) && Number.isFinite(lngIn)) {
+      mode = "current_location";
+    } else if (regionHint && cityHint) {
+      mode = "service_area";
+    }
+  }
+
+  if (mode === "offline") {
+    return setDriverOffline(data, context, db);
+  }
+
+  if (mode !== "current_location" && mode !== "service_area") {
+    return {
+      success: false,
+      reason: "invalid_availability_mode",
+      message:
+        "Choose how you want to receive requests: current GPS location or selected service area.",
+    };
+  }
+
   let onlineRollout = { ok: true };
-  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+  if (mode === "service_area") {
+    if (!regionHint || !cityHint) {
+      return {
+        success: false,
+        reason: "service_area_required",
+        message: "Choose a service area (state and city) before going online in area mode.",
+      };
+    }
     onlineRollout = await deliveryRegions.assertRolloutWithHints(
       admin.firestore(),
       market,
-      lat,
-      lng,
+      Number.NaN,
+      Number.NaN,
+      "rides",
+      { region_id: regionHint, city_id: cityHint },
+    );
+  } else if (mode === "current_location") {
+    if (!Number.isFinite(latIn) || !Number.isFinite(lngIn)) {
+      return {
+        success: false,
+        reason: "location_required",
+        message:
+          "Location permission and GPS are required to go online while matching from your current position.",
+      };
+    }
+    onlineRollout = await deliveryRegions.assertRolloutWithHints(
+      admin.firestore(),
+      market,
+      latIn,
+      lngIn,
       "rides",
       {
         region_id: data?.service_region_id ?? data?.rollout_region_id,
         city_id: data?.service_city_id ?? data?.rollout_city_id,
       },
     );
-  } else if (!deliveryRegions.isRolloutDispatchMarket(market)) {
-    onlineRollout = {
-      ok: false,
-      reason: "driver_service_area_unsupported",
-      message: "NexRide is not available in this launch city yet.",
-    };
   }
+
   if (!onlineRollout.ok) {
     return {
       success: false,
@@ -2563,7 +2737,11 @@ async function setDriverOnline(data, context, db) {
   }
 
   const now = nowMs();
-  await db.ref(`drivers/${driverId}`).update({
+  const selectedName = String(data?.selected_service_area_name ?? "").trim().slice(0, 200);
+  const selectedServiceAreaId = mode === "service_area" ? cityHint : null;
+
+  /** @type {Record<string, unknown>} */
+  const updates = {
     online: true,
     is_online: true,
     isOnline: true,
@@ -2574,12 +2752,50 @@ async function setDriverOnline(data, context, db) {
     online_session_started_at: now,
     dispatch_market: market,
     market_pool: market,
+    city: market,
     updated_at: now,
-  });
+    driver_availability_mode: mode,
+    selected_service_area_id: selectedServiceAreaId,
+    selected_service_area_name:
+      mode === "service_area" && selectedName ? selectedName : null,
+    rollout_region_id: regionHint || null,
+    rollout_city_id: cityHint || null,
+    last_availability_intent: "online",
+    last_availability_intent_at: now,
+  };
 
-  const logger = console;
-  logger.info("DRIVER_ONLINE", { driverId, market });
-  return { success: true };
+  if (mode === "current_location" && Number.isFinite(latIn) && Number.isFinite(lngIn)) {
+    updates.lat = latIn;
+    updates.lng = lngIn;
+    updates.last_location = { lat: latIn, lng: lngIn };
+    updates.last_location_updated_at = now;
+  }
+
+  const paths = {};
+  for (const [k, v] of Object.entries(updates)) {
+    paths[`drivers/${driverId}/${k}`] = v;
+  }
+  paths[`online_drivers/${driverId}`] = {
+    is_online: true,
+    availability_mode: mode,
+    dispatch_market: market,
+    lat:
+      mode === "current_location" && Number.isFinite(latIn) && Number.isFinite(lngIn)
+        ? latIn
+        : null,
+    lng:
+      mode === "current_location" && Number.isFinite(latIn) && Number.isFinite(lngIn)
+        ? lngIn
+        : null,
+    selected_service_area_id: selectedServiceAreaId,
+    selected_service_area_name:
+      mode === "service_area" && selectedName ? selectedName : null,
+    updated_at: now,
+  };
+
+  await db.ref().update(paths);
+  console.info("DRIVER_ONLINE", { driverId, market, mode });
+  return { success: true, reason: "online", driver_availability_mode: mode };
 }
 
 async function setDriverOffline(data, context, db) {
@@ -2589,21 +2805,81 @@ async function setDriverOffline(data, context, db) {
   }
 
   const now = nowMs();
-  await db.ref(`drivers/${driverId}`).update({
-    online: false,
-    is_online: false,
-    isOnline: false,
-    isAvailable: false,
-    available: false,
-    status: "offline",
-    dispatch_state: "offline",
-    online_session_started_at: null,
-    updated_at: now,
-  });
+  const paths = {
+    [`drivers/${driverId}/online`]: false,
+    [`drivers/${driverId}/is_online`]: false,
+    [`drivers/${driverId}/isOnline`]: false,
+    [`drivers/${driverId}/isAvailable`]: false,
+    [`drivers/${driverId}/available`]: false,
+    [`drivers/${driverId}/status`]: "offline",
+    [`drivers/${driverId}/dispatch_state`]: "offline",
+    [`drivers/${driverId}/online_session_started_at`]: null,
+    [`drivers/${driverId}/driver_availability_mode`]: "offline",
+    [`drivers/${driverId}/updated_at`]: now,
+    [`drivers/${driverId}/last_availability_intent`]: "offline",
+    [`drivers/${driverId}/last_availability_intent_at`]: now,
+    [`online_drivers/${driverId}`]: null,
+  };
+  await db.ref().update(paths);
+  console.info("DRIVER_OFFLINE", { driverId });
+  return { success: true, reason: "offline" };
+}
 
-  const logger = console;
-  logger.info("DRIVER_OFFLINE", { driverId });
-  return { success: true };
+async function driverUpdateLiveLocation(data, context, db) {
+  const driverId = normUid(context?.auth?.uid);
+  if (!driverId) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const lat = Number(data?.latitude ?? data?.lat ?? "");
+  const lng = Number(data?.longitude ?? data?.lng ?? "");
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return {
+      success: false,
+      reason: "location_required",
+      message: "GPS coordinates are missing or invalid.",
+    };
+  }
+
+  const snap = await db.ref(`drivers/${driverId}`).get();
+  const d = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
+  if (isDriverSuspendedProfile(d)) {
+    return {
+      success: false,
+      reason: "driver_suspended",
+      message: "Your account is suspended.",
+    };
+  }
+
+  const online =
+    d.isOnline === true || d.is_online === true || d.online === true;
+  if (!online) {
+    return { success: false, reason: "not_online", message: "You are not online." };
+  }
+
+  const mode = normalizeDriverAvailabilityMode(
+    d.driver_availability_mode ?? d.availability_mode ?? "",
+  );
+  if (mode && mode !== "current_location") {
+    return {
+      success: false,
+      reason: "invalid_availability_mode",
+      message: "Live location refresh applies only when using current GPS mode.",
+    };
+  }
+
+  const now = nowMs();
+  const paths = {
+    [`drivers/${driverId}/lat`]: lat,
+    [`drivers/${driverId}/lng`]: lng,
+    [`drivers/${driverId}/last_location`]: { lat, lng },
+    [`drivers/${driverId}/last_location_updated_at`]: now,
+    [`drivers/${driverId}/updated_at`]: now,
+    [`online_drivers/${driverId}/lat`]: lat,
+    [`online_drivers/${driverId}/lng`]: lng,
+    [`online_drivers/${driverId}/updated_at`]: now,
+  };
+  await db.ref().update(paths);
+  return { success: true, reason: "updated" };
 }
 
 module.exports = {
@@ -2620,6 +2896,8 @@ module.exports = {
   patchRideRequestMetadata,
   setDriverOnline,
   setDriverOffline,
+  driverUpdateLiveLocation,
+  withdrawDriverOffer,
   canonicalDispatchMarket,
   loadRiderCreateGates,
   loadDispatchGates,

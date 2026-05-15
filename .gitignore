@@ -1,6 +1,12 @@
 node_modules/
 .env
 .env.local
+.env.*
+!**/.env.example
+nexride_driver/functions/.env.nexride-8d5bc
+**/.DS_Store
+nexride_driver/crash.txt
+nexride_driver/.cursor/
 
 # Firebase service-account JSON keys — NEVER commit
 scripts/serviceAccountKey.json
@@ -32,6 +38,8 @@ nexride_driver/android/app/build/
 # iOS / desktop ephemeral
 ios/Pods/
 nexride_driver/ios/Pods/
+nexride_merchant/ios/Pods/
+nexride_merchant/.tmp_pod/
 macos/Flutter/ephemeral/
 windows/flutter/ephemeral/
 linux/flutter/ephemeral/ios/Pods/

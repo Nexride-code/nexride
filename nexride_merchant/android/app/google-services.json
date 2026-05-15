@@ -1,0 +1,87 @@
+{
+  "project_info": {
+    "project_number": "684231437366",
+    "firebase_url": "https://nexride-8d5bc-default-rtdb.firebaseio.com",
+    "project_id": "nexride-8d5bc",
+    "storage_bucket": "nexride-8d5bc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:684231437366:android:b0729b7486025abcec3c97",
+        "android_client_info": {
+          "package_name": "com.example.nexride"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBPKbsKmUCfq0ylIAuekiVko_Gu6wWQse4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:684231437366:android:ce00fc6559282fbaec3c97",
+        "android_client_info": {
+          "package_name": "com.example.nexride_driver"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBPKbsKmUCfq0ylIAuekiVko_Gu6wWQse4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:684231437366:android:5f7ce624ff1aa9d6ec3c97",
+        "android_client_info": {
+          "package_name": "com.nexride.driver"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBPKbsKmUCfq0ylIAuekiVko_Gu6wWQse4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:684231437366:android:6eea081d5d004ff4ec3c97",
+        "android_client_info": {
+          "package_name": "com.nexride.merchant"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBPKbsKmUCfq0ylIAuekiVko_Gu6wWQse4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

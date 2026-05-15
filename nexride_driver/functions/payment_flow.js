@@ -19,6 +19,7 @@ const {
 } = require("./ride_callables");
 const { fanOutDeliveryOffersIfEligible } = require("./delivery_callables");
 const { syncRideTrackPublic } = require("./track_public");
+const { loadNexrideOfficialBankAccountFromRtdb } = require("./nexride_official_bank_config");
 const DEFAULT_FLUTTERWAVE_REDIRECT_URL =
   "https://nexride-8d5bc.web.app/pay/card-link-complete";
 
@@ -132,12 +133,12 @@ async function initiateFlutterwavePayment(data, context, db) {
   const riderId = normUid(context.auth.uid);
   const rideId = normUid(data?.rideId ?? data?.ride_id);
   const deliveryId = normUid(data?.deliveryId ?? data?.delivery_id);
-  const amount = Number(data?.amount ?? 0);
+  let amount = Number(data?.amount ?? 0);
   const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
   const email = String(
     data?.email ?? context.auth.token?.email ?? `${riderId}@nexride.local`,
   ).trim();
-  if ((!rideId && !deliveryId) || !Number.isFinite(amount) || amount <= 0) {
+  if (!rideId && !deliveryId) {
     return { success: false, reason: "invalid_input" };
   }
   if (rideId && deliveryId) {
@@ -157,6 +158,43 @@ async function initiateFlutterwavePayment(data, context, db) {
     if (!delivery || typeof delivery !== "object" || normUid(delivery.customer_id) !== riderId) {
       return { success: false, reason: "forbidden" };
     }
+  }
+  const { computeRiderPricing } = require("./pricing_calculator");
+  let feeBreakdown = null;
+  let platformFeeNgn = null;
+  if (ride) {
+    const serverTotal = Number(ride.total_ngn ?? 0);
+    if (serverTotal > 0) {
+      amount = serverTotal;
+      feeBreakdown = ride.fee_breakdown ?? null;
+      platformFeeNgn = Number(ride.platform_fee_ngn ?? 0) || null;
+    } else {
+      const fare = Number(ride.fare ?? 0);
+      if (fare > 0) {
+        const pricing = computeRiderPricing({ flow: "ride_booking", trip_fare_ngn: fare });
+        amount = pricing.total_ngn;
+        feeBreakdown = pricing.fee_breakdown;
+        platformFeeNgn = pricing.platform_fee_ngn;
+      }
+    }
+  } else if (delivery) {
+    const serverTotal = Number(delivery.total_ngn ?? 0);
+    if (serverTotal > 0) {
+      amount = serverTotal;
+      feeBreakdown = delivery.fee_breakdown ?? null;
+      platformFeeNgn = Number(delivery.platform_fee_ngn ?? 0) || null;
+    } else {
+      const fare = Number(delivery.fare ?? 0);
+      if (fare > 0) {
+        const pricing = computeRiderPricing({ flow: "dispatch_request", trip_fare_ngn: fare });
+        amount = pricing.total_ngn;
+        feeBreakdown = pricing.fee_breakdown;
+        platformFeeNgn = pricing.platform_fee_ngn;
+      }
+    }
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { success: false, reason: "invalid_input" };
   }
   console.log(
     "PAYMENT_INIT_START",
@@ -216,6 +254,9 @@ async function initiateFlutterwavePayment(data, context, db) {
     delivery_id: deliveryId || null,
     rider_id: riderId,
     amount,
+    total_ngn: amount,
+    platform_fee_ngn: platformFeeNgn,
+    fee_breakdown: feeBreakdown,
     currency,
     status: "pending",
     provider_link: r.link,
@@ -244,6 +285,9 @@ async function initiateFlutterwavePayment(data, context, db) {
     status: "success",
     tx_ref,
     amount,
+    total_ngn: amount,
+    platform_fee_ngn: platformFeeNgn,
+    fee_breakdown: feeBreakdown,
     currency,
     customer: body.customer,
     public_key: String(flutterwavePublicKey.value() || "").trim(),
@@ -302,6 +346,9 @@ async function initiateFlutterwaveRideIntent(data, context, db) {
   if (fare > riderGates.max_fare_ngn) {
     return { success: false, reason: "fare_above_limit" };
   }
+  const { computeRiderPricing } = require("./pricing_calculator");
+  const pricing = computeRiderPricing({ flow: "ride_booking", trip_fare_ngn: fare });
+  const chargeAmount = pricing.total_ngn;
   const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
   const distanceKm = Number(data?.distance_km ?? data?.distanceKm ?? 0) || 0;
   const etaMin = Number(data?.eta_min ?? data?.etaMin ?? 0) || 0;
@@ -320,7 +367,9 @@ async function initiateFlutterwaveRideIntent(data, context, db) {
   console.log(
     "PAYMENT_INTENT_START",
     `rider=${riderId}`,
-    `amount=${fare}`,
+    `amount=${chargeAmount}`,
+    `fare=${fare}`,
+    `platform_fee=${pricing.platform_fee_ngn}`,
     `currency=${currency}`,
     `market=${market}`,
   );
@@ -335,6 +384,9 @@ async function initiateFlutterwaveRideIntent(data, context, db) {
   const rideIntent = {
     pickup,
     fare,
+    platform_fee_ngn: pricing.platform_fee_ngn,
+    total_ngn: pricing.total_ngn,
+    fee_breakdown: pricing.fee_breakdown,
     currency,
     distance_km: distanceKm,
     eta_min: etaMin,
@@ -356,7 +408,7 @@ async function initiateFlutterwaveRideIntent(data, context, db) {
   ).trim();
   const body = {
     tx_ref,
-    amount: fare,
+    amount: chargeAmount,
     currency,
     redirect_url: redirectUrl,
     payment_options: "card",
@@ -386,9 +438,10 @@ async function initiateFlutterwaveRideIntent(data, context, db) {
     tx_ref,
     rider_id: riderId,
     ride_id: null,
-    amount: fare,
+    amount: chargeAmount,
     currency,
     ride_intent: rideIntent,
+    fee_breakdown: pricing.fee_breakdown,
     status: "pending",
     intent: true,
     provider_link: r.link,
@@ -400,7 +453,10 @@ async function initiateFlutterwaveRideIntent(data, context, db) {
     success: true,
     status: "success",
     tx_ref,
-    amount: fare,
+    amount: chargeAmount,
+    total_ngn: pricing.total_ngn,
+    platform_fee_ngn: pricing.platform_fee_ngn,
+    fee_breakdown: pricing.fee_breakdown,
     currency,
     customer: body.customer,
     public_key: String(flutterwavePublicKey.value() || "").trim(),
@@ -801,6 +857,11 @@ async function registerBankTransferPayment(data, context, db) {
   }
   const currency = String(ride.currency ?? "NGN").trim().toUpperCase() || "NGN";
 
+  const bankRow = await loadNexrideOfficialBankAccountFromRtdb(db);
+  if (!bankRow) {
+    return { success: false, reason: "official_bank_not_configured" };
+  }
+
   const rideIdCompact = String(rideId).replace(/[^a-zA-Z0-9]/g, "");
   const tx_ref = rideIdCompact
     ? `nexride_bt_${rideIdCompact}`
@@ -836,6 +897,11 @@ async function registerBankTransferPayment(data, context, db) {
     tx_ref,
     amount: fare,
     currency,
+    bank: {
+      bank_name: bankRow.bank_name,
+      account_name: bankRow.account_name,
+      account_number: bankRow.account_number,
+    },
     instructions:
       "Transfer to NexRide official account, include this reference exactly in narration, then upload your payment proof after the trip.",
   };
@@ -1093,6 +1159,88 @@ async function handleFlutterwaveWebhook(req, res, db) {
   const meta = data?.meta && typeof data.meta === "object" ? data.meta : {};
   const ptSnap = txRef ? await db.ref(`payment_transactions/${txRef}`).get() : null;
   const pt = ptSnap ? ptSnap.val() : null;
+
+  if (pt && typeof pt === "object" && String(pt.purpose || "").trim() === "merchant_wallet_topup") {
+    const expectedCurrency = String(pt.currency || hookCurrency || "NGN")
+      .trim()
+      .toUpperCase() || "NGN";
+    const refForVerify = String(txRef || "").trim();
+    const minAmt = Number(pt.amount ?? 0);
+    const expectOpts = {
+      expectedTxRef: refForVerify || undefined,
+      expectedCurrency,
+    };
+    if (Number.isFinite(minAmt) && minAmt > 0) {
+      expectOpts.minAmount = minAmt;
+    }
+    const vMerchant = await verifyFlutterwavePaymentStrict({
+      transactionId,
+      txRef,
+      expect: expectOpts,
+    });
+    if (!vMerchant.ok) {
+      console.log(
+        "MERCHANT_TOPUP_VERIFY_FAIL",
+        transactionId || txRef,
+        vMerchant.reason || "",
+      );
+      res.status(200).send("verify-failed");
+      return;
+    }
+    const payTidMerchant = String(vMerchant.flwTransactionId || transactionId || "").trim();
+    if (!payTidMerchant) {
+      res.status(200).send("ignored-no-pay-id");
+      return;
+    }
+    const claimRefMerchant = db.ref(`webhook_applied/flutterwave/${payTidMerchant}`);
+    const trMerchant = await claimRefMerchant.transaction((cur) => {
+      if (cur != null && cur !== undefined) {
+        return undefined;
+      }
+      return { applied_at: nowMs(), purpose: "merchant_wallet_topup" };
+    });
+    if (!trMerchant.committed) {
+      console.log("MERCHANT_TOPUP_DUPLICATE", payTidMerchant);
+      res.status(200).send("ok-duplicate");
+      return;
+    }
+    try {
+      const merchantWallet = require("./merchant/merchant_wallet");
+      const admin = require("firebase-admin");
+      const fs = admin.firestore();
+      const fin = await merchantWallet.finalizeMerchantFlutterwaveTopUpVerified(db, fs, {
+        payTid: payTidMerchant,
+        txRef: String(vMerchant.tx_ref || txRef || "").trim(),
+        verifiedAmount: vMerchant.amount,
+        currency: vMerchant.currency || expectedCurrency,
+        webhookBody: body,
+      });
+      if (!fin.success) {
+        throw new Error(fin.reason || "finalize_failed");
+      }
+      if (webhookDedupeKey) {
+        await db.ref(`webhook_applied/flutterwave_webhook/${webhookDedupeKey}`).set({
+          applied_at: nowMs(),
+          flutterwave_transaction_id: payTidMerchant,
+          tx_ref: String(vMerchant.tx_ref || txRef || "").trim() || null,
+          purpose: "merchant_wallet_topup",
+        });
+      }
+      console.log("MERCHANT_TOPUP_APPLIED", payTidMerchant);
+      res.status(200).send("ok");
+      return;
+    } catch (err) {
+      try {
+        await claimRefMerchant.remove();
+      } catch (_) {
+        /* ignore */
+      }
+      console.log("MERCHANT_TOPUP_APPLY_FAIL", payTidMerchant, String(err?.message || err));
+      res.status(500).send("apply-error");
+      return;
+    }
+  }
+
   let rideId = String(meta?.ride_id ?? meta?.rideId ?? "").trim();
   if (!rideId) {
     rideId = extractRideIdFromNexrideTxRef(txRef);
@@ -1285,10 +1433,116 @@ async function handleFlutterwaveWebhook(req, res, db) {
   }
 }
 
+/**
+ * Initiate a Flutterwave payment for a merchant food order.
+ * No rideId/deliveryId is required — this creates a standalone payment intent
+ * that is later consumed by riderPlaceMerchantOrder via assertFwPaymentForCustomer.
+ */
+async function initiateFlutterwaveMerchantOrderPayment(data, context, db) {
+  if (!context.auth) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const riderId = normUid(context.auth.uid);
+  const { computeRiderPricing } = require("./pricing_calculator");
+  const subtotalNgn = Math.round(Math.max(0, Number(data?.subtotal_ngn ?? data?.subtotalNgn ?? 0) || 0));
+  const deliveryFeeNgn = Math.round(
+    Math.max(0, Number(data?.delivery_fee_ngn ?? data?.deliveryFeeNgn ?? 0) || 0),
+  );
+  let amount = Number(data?.amount ?? 0);
+  let pricing = null;
+  if (subtotalNgn > 0 || deliveryFeeNgn > 0) {
+    const orderFlow = String(data?.order_flow ?? data?.orderFlow ?? "food_order").trim().toLowerCase();
+    pricing = computeRiderPricing({
+      flow: orderFlow === "mart_order" || orderFlow === "store_order" ? orderFlow : "food_order",
+      subtotal_ngn: subtotalNgn,
+      delivery_fee_ngn: deliveryFeeNgn,
+    });
+    amount = pricing.total_ngn;
+  }
+  const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
+  const email = String(
+    data?.email ?? context.auth.token?.email ?? `${riderId}@nexride.local`,
+  ).trim();
+  const customerName = String(data?.customer_name ?? "NexRide customer").trim();
+  if (!riderId || !Number.isFinite(amount) || amount <= 0) {
+    return { success: false, reason: "invalid_input" };
+  }
+  if (amount > 5_000_000) {
+    return { success: false, reason: "amount_exceeds_limit" };
+  }
+
+  const txRefKey = db.ref("payment_transactions").push().key;
+  const baseTxRef = `nexride_food_${nowMs()}`;
+  const tx_ref = txRefKey ? `${baseTxRef}_${txRefKey}` : baseTxRef;
+  if (!tx_ref.trim()) {
+    return { success: false, reason: "tx_ref_generation_failed" };
+  }
+  const redirectUrl = String(
+    data?.redirect_url ?? data?.redirectUrl ?? DEFAULT_FLUTTERWAVE_REDIRECT_URL,
+  ).trim();
+  const body = {
+    tx_ref,
+    amount,
+    currency,
+    redirect_url: redirectUrl,
+    payment_options: "card",
+    customer: {
+      email: email || `${riderId}@nexride.local`,
+      name: customerName,
+    },
+    meta: { rider_id: riderId, purpose: "merchant_order" },
+    customizations: flutterwaveCheckoutCustomizations("NexRide food order"),
+  };
+
+  const r = await createHostedPaymentLink(body);
+  if (!r.ok) {
+    console.log("MERCHANT_PAYMENT_INIT_FAIL", `reason=${r.reason}`, `tx_ref=${tx_ref}`);
+    return { success: false, reason: r.reason || "payment_init_failed", provider: r.payload };
+  }
+
+  const now = nowMs();
+  await db.ref(`payment_transactions/${tx_ref}`).set({
+    tx_ref,
+    ride_id: null,
+    delivery_id: null,
+    rider_id: riderId,
+    purpose: "merchant_order",
+    amount,
+    total_ngn: amount,
+    platform_fee_ngn: pricing?.platform_fee_ngn ?? null,
+    small_order_fee_ngn: pricing?.small_order_fee_ngn ?? null,
+    fee_breakdown: pricing?.fee_breakdown ?? null,
+    subtotal_ngn: subtotalNgn || null,
+    delivery_fee_ngn: deliveryFeeNgn || null,
+    currency,
+    status: "pending",
+    provider_link: r.link,
+    verified: false,
+    created_at: now,
+    updated_at: now,
+  });
+
+  console.log("MERCHANT_PAYMENT_INIT_OK", `rider=${riderId}`, `tx_ref=${tx_ref}`, `amount=${amount}`);
+  return {
+    success: true,
+    tx_ref,
+    amount,
+    total_ngn: amount,
+    platform_fee_ngn: pricing?.platform_fee_ngn ?? null,
+    small_order_fee_ngn: pricing?.small_order_fee_ngn ?? null,
+    fee_breakdown: pricing?.fee_breakdown ?? null,
+    currency,
+    authorization_url: r.link,
+    public_key: String(flutterwavePublicKey.value() || "").trim(),
+    reason: "initiated",
+  };
+}
+
 module.exports = {
   initiateFlutterwavePayment,
   initiateFlutterwaveRideIntent,
   initiateFlutterwaveCardLinkIntent,
+  initiateFlutterwaveMerchantOrderPayment,
   abandonFlutterwaveRideIntent,
   registerBankTransferPayment,
   verifyFlutterwavePayment,

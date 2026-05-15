@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../admin_config.dart';
+import '../admin_rbac.dart';
 import '../models/admin_models.dart';
 import '../utils/admin_formatters.dart';
 import 'admin_components.dart';
@@ -80,6 +81,7 @@ class AdminShell extends StatelessWidget {
                     selected: section,
                     onSelected: onSectionSelected,
                     badgeCounts: sidebarBadgeCounts,
+                    session: session,
                   ),
                   Expanded(child: content),
                 ],
@@ -100,6 +102,7 @@ class AdminShell extends StatelessWidget {
                   onSectionSelected(next);
                 },
                 badgeCounts: sidebarBadgeCounts,
+                session: session,
               ),
             ),
           ),
@@ -267,7 +270,7 @@ class _AdminScaffoldContent extends StatelessWidget {
                       borderRadius: BorderRadius.circular(18),
                     ),
                     child: Text(
-                      '${session.displayName} • ${sentenceCaseStatus(session.accessMode)} access',
+                      '${session.displayName} • ${formatAdminRoleLabel(session.adminRole)} • ${sentenceCaseStatus(session.accessMode)}',
                       style: const TextStyle(
                         color: Color(0xFF6E675C),
                         fontWeight: FontWeight.w700,
@@ -389,11 +392,13 @@ class _AdminSidebar extends StatelessWidget {
     required this.selected,
     required this.onSelected,
     required this.badgeCounts,
+    required this.session,
   });
 
   final AdminSection selected;
   final ValueChanged<AdminSection> onSelected;
   final Map<AdminSection, int> badgeCounts;
+  final AdminSession session;
 
   @override
   Widget build(BuildContext context) {
@@ -452,76 +457,105 @@ class _AdminSidebar extends StatelessWidget {
           const SizedBox(height: 18),
           Expanded(
             child: ListView(
-              children: AdminSection.values.map((AdminSection item) {
+              children: kAdminSidebarNavOrder.map((AdminSection item) {
                 final isSelected = item == selected;
-                return Padding(
+                final String? req = requiredPermissionForSection(item);
+                final bool allowed = req == null || session.hasPermission(req);
+                final Widget row = Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: InkWell(
                     borderRadius: BorderRadius.circular(18),
-                    onTap: () => onSelected(item),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 14),
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? Colors.white.withValues(alpha: 0.12)
-                            : Colors.transparent,
-                        borderRadius: BorderRadius.circular(18),
-                        border: Border.all(
+                    onTap: allowed
+                        ? () {
+                            if (item == AdminSection.auditLogs) {
+                              debugPrint('[AUDIT_LOGS][NAV] drawer item tapped');
+                            } else if (item == AdminSection.liveOperations) {
+                              debugPrint(
+                                '[LIVE_OPS][NAV] drawer item tapped section=${item.name} '
+                                'route=${AdminPortalRoutePaths.pathForSection(item)}',
+                              );
+                            } else {
+                              debugPrint(
+                                '[AdminNav] drawer item tapped section=${item.name} '
+                                'route=${AdminPortalRoutePaths.pathForSection(item)}',
+                              );
+                            }
+                            onSelected(item);
+                          }
+                        : null,
+                    child: Opacity(
+                      opacity: allowed ? 1 : 0.45,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 14),
+                        decoration: BoxDecoration(
                           color: isSelected
                               ? Colors.white.withValues(alpha: 0.12)
                               : Colors.transparent,
-                        ),
-                      ),
-                      child: Row(
-                        children: <Widget>[
-                          Icon(
-                            item.icon,
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
                             color: isSelected
-                                ? AdminThemeTokens.gold
-                                : Colors.white.withValues(alpha: 0.82),
+                                ? Colors.white.withValues(alpha: 0.12)
+                                : Colors.transparent,
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              item.label,
-                              style: TextStyle(
-                                color: Colors.white.withValues(
-                                  alpha: isSelected ? 1 : 0.84,
-                                ),
-                                fontWeight: FontWeight.w700,
-                              ),
+                        ),
+                        child: Row(
+                          children: <Widget>[
+                            Icon(
+                              item.icon,
+                              color: isSelected
+                                  ? AdminThemeTokens.gold
+                                  : Colors.white.withValues(alpha: 0.82),
                             ),
-                          ),
-                          if ((badgeCounts[item] ?? 0) > 0)
-                            Container(
-                              margin: const EdgeInsets.only(right: 8),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 5,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFD64545),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
+                            const SizedBox(width: 12),
+                            Expanded(
                               child: Text(
-                                '${badgeCounts[item] ?? 0}',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 12,
+                                item.label,
+                                style: TextStyle(
+                                  color: Colors.white.withValues(
+                                    alpha: isSelected ? 1 : 0.84,
+                                  ),
+                                  fontWeight: FontWeight.w700,
                                 ),
                               ),
                             ),
-                          if (isSelected)
-                            const Icon(
-                              Icons.chevron_right_rounded,
-                              color: AdminThemeTokens.gold,
-                            ),
-                        ],
+                            if ((badgeCounts[item] ?? 0) > 0)
+                              Container(
+                                margin: const EdgeInsets.only(right: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFD64545),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  '${badgeCounts[item] ?? 0}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            if (isSelected)
+                              const Icon(
+                                Icons.chevron_right_rounded,
+                                color: AdminThemeTokens.gold,
+                              ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
+                );
+                if (allowed) {
+                  return row;
+                }
+                return Tooltip(
+                  message: kAdminNoPermissionTooltip,
+                  child: row,
                 );
               }).toList(),
             ),

@@ -146,6 +146,14 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
         fallbackEmail: email,
         pricingConfig: pricingConfig,
       );
+      final verificationRaw = profileRecord['verification'];
+      final Map<String, dynamic> verificationForAdmin =
+          verificationRaw is Map<String, dynamic>
+              ? verificationRaw
+              : (verificationRaw is Map
+                  ? Map<String, dynamic>.from(verificationRaw)
+                  : <String, dynamic>{});
+
       final existingActiveRideId =
           (existing['activeRideId']?.toString().trim().isNotEmpty ?? false)
               ? existing['activeRideId'].toString().trim()
@@ -192,7 +200,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen>
           ...buildDriverVerificationAdminPayload(
             driverId: user.uid,
             driverProfile: profileRecord,
-            verification: profileRecord['verification'] as Map<String, dynamic>,
+            verification: verificationForAdmin,
           ),
           'createdAt': existing['created_at'] ?? ServerValue.timestamp,
           'updatedAt': ServerValue.timestamp,

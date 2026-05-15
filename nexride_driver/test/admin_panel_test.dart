@@ -3,19 +3,23 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nexride_driver/admin/admin_config.dart';
+import 'package:nexride_driver/admin/admin_rbac.dart';
 import 'package:nexride_driver/admin/models/admin_models.dart';
 import 'package:nexride_driver/admin/screens/admin_gate_screen.dart';
+import 'package:nexride_driver/admin/screens/admin_login_screen.dart';
 import 'package:nexride_driver/admin/screens/admin_panel_screen.dart';
 import 'package:nexride_driver/admin/services/admin_auth_service.dart';
 import 'package:nexride_driver/admin/services/admin_data_service.dart';
 
 void main() {
   late FakeAdminDataService dataService;
-  const adminSession = AdminSession(
+  final adminSession = AdminSession(
     uid: 'admin_uid_001',
     email: 'admin@nexride.africa',
     displayName: 'Ops Admin',
     accessMode: 'database_role',
+    adminRole: 'super_admin',
+    permissions: permissionsForAdminRole('super_admin'),
   );
 
   setUp(() {
@@ -45,9 +49,9 @@ void main() {
     );
   });
 
-  testWidgets('/admin/login redirects signed-in admins to /admin', (
-    WidgetTester tester,
-  ) async {
+  testWidgets(
+    '/admin/login shows form immediately; continue opens dashboard when admin',
+    (WidgetTester tester) async {
     _setDesktopViewport(tester);
     addTearDown(() => _resetViewport(tester));
 
@@ -59,6 +63,11 @@ void main() {
       ),
     );
 
+    await _pumpRouteTransition(tester);
+
+    expect(find.text('Admin sign in'), findsOneWidget);
+    expect(find.text('Continue to dashboard'), findsOneWidget);
+    await tester.tap(find.text('Continue to dashboard'));
     await _pumpRouteTransition(tester);
 
     expect(find.text('NexRide Control Center'), findsOneWidget);
@@ -89,12 +98,13 @@ void main() {
     final sections = <String, String>{
       'Riders': 'Riders management',
       'Drivers': 'Drivers management',
-      'Trips': 'Trips management',
+      'Trips': 'Live operations unavailable',
       'Finance': 'Finance and revenue',
       'Withdrawals': 'Driver withdrawals',
       'Pricing': 'Pricing management',
       'Subscriptions': 'No pending subscription requests',
-      'Verification': 'Verification and compliance',
+      'Verification': 'Verification center',
+      'Support': 'Support tickets',
       'Settings': 'Settings and configuration',
     };
 
@@ -107,11 +117,11 @@ void main() {
       expect(find.text(entry.value), findsOneWidget);
     }
 
-    // Support now renders the dedicated support workspace shell.
+    // Support uses the callable-backed inbox inside the admin shell.
     expect(find.widgetWithText(InkWell, 'Support'), findsOneWidget);
   });
 
-  testWidgets('riders section keeps cached data when refresh fails', (
+  testWidgets('riders section keeps cached data when paginated refresh fails', (
     WidgetTester tester,
   ) async {
     _setDesktopViewport(tester);
@@ -133,13 +143,18 @@ void main() {
     await _pumpRouteTransition(tester);
 
     expect(find.text('Riders management'), findsOneWidget);
+    expect(find.textContaining('Ada'), findsWidgets);
+
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Refresh'));
+    await _pumpRouteTransition(tester);
+
     expect(find.text('Unable to refresh riders'), findsOneWidget);
     expect(find.textContaining('timed out'), findsOneWidget);
   });
 
-  testWidgets('riders section shows retry state when no snapshot loads', (
-    WidgetTester tester,
-  ) async {
+  testWidgets(
+    'riders section shows paginated retry state when riders page fails',
+    (WidgetTester tester) async {
     _setDesktopViewport(tester);
     addTearDown(() => _resetViewport(tester));
 
@@ -162,6 +177,30 @@ void main() {
     expect(find.widgetWithText(ElevatedButton, 'Retry'), findsOneWidget);
   });
 
+  testWidgets(
+    'riders section shows empty state when paginated page returns no rows',
+    (WidgetTester tester) async {
+    _setDesktopViewport(tester);
+    addTearDown(() => _resetViewport(tester));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AdminPanelScreen(
+          session: adminSession,
+          dataService: EmptyRidersPaginatedFakeAdminDataService(),
+          authService: FakeAdminAuthService(adminSession),
+          initialSection: AdminSection.riders,
+          snapshotTimeout: const Duration(milliseconds: 20),
+          enableRealtimeBadgeListeners: false,
+        ),
+      ),
+    );
+
+    await _pumpRouteTransition(tester);
+
+    expect(find.text('No rider records yet'), findsOneWidget);
+  });
+
   testWidgets('compact admin shell menu opens drawer without crashing', (
     WidgetTester tester,
   ) async {
@@ -181,10 +220,13 @@ void main() {
 
     await tester.pumpAndSettle();
 
-    final scaffoldState = tester.state<ScaffoldState>(find.byType(Scaffold));
+    final Finder scaffoldFinder = find.byType(Scaffold);
+    expect(scaffoldFinder, findsWidgets);
+    final ScaffoldState scaffoldState =
+        tester.state<ScaffoldState>(scaffoldFinder.first);
     expect(scaffoldState.isDrawerOpen, isFalse);
 
-    await tester.tap(find.byIcon(Icons.menu_rounded));
+    await tester.tap(find.byIcon(Icons.menu_rounded).first);
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
@@ -229,7 +271,6 @@ Widget _buildTestApp({
         case AdminRoutePaths.admin:
           return MaterialPageRoute<void>(
             builder: (_) => AdminGateScreen(
-              mode: AdminGateMode.dashboard,
               authService: authService,
               dataService: dataService,
               enableRealtimeBadgeListeners: false,
@@ -238,12 +279,10 @@ Widget _buildTestApp({
           );
         case AdminRoutePaths.adminLogin:
           return MaterialPageRoute<void>(
-            builder: (_) => AdminGateScreen(
-              mode: AdminGateMode.login,
+            builder: (_) => AdminLoginScreen(
               authService: authService,
-              dataService: dataService,
               inlineMessage: settings.arguments as String?,
-              enableRealtimeBadgeListeners: false,
+              dashboardRoute: AdminRoutePaths.admin,
             ),
             settings: settings,
           );
@@ -257,7 +296,7 @@ Widget _buildTestApp({
 }
 
 class FakeAdminAuthService extends AdminAuthService {
-  FakeAdminAuthService(this.session);
+  FakeAdminAuthService(this.session) : super();
 
   final AdminSession? session;
 
@@ -265,7 +304,7 @@ class FakeAdminAuthService extends AdminAuthService {
   bool get hasAuthenticatedUser => session != null;
 
   @override
-  String get authenticatedUid => session?.uid ?? '';
+  String? get authenticatedUid => session?.uid;
 
   @override
   String get authenticatedEmail => session?.email ?? '';
@@ -303,6 +342,169 @@ class FakeAdminDataService extends AdminDataService {
   }) async {
     return snapshot;
   }
+
+  @override
+  Future<AdminPanelSnapshot> fetchDashboardSnapshot({
+    String adminEmail = '',
+    String adminUid = '',
+  }) async {
+    return snapshot;
+  }
+
+  @override
+  Future<AdminRidersPageResult> fetchRidersPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    return AdminRidersPageResult(
+      riders: snapshot.riders,
+      nextCursor: null,
+      hasMore: false,
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>?> fetchDriverProfileForAdmin(
+    String driverId,
+  ) async {
+    return null;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> fetchDriverEntityTabForAdmin({
+    required String driverId,
+    required String tabId,
+  }) async {
+    if (driverId.isEmpty) {
+      return null;
+    }
+    switch (tabId) {
+      case 'overview':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'driver': <String, dynamic>{'name': 'Test', 'city': 'Lagos'},
+          'document_slot_count': 2,
+        };
+      case 'verification':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'verification': <String, dynamic>{'status': 'pending'},
+          'documents_meta': <String, dynamic>{},
+          'driver_verification': <String, dynamic>{},
+        };
+      case 'wallet':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'wallet': <String, dynamic>{'balance': 0, 'currency': 'NGN'},
+        };
+      case 'trips':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'trips': <Map<String, dynamic>>[],
+        };
+      case 'subscription':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'subscription': <String, dynamic>{
+            'monetization_model': 'commission',
+            'subscription_plan_type': 'monthly',
+            'subscription_status': 'active',
+            'subscription_active': true,
+          },
+        };
+      case 'violations':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'violations': <dynamic>[],
+        };
+      case 'notes':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'notes': <String, dynamic>{},
+        };
+      case 'audit':
+        return <String, dynamic>{
+          'success': true,
+          'driver_id': driverId,
+          'verification_audits': <dynamic>[],
+          'admin_audit_tail': <dynamic>[],
+        };
+      default:
+        return <String, dynamic>{'success': false, 'reason': 'unknown_tab'};
+    }
+  }
+
+  @override
+  Future<AdminWithdrawalsPageResult> fetchWithdrawalsPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    return AdminWithdrawalsPageResult(
+      withdrawals: snapshot.withdrawals,
+      nextCursor: null,
+      hasMore: false,
+    );
+  }
+
+  @override
+  Future<AdminSupportTicketsPageResult> fetchSupportTicketsPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    return const AdminSupportTicketsPageResult(
+      tickets: <AdminSupportTicketListItem>[],
+      nextCursor: null,
+      hasMore: false,
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>?> fetchSupportTicketForAdmin(
+    String ticketId,
+  ) async {
+    return <String, dynamic>{
+      'success': true,
+      'ticket': <String, dynamic>{
+        'id': ticketId,
+        'status': 'open',
+        'subject': 'Test ticket',
+        'ride_id': '',
+        'createdByUserId': 'user_test',
+      },
+      'messages': <String, dynamic>{},
+    };
+  }
+
+  @override
+  Future<bool> adminUpdateSupportTicketStatusCallable({
+    required String ticketId,
+    required String status,
+  }) async =>
+      true;
+
+  @override
+  Future<bool> adminReplySupportTicketCallable({
+    required String ticketId,
+    required String message,
+    String visibility = 'public',
+  }) async =>
+      true;
+
+  @override
+  Future<bool> adminEscalateSupportTicketCallable({
+    required String ticketId,
+  }) async =>
+      true;
 
   @override
   Future<void> updateDriverStatus({
@@ -378,6 +580,14 @@ class FakeAdminDataService extends AdminDataService {
   }) async {}
 
   @override
+  Future<void> adminFlagUserForSupportContact({
+    required String uid,
+    required String role,
+    required String note,
+    String priority = 'normal',
+  }) async {}
+
+  @override
   Future<void> adminApproveDriverVerification({
     required String driverId,
   }) async {}
@@ -387,6 +597,7 @@ class CachedFailureAdminDataService extends AdminDataService {
   CachedFailureAdminDataService(this.snapshot);
 
   final AdminPanelSnapshot snapshot;
+  int _ridersPageInvocationCount = 0;
 
   @override
   AdminPanelSnapshot? get cachedSnapshot => snapshot;
@@ -396,6 +607,24 @@ class CachedFailureAdminDataService extends AdminDataService {
     String adminEmail = '',
     String adminUid = '',
   }) async {
+    throw TimeoutException('admin data request timed out');
+  }
+
+  /// First paginated load succeeds (hydrates UI); later loads fail like a broken refresh.
+  @override
+  Future<AdminRidersPageResult> fetchRidersPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    _ridersPageInvocationCount++;
+    if (_ridersPageInvocationCount == 1) {
+      return AdminRidersPageResult(
+        riders: snapshot.riders,
+        nextCursor: null,
+        hasMore: false,
+      );
+    }
     throw TimeoutException('admin data request timed out');
   }
 }
@@ -411,12 +640,42 @@ class FailureAdminDataService extends AdminDataService {
   }) async {
     throw TimeoutException('admin data request timed out');
   }
+
+  @override
+  Future<AdminRidersPageResult> fetchRidersPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    throw TimeoutException('paginated riders load failed');
+  }
+}
+
+/// Paginated riders returns an empty page (no dependency on full snapshot).
+class EmptyRidersPaginatedFakeAdminDataService extends FakeAdminDataService {
+  EmptyRidersPaginatedFakeAdminDataService() : super(_sampleSnapshot);
+
+  @override
+  Future<AdminRidersPageResult> fetchRidersPageForAdmin({
+    String? cursor,
+    int limit = 50,
+    AdminListQuery? query,
+  }) async {
+    return const AdminRidersPageResult(
+      riders: <AdminRiderRecord>[],
+      nextCursor: null,
+      hasMore: false,
+    );
+  }
 }
 
 final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
   fetchedAt: DateTime(2026, 4, 12, 10, 30),
   metrics: const AdminDashboardMetrics(
     totalRiders: 1240,
+    incompleteRiderRegistrations: 0,
+    pendingOnboarding: 0,
+    totalMerchants: 42,
     totalDrivers: 286,
     activeDriversOnline: 41,
     ongoingTrips: 17,
@@ -443,6 +702,8 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
       verificationStatus: 'verified',
       riskStatus: 'clear',
       paymentStatus: 'clear',
+      profileCompleted: true,
+      onboardingCompleted: null,
       createdAt: DateTime(2026, 3, 1),
       lastActiveAt: DateTime(2026, 4, 12, 9, 45),
       walletBalance: 12500,
@@ -464,6 +725,7 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
       phone: '+234800000002',
       email: 'samuel.driver@nexride.africa',
       city: 'Abuja',
+      stateOrRegion: 'abuja',
       status: 'active',
       accountStatus: 'active',
       isOnline: true,
@@ -527,15 +789,18 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
   withdrawals: <AdminWithdrawalRecord>[
     AdminWithdrawalRecord(
       id: 'withdraw_001',
+      entityType: 'driver',
       driverId: 'driver_001',
+      merchantId: '',
       driverName: 'Samuel Driver',
       amount: 120000,
       status: 'pending',
       requestDate: DateTime(2026, 4, 11, 14, 20),
       processedDate: null,
-      bankName: 'United Bank of Africa (UBA)',
+      bankName: 'Example Bank (fixture)',
       accountName: 'Samuel Driver',
-      accountNumber: '1029983699',
+      accountNumber: '0000000001',
+      hasPayoutDestination: true,
       payoutReference: '',
       notes: 'Awaiting finance review',
       sourcePaths: const <String>['withdraw_requests/withdraw_001'],
@@ -628,7 +893,7 @@ final AdminPanelSnapshot _sampleSnapshot = AdminPanelSnapshot(
   ),
   settings: const AdminOperationalSettings(
     withdrawalNoticeText:
-        'Withdrawals above ₦300,000 may take 2–3 working days. Withdrawals below ₦300,000 are typically processed within 48 hours. Withdrawals are processed directly by NEXRIDE DYNAMIC JOURNEY LTD.',
+        'Withdrawals above ₦300,000 may take 2–3 working days. Withdrawals below ₦300,000 are typically processed within 48 hours. Withdrawals are processed by NexRide to the driver bank details on file.',
     cityEnablement: <String, bool>{
       'lagos': true,
       'abuja': true,
