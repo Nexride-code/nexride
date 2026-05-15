@@ -21,6 +21,8 @@ import '../config/driver_app_config.dart';
 import '../config/rollout_copy.dart';
 import '../models/rollout_delivery_region_model.dart';
 import '../widgets/driver_rollout_operating_area_sheet.dart';
+import '../services/rollout_catalog_hydration.dart';
+import '../services/driver_rollout_profile_store.dart';
 import '../config/rtdb_ride_request_contract.dart';
 import '../services/call_permissions.dart';
 import '../services/call_service.dart';
@@ -430,6 +432,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   String? _rolloutRegionId;
   String? _rolloutCityId;
   String? _rolloutDispatchMarketId;
+  bool _rolloutSavedAreaDisabled = false;
+  bool _rolloutBannerDismissed = false;
+  int _rolloutCatalogLoadSeq = 0;
   String? _currentRideId;
   String? _sessionTrackedRideId;
   Map<String, dynamic>? _currentRideData;
@@ -2976,16 +2981,22 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (!_hasAuthenticatedDriver) {
       return;
     }
+    final loadSeq = ++_rolloutCatalogLoadSeq;
+    final driverId = _effectiveDriverId.trim();
     if (mounted) {
       _setStateSafely(() {
         _rolloutCatalogLoading = true;
         _rolloutCatalogError = null;
+        _rolloutBannerDismissed = false;
       });
     } else {
       _rolloutCatalogLoading = true;
       _rolloutCatalogError = null;
     }
-    Object? lastError;
+    List<RolloutDeliveryRegionModel> regions =
+        const <RolloutDeliveryRegionModel>[];
+    RolloutCatalogSelection selection = const RolloutCatalogSelection();
+    Object? loadError;
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
         if (attempt > 0) {
@@ -2993,39 +3004,65 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         }
         final raw = await RideCloudFunctionsService()
             .listDeliveryRegions()
-            .timeout(const Duration(seconds: 22));
+            .timeout(kRolloutCatalogCallableTimeout);
         if (raw['success'] != true) {
           throw StateError('listDeliveryRegions_failed');
         }
-        final regions = parseRolloutRegionsResponse(raw);
-        if (mounted) {
-          _setStateSafely(() {
-            _rolloutCatalog = regions;
-            _rolloutCatalogLoading = false;
-            _rolloutCatalogHydrated = true;
-            _rolloutCatalogError = null;
-          });
-        } else {
-          _rolloutCatalog = regions;
-          _rolloutCatalogLoading = false;
-          _rolloutCatalogHydrated = true;
-          _rolloutCatalogError = null;
+        regions = parseRolloutRegionsResponse(raw);
+        Map<String, String>? saved;
+        if (driverId.isNotEmpty) {
+          try {
+            saved = await DriverRolloutProfileStore.instance.fetchSelection(
+              driverId,
+            );
+          } catch (_) {
+            saved = null;
+          }
         }
-        return;
+        if (_lastDriverProfileSnapshot != null) {
+          _ingestRolloutFromProfile(_lastDriverProfileSnapshot!);
+        }
+        selection = mergeSavedRolloutWithCatalog(
+          regions: regions,
+          saved: saved ??
+              <String, String>{
+                if ((_rolloutRegionId ?? '').isNotEmpty)
+                  DriverRolloutProfileStore.kRegionId: _rolloutRegionId!,
+                if ((_rolloutCityId ?? '').isNotEmpty)
+                  DriverRolloutProfileStore.kCityId: _rolloutCityId!,
+                if ((_rolloutDispatchMarketId ?? '').isNotEmpty)
+                  DriverRolloutProfileStore.kDispatchMarketId:
+                      _rolloutDispatchMarketId!,
+              },
+          regionKey: DriverRolloutProfileStore.kRegionId,
+          cityKey: DriverRolloutProfileStore.kCityId,
+          dispatchKey: DriverRolloutProfileStore.kDispatchMarketId,
+        );
+        loadError = null;
+        break;
       } catch (e) {
-        lastError = e;
+        loadError = e;
+      }
+    }
+    if (loadSeq != _rolloutCatalogLoadSeq) {
+      return;
+    }
+    void apply() {
+      _rolloutCatalogLoading = false;
+      _rolloutCatalogHydrated = true;
+      _rolloutCatalogError = loadError;
+      if (loadError == null) {
+        _rolloutCatalog = regions;
+        _rolloutRegionId = selection.regionId;
+        _rolloutCityId = selection.cityId;
+        _rolloutDispatchMarketId = selection.dispatchMarketId;
+        _rolloutSavedAreaDisabled = selection.savedAreaDisabled;
       }
     }
     if (mounted) {
-      _setStateSafely(() {
-        _rolloutCatalogLoading = false;
-        _rolloutCatalogHydrated = true;
-        _rolloutCatalogError = lastError;
-      });
+      _setStateSafely(apply);
     } else {
-      _rolloutCatalogLoading = false;
-      _rolloutCatalogHydrated = true;
-      _rolloutCatalogError = lastError;
+      apply();
     }
   }
 
@@ -8328,6 +8365,24 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       '[MATCH_DEBUG][ASSIGNMENT_RELEASE] rideId=$rideId driverId=$driverId reason=$reason',
     );
 
+    if (reason == 'driver_response_timeout') {
+      final callableRideId = rideId.trim();
+      unawaited(() async {
+        try {
+          await _functions.httpsCallable('withdrawDriverOffer').call(
+                <String, dynamic>{
+                  'rideId': callableRideId,
+                  'reason': 'popup_timeout',
+                },
+              );
+        } catch (e) {
+          _logRtdb(
+            'withdrawDriverOffer(timeout release) failed rideId=$callableRideId error=$e',
+          );
+        }
+      }());
+    }
+
     if (resetLocalState &&
         (_driverActiveRideId == rideId || _currentRideId == rideId)) {
       await _clearActiveRideState(
@@ -13212,7 +13267,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         unawaited(() async {
           try {
             await _functions.httpsCallable('withdrawDriverOffer').call(
-              <String, dynamic>{'rideId': declinedRideId},
+              <String, dynamic>{
+                'rideId': declinedRideId,
+                'reason': 'declined',
+              },
             );
           } catch (e) {
             _logRtdb('withdrawDriverOffer failed rideId=$declinedRideId error=$e');
@@ -18496,8 +18554,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
             if (!v || !mounted) {
               return;
             }
-            setState(() {
+            _setStateSafely(() {
               _pendingAvailabilityMode = id;
+              _rolloutBannerDismissed = false;
             });
           },
         ),
@@ -18888,11 +18947,16 @@ class _DriverMapScreenState extends State<DriverMapScreen>
               _driverSubscriptionBannerKind != _DriverSubscriptionBannerKind.none ||
               _showLocationGoOnlineBanner ||
               (!_hasRenderableActiveRide &&
-                  (_rolloutCatalogLoading ||
-                      _rolloutCatalogError != null ||
-                      (_rolloutCatalogHydrated &&
-                          _rolloutCatalog.isNotEmpty &&
-                          !_rolloutSelectionComplete))))
+                  shouldShowDriverRolloutBanner(
+                    pendingAvailabilityMode: _pendingAvailabilityMode,
+                    catalogLoading: _rolloutCatalogLoading,
+                    catalogHydrated: _rolloutCatalogHydrated,
+                    catalogError: _rolloutCatalogError,
+                    catalog: _rolloutCatalog,
+                    selectionComplete: _rolloutSelectionComplete,
+                    savedAreaDisabled: _rolloutSavedAreaDisabled,
+                    bannerDismissed: _rolloutBannerDismissed,
+                  )))
             Positioned(
               top: 8,
               left: 16,
@@ -18966,11 +19030,16 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                       const SizedBox(height: 8),
                     ],
                     if (!_hasRenderableActiveRide &&
-                        (_rolloutCatalogLoading ||
-                            _rolloutCatalogError != null ||
-                            (_rolloutCatalogHydrated &&
-                                _rolloutCatalog.isNotEmpty &&
-                                !_rolloutSelectionComplete))) ...[
+                        shouldShowDriverRolloutBanner(
+                          pendingAvailabilityMode: _pendingAvailabilityMode,
+                          catalogLoading: _rolloutCatalogLoading,
+                          catalogHydrated: _rolloutCatalogHydrated,
+                          catalogError: _rolloutCatalogError,
+                          catalog: _rolloutCatalog,
+                          selectionComplete: _rolloutSelectionComplete,
+                          savedAreaDisabled: _rolloutSavedAreaDisabled,
+                          bannerDismissed: _rolloutBannerDismissed,
+                        )) ...[
                       Material(
                         color: const Color(0xFFFFF2E0),
                         borderRadius: BorderRadius.circular(14),
@@ -19003,11 +19072,14 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                                             CrossAxisAlignment.start,
                                         children: <Widget>[
                                           Text(
-                                            _rolloutCatalogLoading
-                                                ? 'Loading service areas…'
-                                                : _rolloutCatalogError != null
-                                                ? 'Could not load areas'
-                                                : 'Service area required',
+                                            driverRolloutBannerTitle(
+                                              catalogLoading: _rolloutCatalogLoading,
+                                              catalogError: _rolloutCatalogError,
+                                              catalogHydrated: _rolloutCatalogHydrated,
+                                              catalogEmpty: _rolloutCatalog.isEmpty,
+                                              savedAreaDisabled: _rolloutSavedAreaDisabled,
+                                              selectionComplete: _rolloutSelectionComplete,
+                                            ),
                                             style: const TextStyle(
                                               color: Color(0xFF4A3B2A),
                                               fontWeight: FontWeight.w700,
@@ -19019,7 +19091,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                                                   null) ...<Widget>[
                                             const SizedBox(height: 4),
                                             Text(
-                                              'Pick your operating state and city before going online.',
+                                              _rolloutSavedAreaDisabled
+                                                  ? 'Your saved area was disabled. Choose a new city or switch to GPS mode.'
+                                                  : _rolloutCatalog.isEmpty
+                                                  ? 'No enabled areas. Retry or switch to GPS mode.'
+                                                  : 'Pick your operating state and city (Area mode), or use GPS mode.',
                                               style: TextStyle(
                                                 color: Colors.brown.shade800,
                                                 fontSize: 12,
@@ -19049,18 +19125,33 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                                   ],
                                 ),
                               ),
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: TextButton(
-                                  onPressed: _rolloutCatalogLoading
-                                      ? null
-                                      : () {
-                                          unawaited(
-                                            _openDriverRolloutOperatingArea(),
-                                          );
-                                        },
-                                  child: const Text('Choose service area'),
-                                ),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: <Widget>[
+                                  if (!_rolloutCatalogLoading)
+                                    TextButton(
+                                      onPressed: () {
+                                        _setStateSafely(() {
+                                          _rolloutBannerDismissed = true;
+                                        });
+                                      },
+                                      child: const Text('Dismiss'),
+                                    ),
+                                  TextButton(
+                                    onPressed: _rolloutCatalogLoading
+                                        ? null
+                                        : () {
+                                            unawaited(
+                                              _openDriverRolloutOperatingArea(),
+                                            );
+                                          },
+                                    child: Text(
+                                      _rolloutCatalogError != null
+                                          ? 'Retry'
+                                          : 'Choose service area',
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
                           ),

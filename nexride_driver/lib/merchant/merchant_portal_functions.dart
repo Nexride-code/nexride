@@ -134,6 +134,18 @@ class MerchantPortalFunctions {
     return _asMap(result.data);
   }
 
+  Future<Map<String, dynamic>> merchantCreateBankTransferTopUp({
+    required int amountNgn,
+  }) async {
+    final result = await _fn
+        .httpsCallable(
+          'merchantCreateBankTransferTopUp',
+          options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+        )
+        .call(<String, dynamic>{'amount_ngn': amountNgn});
+    return _asMap(result.data);
+  }
+
   Future<Map<String, dynamic>> merchantListMyOrders() async {
     final result = await _fn
         .httpsCallable(

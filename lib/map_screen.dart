@@ -35,6 +35,7 @@ import 'services/trip_safety_service.dart';
 import 'services/payment_methods_service.dart';
 import 'payment_methods_screen.dart';
 import 'bank_transfer_receipt_screen.dart';
+import 'widgets/rider_flutterwave_va_payment_sheet.dart';
 import 'service_type.dart';
 import 'share_trip_rtdb.dart';
 import 'support/rider_backend_pricing.dart';
@@ -61,6 +62,7 @@ import 'compliance/rider_identity_booking_gate.dart';
 import 'config/rollout_copy.dart';
 import 'models/rollout_delivery_region_model.dart';
 import 'services/rider_rollout_profile_store.dart';
+import 'services/rollout_catalog_hydration.dart';
 
 void safeShowSnackBar(BuildContext context, String message) {
   SchedulerBinding.instance.addPostFrameCallback((_) {
@@ -274,6 +276,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   String? _rolloutRegionId;
   String? _rolloutCityId;
   String? _rolloutDispatchMarketId;
+  bool _rolloutSavedAreaDisabled = false;
+  bool _rolloutBannerDismissed = false;
+  int _rolloutCatalogLoadSeq = 0;
   StreamSubscription<User?>? _riderAuthRolloutSubscription;
   /// `flutterwave` / `bank_transfer` — must match Cloud Function allow-list.
   String _riderTripPaymentMethod = 'flutterwave';
@@ -1234,6 +1239,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (ride == null || ride.isEmpty) {
       return false;
     }
+    if (ride['bank_transfer_automated'] == true) {
+      return false;
+    }
     final pm = _valueAsText(ride['payment_method'])
         .trim()
         .toLowerCase()
@@ -1318,6 +1326,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         .toLowerCase()
         .replaceAll(RegExp(r'[\s-]+'), '_');
     if (pm != 'bank_transfer') {
+      return;
+    }
+    if (rideData['bank_transfer_automated'] == true) {
       return;
     }
     final user = FirebaseAuth.instance.currentUser;
@@ -1757,8 +1768,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Registers bank transfer metadata and shows one reference snackbar.
-  /// This is non-blocking for rider matching; creation should continue immediately.
+  /// Registers VA bank transfer; shows Flutterwave VA sheet when [automated_va] is returned.
   Future<bool> _registerBankTransferAndPoll(String rideId) async {
     final reg = await _rideCloud.registerBankTransferPayment(rideId: rideId);
     if (reg['success'] != true) {
@@ -1766,10 +1776,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       if (kDebugMode) {
         debugPrint('[RiderPayment] registerBankTransfer failed reason=$reason');
       }
-      _showSnackBar(
-        'Bank transfer could not be registered (${reason.replaceAll('_', ' ')}). '
-        'Please try again or pick another payment method.',
-      );
+      final friendly = reason == 'official_bank_not_configured'
+          ? 'Bank transfer is temporarily unavailable (official NexRide account not configured). '
+              'Try card payment or contact support@nexride.africa.'
+          : 'Bank transfer could not be registered (${reason.replaceAll('_', ' ')}). '
+              'Please try again or pick another payment method.';
+      _showSnackBar(friendly);
       return false;
     }
     final txRef = _firstNonEmptyText(<dynamic>[reg['tx_ref'], reg['txRef']]);
@@ -1777,9 +1789,28 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _showSnackBar('Missing payment reference — try again.');
       return false;
     }
-    _showSnackBar(
-      'Payment reference ready: "$txRef". Transfer to NexRide official account and include this exactly in your narration.',
-    );
+    final autoVa =
+        reg['automated_va'] == true ||
+        reg['automated_va'] == 'true' ||
+        reg['automated_va'] == 1;
+    if (autoVa && mounted) {
+      await showModalBottomSheet<bool>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (ctx) => RiderFlutterwaveVaPaymentSheet(
+          databaseRef: _rideRequestsRef.child(rideId),
+          sheetTitle: 'Pay for your ride',
+          initialRegistration: Map<String, dynamic>.from(reg),
+          onRegenerate: () =>
+              _rideCloud.registerBankTransferPayment(rideId: rideId),
+        ),
+      );
+    } else if (!autoVa && mounted) {
+      _showSnackBar(
+        'Payment reference ready: "$txRef". Transfer to NexRide official account and include this exactly in your narration.',
+      );
+    }
     return true;
   }
 
@@ -6459,83 +6490,79 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       (_rolloutDispatchMarketId ?? '').trim().isNotEmpty;
 
   Future<void> _loadRolloutCatalogForRider() async {
+    final loadSeq = ++_rolloutCatalogLoadSeq;
     final uid = FirebaseAuth.instance.currentUser?.uid.trim();
     if (uid == null || uid.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _rolloutCatalogLoading = false;
+          _rolloutCatalogHydrated = false;
+          _rolloutCatalogError = null;
+        });
+      }
       return;
     }
     if (mounted) {
       setState(() {
         _rolloutCatalogLoading = true;
         _rolloutCatalogError = null;
+        _rolloutBannerDismissed = false;
       });
     } else {
       _rolloutCatalogLoading = true;
       _rolloutCatalogError = null;
     }
+    List<RolloutDeliveryRegionModel> regions = const <RolloutDeliveryRegionModel>[];
+    RolloutCatalogSelection selection = const RolloutCatalogSelection();
+    Object? loadError;
     try {
       final raw = await _rideCloud
           .listDeliveryRegions()
-          .timeout(const Duration(seconds: 22));
-      final regions = parseRolloutRegionsResponse(raw);
+          .timeout(kRolloutCatalogCallableTimeout);
       if (raw['success'] != true) {
         throw StateError('listDeliveryRegions_failed');
       }
-      final saved = await RiderRolloutProfileStore.instance.fetchSelection(uid);
-      var rid = saved?[RiderRolloutProfileStore.kRegionId] ?? '';
-      var cid = saved?[RiderRolloutProfileStore.kCityId] ?? '';
-      var dm = saved?[RiderRolloutProfileStore.kDispatchMarketId] ?? '';
-      if (rid.isNotEmpty &&
-          regions.any((r) => r.regionId == rid)) {
-        final reg = regions.firstWhere((r) => r.regionId == rid);
-        if (!reg.cities.any((c) => c.cityId == cid)) {
-          cid = '';
-        }
-        if (reg.dispatchMarketId.trim().isNotEmpty) {
-          dm = reg.dispatchMarketId.trim();
-        }
-      } else {
-        rid = '';
-        cid = '';
-        dm = '';
+      regions = parseRolloutRegionsResponse(raw);
+      Map<String, String>? saved;
+      try {
+        saved = await RiderRolloutProfileStore.instance.fetchSelection(uid);
+      } catch (_) {
+        saved = null;
       }
-      if (!mounted) {
-        _rolloutCatalog = regions;
-        _rolloutRegionId = rid.isEmpty ? null : rid;
-        _rolloutCityId = cid.isEmpty ? null : cid;
-        _rolloutDispatchMarketId = dm.isEmpty ? null : dm;
-        _rolloutCatalogLoading = false;
-        _rolloutCatalogHydrated = true;
-        _rolloutCatalogError = null;
-        if (_rolloutSelectionComplete) {
-          _selectedLaunchCity =
-              RiderServiceAreaConfig.marketForCity(_rolloutDispatchMarketId).city;
-        }
+      selection = mergeSavedRolloutWithCatalog(
+        regions: regions,
+        saved: saved,
+        regionKey: RiderRolloutProfileStore.kRegionId,
+        cityKey: RiderRolloutProfileStore.kCityId,
+        dispatchKey: RiderRolloutProfileStore.kDispatchMarketId,
+      );
+    } catch (e) {
+      loadError = e;
+    } finally {
+      if (loadSeq != _rolloutCatalogLoadSeq) {
         return;
       }
-      setState(() {
-        _rolloutCatalog = regions;
-        _rolloutRegionId = rid.isEmpty ? null : rid;
-        _rolloutCityId = cid.isEmpty ? null : cid;
-        _rolloutDispatchMarketId = dm.isEmpty ? null : dm;
+      void apply() {
         _rolloutCatalogLoading = false;
         _rolloutCatalogHydrated = true;
-        _rolloutCatalogError = null;
-        if (_rolloutSelectionComplete) {
-          _selectedLaunchCity =
-              RiderServiceAreaConfig.marketForCity(_rolloutDispatchMarketId).city;
+        _rolloutCatalogError = loadError;
+        if (loadError == null) {
+          _rolloutCatalog = regions;
+          _rolloutRegionId = selection.regionId;
+          _rolloutCityId = selection.cityId;
+          _rolloutDispatchMarketId = selection.dispatchMarketId;
+          _rolloutSavedAreaDisabled = selection.savedAreaDisabled;
+          if (_rolloutSelectionComplete) {
+            _selectedLaunchCity = RiderServiceAreaConfig.marketForCity(
+              _rolloutDispatchMarketId,
+            ).city;
+          }
         }
-      });
-    } catch (e) {
+      }
       if (mounted) {
-        setState(() {
-          _rolloutCatalogLoading = false;
-          _rolloutCatalogHydrated = true;
-          _rolloutCatalogError = e;
-        });
+        setState(apply);
       } else {
-        _rolloutCatalogLoading = false;
-        _rolloutCatalogHydrated = true;
-        _rolloutCatalogError = e;
+        apply();
       }
     }
   }
@@ -7665,7 +7692,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           ).toLowerCase();
           if (bankPaymentStatus != 'pending_manual_confirmation' &&
               bankPaymentStatus != 'pending_review' &&
-              bankPaymentStatus != 'pending') {
+              bankPaymentStatus != 'pending' &&
+              bankPaymentStatus != 'pending_transfer') {
             _logRideFlow(
               'RIDER_BANK_TRANSFER_INVALID_PAYMENT_STATUS rideId=$rideId payment_status=$bankPaymentStatus',
             );
@@ -10981,11 +11009,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   const SizedBox(height: 10),
                 ],
                 if (!_hasActiveRide &&
-                    (_rolloutCatalogLoading ||
-                        _rolloutCatalogError != null ||
-                        (_rolloutCatalogHydrated &&
-                            _rolloutCatalog.isNotEmpty &&
-                            !_rolloutSelectionComplete))) ...[
+                    shouldShowRiderRolloutBanner(
+                      catalogLoading: _rolloutCatalogLoading,
+                      catalogHydrated: _rolloutCatalogHydrated,
+                      catalogError: _rolloutCatalogError,
+                      catalog: _rolloutCatalog,
+                      selectionComplete: _rolloutSelectionComplete,
+                      savedAreaDisabled: _rolloutSavedAreaDisabled,
+                      bannerDismissed: _rolloutBannerDismissed,
+                    )) ...[
                   Material(
                     color: const Color(0xFFFFF2E0),
                     borderRadius: BorderRadius.circular(12),
@@ -11015,11 +11047,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: <Widget>[
                                       Text(
-                                        _rolloutCatalogLoading
-                                            ? 'Loading service areas…'
-                                            : _rolloutCatalogError != null
-                                            ? 'Could not load areas'
-                                            : 'Service area required',
+                                        riderRolloutBannerTitle(
+                                          catalogLoading: _rolloutCatalogLoading,
+                                          catalogError: _rolloutCatalogError,
+                                          catalogHydrated: _rolloutCatalogHydrated,
+                                          catalogEmpty: _rolloutCatalog.isEmpty,
+                                          savedAreaDisabled: _rolloutSavedAreaDisabled,
+                                          selectionComplete: _rolloutSelectionComplete,
+                                        ),
                                         style: const TextStyle(
                                           color: Color(0xFF4A3B2A),
                                           fontWeight: FontWeight.w700,
@@ -11030,7 +11065,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                                           _rolloutCatalogError == null) ...<Widget>[
                                         const SizedBox(height: 4),
                                         Text(
-                                          'Pick your state and city so NexRide can match drivers and pricing.',
+                                          _rolloutSavedAreaDisabled
+                                              ? 'Choose a new service area or use your current location.'
+                                              : _rolloutCatalog.isEmpty
+                                              ? 'No enabled cities right now. Retry or contact support.'
+                                              : 'Pick your state and city, or use your current location.',
                                           style: TextStyle(
                                             color: Colors.brown.shade800,
                                             fontSize: 12,
@@ -11059,16 +11098,31 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                               ],
                             ),
                           ),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: TextButton(
-                              onPressed: _rolloutCatalogLoading
-                                  ? null
-                                  : () {
-                                      unawaited(_openRiderRolloutAreaSheet());
-                                    },
-                              child: const Text('Choose service area'),
-                            ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: <Widget>[
+                              if (!_rolloutCatalogLoading)
+                                TextButton(
+                                  onPressed: () {
+                                    setState(() {
+                                      _rolloutBannerDismissed = true;
+                                    });
+                                  },
+                                  child: const Text('Dismiss'),
+                                ),
+                              TextButton(
+                                onPressed: _rolloutCatalogLoading
+                                    ? null
+                                    : () {
+                                        unawaited(_openRiderRolloutAreaSheet());
+                                      },
+                                child: Text(
+                                  _rolloutCatalogError != null
+                                      ? 'Retry'
+                                      : 'Choose service area',
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),

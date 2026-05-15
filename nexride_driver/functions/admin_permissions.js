@@ -185,6 +185,8 @@ const CALLABLE_PERMISSIONS = {
   // live_operations_dashboard_callable
   adminGetLiveOperationsDashboard: "trips.read",
   adminGetProductionHealthSnapshot: "dashboard.read",
+  adminListPaymentIntents: "dashboard.read",
+  adminExpireStaleVaPaymentIntents: "dashboard.read",
   // admin_audit_log
   adminListAuditLogs: "audit_logs.read",
   // withdraw_flow (also used by approveWithdrawal export)

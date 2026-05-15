@@ -92,6 +92,17 @@ String nxMapFailureMessage(
       return 'No NexRide user was found for that email.';
     case 'forbidden':
       return 'You do not have access to that action.';
+    case 'merchant_not_approved':
+      return 'Your store is not approved yet. This will be available after NexRide approves your business.';
+    case 'official_bank_not_configured':
+      return 'Bank transfer is temporarily unavailable. Contact NexRide support or use card top-up.';
+    case 'payment_owner_mismatch':
+    case 'payment_context_mismatch':
+      return 'This payment reference does not belong to your account.';
+    case 'payment_reference_not_found':
+      return 'Payment reference not found. Check the reference and try again.';
+    case 'payment_cancelled':
+      return 'Payment was cancelled. You can try again when ready.';
   }
   return fallback;
 }

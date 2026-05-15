@@ -18,11 +18,12 @@ import 'config/rider_app_config.dart';
 import 'config/rtdb_ride_request_contract.dart';
 import 'services/rider_delivery_cloud_functions_service.dart';
 import 'services/rider_ride_cloud_functions_service.dart'
-    show RiderRideCloudFunctionsService, riderRideCallableSucceeded;
+    show RiderRideCloudFunctionsService, riderRideCallableReason, riderRideCallableSucceeded;
 import 'services/rider_rollout_profile_store.dart';
 import 'config/rollout_copy.dart';
 import 'models/rollout_delivery_region_model.dart';
 import 'widgets/rider_rollout_area_sheet.dart';
+import 'services/rollout_catalog_hydration.dart';
 import 'services/dispatch_photo_upload_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
@@ -36,6 +37,7 @@ import 'support/startup_rtdb_support.dart';
 import 'trip_sync/trip_state_machine.dart';
 import 'services/rider_compliance_service.dart';
 import 'widgets/rider_identity_verification_banner.dart';
+import 'widgets/rider_flutterwave_va_payment_sheet.dart';
 
 class DispatchRequestScreen extends StatefulWidget {
   const DispatchRequestScreen({super.key});
@@ -107,8 +109,12 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   String? _rolloutRegionId;
   String? _rolloutCityId;
   String? _rolloutDispatchMarketId;
+  bool _rolloutSavedAreaDisabled = false;
+  int _rolloutCatalogLoadSeq = 0;
   bool _loading = true;
   bool _submitting = false;
+  /// Hosted Flutterwave card link vs Flutterwave virtual-account bank transfer.
+  String _dispatchPaymentMethod = 'flutterwave';
   bool _restoringActiveRequest = false;
   double _packagePhotoUploadProgress = 0;
   bool _identityComplianceLoaded = false;
@@ -153,8 +159,15 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       (_rolloutDispatchMarketId ?? '').trim().isNotEmpty;
 
   Future<void> _loadRolloutForDispatch() async {
+    final loadSeq = ++_rolloutCatalogLoadSeq;
     final uid = FirebaseAuth.instance.currentUser?.uid.trim();
     if (uid == null || uid.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _rolloutCatalogLoading = false;
+          _rolloutCatalogHydrated = false;
+        });
+      }
       return;
     }
     if (mounted) {
@@ -163,55 +176,66 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         _rolloutCatalogError = null;
       });
     }
+    List<RolloutDeliveryRegionModel> regions = const <RolloutDeliveryRegionModel>[];
+    RolloutCatalogSelection selection = const RolloutCatalogSelection();
+    Object? loadError;
     try {
       final raw = await _rideCloud
           .listDeliveryRegions()
-          .timeout(const Duration(seconds: 22));
+          .timeout(kRolloutCatalogCallableTimeout);
       if (raw['success'] != true) {
         throw StateError('listDeliveryRegions_failed');
       }
-      final regions = parseRolloutRegionsResponse(raw);
-      final saved = await RiderRolloutProfileStore.instance.fetchSelection(uid);
-      var rid = saved?[RiderRolloutProfileStore.kRegionId] ?? '';
-      var cid = saved?[RiderRolloutProfileStore.kCityId] ?? '';
-      var dm = saved?[RiderRolloutProfileStore.kDispatchMarketId] ?? '';
-      if (rid.isNotEmpty && regions.any((r) => r.regionId == rid)) {
-        final reg = regions.firstWhere((r) => r.regionId == rid);
-        if (!reg.cities.any((c) => c.cityId == cid)) {
-          cid = '';
-        }
-        if (reg.dispatchMarketId.trim().isNotEmpty) {
-          dm = reg.dispatchMarketId.trim();
-        }
-      } else {
-        rid = '';
-        cid = '';
-        dm = '';
+      regions = parseRolloutRegionsResponse(raw);
+      Map<String, String>? saved;
+      try {
+        saved = await RiderRolloutProfileStore.instance.fetchSelection(uid);
+      } catch (_) {
+        saved = null;
+      }
+      selection = mergeSavedRolloutWithCatalog(
+        regions: regions,
+        saved: saved,
+        regionKey: RiderRolloutProfileStore.kRegionId,
+        cityKey: RiderRolloutProfileStore.kCityId,
+        dispatchKey: RiderRolloutProfileStore.kDispatchMarketId,
+      );
+    } catch (e) {
+      loadError = e;
+    } finally {
+      if (loadSeq != _rolloutCatalogLoadSeq) {
+        return;
       }
       if (!mounted) {
+        _rolloutCatalogLoading = false;
+        _rolloutCatalogHydrated = true;
+        _rolloutCatalogError = loadError;
+        if (loadError == null) {
+          _rolloutCatalog = regions;
+          _rolloutRegionId = selection.regionId;
+          _rolloutCityId = selection.cityId;
+          _rolloutDispatchMarketId = selection.dispatchMarketId;
+          _rolloutSavedAreaDisabled = selection.savedAreaDisabled;
+        }
         return;
       }
       setState(() {
-        _rolloutCatalog = regions;
-        _rolloutRegionId = rid.isEmpty ? null : rid;
-        _rolloutCityId = cid.isEmpty ? null : cid;
-        _rolloutDispatchMarketId = dm.isEmpty ? null : dm;
         _rolloutCatalogLoading = false;
         _rolloutCatalogHydrated = true;
-        _rolloutCatalogError = null;
-        if (_rolloutSelectionComplete) {
-          _selectedLaunchCity =
-              RiderServiceAreaConfig.marketForCity(_rolloutDispatchMarketId).city;
+        _rolloutCatalogError = loadError;
+        if (loadError == null) {
+          _rolloutCatalog = regions;
+          _rolloutRegionId = selection.regionId;
+          _rolloutCityId = selection.cityId;
+          _rolloutDispatchMarketId = selection.dispatchMarketId;
+          _rolloutSavedAreaDisabled = selection.savedAreaDisabled;
+          if (_rolloutSelectionComplete) {
+            _selectedLaunchCity = RiderServiceAreaConfig.marketForCity(
+              _rolloutDispatchMarketId,
+            ).city;
+          }
         }
       });
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _rolloutCatalogLoading = false;
-          _rolloutCatalogHydrated = true;
-          _rolloutCatalogError = e;
-        });
-      }
     }
   }
 
@@ -611,7 +635,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   bool _deliveryPaymentVerified(Map<String, dynamic> row) {
     final ps = (row['payment_status']?.toString() ?? '').trim().toLowerCase();
     final tid = (row['payment_transaction_id']?.toString() ?? '').trim();
-    return ps == 'verified' && tid.isNotEmpty;
+    return (ps == 'verified' || ps == 'paid') && tid.isNotEmpty;
   }
 
   Future<Map<String, dynamic>?> _runFlutterwaveDeliveryCheckout({
@@ -1567,7 +1591,10 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             'distance_km': fareBreakdown.distanceKm,
             'eta_min': fareBreakdown.durationMin,
             'eta_minutes': fareBreakdown.durationMin,
-            'payment_method': 'flutterwave',
+            'payment_method':
+                _dispatchPaymentMethod == 'bank_transfer'
+                    ? 'bank_transfer'
+                    : 'flutterwave',
             'package_description': packageDetails,
             'recipient_name': recipientName,
             'recipient_phone': recipientPhone,
@@ -1598,18 +1625,59 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       Map<String, dynamic> workingPayload =
           Map<String, dynamic>.from(livePayload);
       if (!_deliveryPaymentVerified(workingPayload)) {
-        final paidRow = await _runFlutterwaveDeliveryCheckout(
-          deliveryId: effectiveRequestId,
-          deliveryRow: workingPayload,
-        );
-        if (paidRow == null) {
-          await _deliveryCloud.cancelDeliveryRequest(
+        if (_dispatchPaymentMethod == 'bank_transfer') {
+          final bankReg = await _rideCloud.registerBankTransferPayment(
             deliveryId: effectiveRequestId,
-            cancelReason: 'payment_failed',
           );
-          throw StateError('payment_failed');
+          if (bankReg['success'] != true) {
+            debugPrint(
+              '[DispatchPayment] bank VA register failed raw=${riderRideCallableReason(bankReg)}',
+            );
+            await _deliveryCloud.cancelDeliveryRequest(
+              deliveryId: effectiveRequestId,
+              cancelReason: 'payment_failed',
+            );
+            throw StateError('payment_failed');
+          }
+          final autoVa =
+              bankReg['automated_va'] == true ||
+              bankReg['automated_va'] == 'true' ||
+              bankReg['automated_va'] == 1;
+          if (autoVa && mounted) {
+            await showModalBottomSheet<bool>(
+              context: context,
+              isScrollControlled: true,
+              showDragHandle: true,
+              builder: (ctx) => RiderFlutterwaveVaPaymentSheet(
+                databaseRef: _deliveryRequestsRef.child(effectiveRequestId),
+                sheetTitle: 'Pay for dispatch',
+                initialRegistration: Map<String, dynamic>.from(bankReg),
+                onRegenerate: () => _rideCloud.registerBankTransferPayment(
+                  deliveryId: effectiveRequestId,
+                ),
+              ),
+            );
+          }
+          final refreshed =
+              await _deliveryRequestsRef.child(effectiveRequestId).get();
+          final refreshedMap = _asStringDynamicMap(refreshed.value);
+          if (refreshedMap != null) {
+            workingPayload = refreshedMap;
+          }
+        } else {
+          final paidRow = await _runFlutterwaveDeliveryCheckout(
+            deliveryId: effectiveRequestId,
+            deliveryRow: workingPayload,
+          );
+          if (paidRow == null) {
+            await _deliveryCloud.cancelDeliveryRequest(
+              deliveryId: effectiveRequestId,
+              cancelReason: 'payment_failed',
+            );
+            throw StateError('payment_failed');
+          }
+          workingPayload = paidRow;
         }
-        workingPayload = paidRow;
       }
       debugPrint('[Dispatch] delivery created deliveryId=$effectiveRequestId');
       await _tripSafetyService.registerRideRequest(
@@ -2087,11 +2155,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                     ),
                     const SizedBox(height: 16),
                   ],
-                  if (_rolloutCatalogLoading ||
-                      _rolloutCatalogError != null ||
-                      (_rolloutCatalogHydrated &&
-                          _rolloutCatalog.isNotEmpty &&
-                          !_rolloutSelectionComplete)) ...[
+                  if (shouldShowRiderRolloutBanner(
+                    catalogLoading: _rolloutCatalogLoading,
+                    catalogHydrated: _rolloutCatalogHydrated,
+                    catalogError: _rolloutCatalogError,
+                    catalog: _rolloutCatalog,
+                    selectionComplete: _rolloutSelectionComplete,
+                    savedAreaDisabled: _rolloutSavedAreaDisabled,
+                  )) ...[
                     Material(
                       color: const Color(0xFFFFF2E0),
                       borderRadius: BorderRadius.circular(12),
@@ -2121,11 +2192,14 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: <Widget>[
                                         Text(
-                                          _rolloutCatalogLoading
-                                              ? 'Loading service areas…'
-                                              : _rolloutCatalogError != null
-                                              ? 'Could not load areas'
-                                              : 'Service area required',
+                                          riderRolloutBannerTitle(
+                                            catalogLoading: _rolloutCatalogLoading,
+                                            catalogError: _rolloutCatalogError,
+                                            catalogHydrated: _rolloutCatalogHydrated,
+                                            catalogEmpty: _rolloutCatalog.isEmpty,
+                                            savedAreaDisabled: _rolloutSavedAreaDisabled,
+                                            selectionComplete: _rolloutSelectionComplete,
+                                          ),
                                           style: const TextStyle(
                                             color: Color(0xFF4A3B2A),
                                             fontWeight: FontWeight.w700,
@@ -2136,7 +2210,9 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                                             _rolloutCatalogError == null) ...<Widget>[
                                           const SizedBox(height: 4),
                                           Text(
-                                            'Pick your state and city for dispatch requests.',
+                                            _rolloutSavedAreaDisabled
+                                                ? 'Choose a new area or use your current location.'
+                                                : 'Pick your state and city, or use your current location.',
                                             style: TextStyle(
                                               color: Colors.brown.shade800,
                                               fontSize: 12,
@@ -2274,6 +2350,77 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                               icon: Icons.call_outlined,
                             ),
                           ),
+                          const SizedBox(height: 14),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Text(
+                                  'Payment method',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 13,
+                                    color: Colors.grey.shade800,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  children: <Widget>[
+                                    ChoiceChip(
+                                      label: const Text('Debit / credit card'),
+                                      selected:
+                                          _dispatchPaymentMethod ==
+                                              'flutterwave',
+                                      onSelected:
+                                          _submitting
+                                              ? null
+                                              : (bool v) {
+                                                  if (v) {
+                                                    setState(
+                                                      () =>
+                                                          _dispatchPaymentMethod =
+                                                              'flutterwave',
+                                                    );
+                                                  }
+                                                },
+                                    ),
+                                    ChoiceChip(
+                                      label: const Text('Bank transfer'),
+                                      selected:
+                                          _dispatchPaymentMethod ==
+                                              'bank_transfer',
+                                      onSelected:
+                                          _submitting
+                                              ? null
+                                              : (bool v) {
+                                                  if (v) {
+                                                    setState(
+                                                      () =>
+                                                          _dispatchPaymentMethod =
+                                                              'bank_transfer',
+                                                    );
+                                                  }
+                                                },
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (_dispatchPaymentMethod == 'bank_transfer') ...<
+                            Widget>[
+                            const SizedBox(height: 10),
+                            Text(
+                              'You will get a dedicated virtual account and exact amount. Payment confirms automatically — no receipt upload.',
+                              style: TextStyle(
+                                fontSize: 13,
+                                height: 1.35,
+                                color: Colors.grey.shade700,
+                              ),
+                            ),
+                          ],
                           if (_dispatchFarePreview != null) ...<Widget>[
                             const SizedBox(height: 12),
                             RiderBackendPricingBreakdown(

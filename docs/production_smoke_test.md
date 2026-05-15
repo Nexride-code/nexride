@@ -230,6 +230,79 @@ For each row: run steps → mark **PASS** or **FAIL** in the table below → sav
 
 ---
 
+## Production stability (2026-05-15) — service areas + bank transfer
+
+Code fixes deployed separately; operator must re-verify on **release builds**.
+
+| Check | Expected | PASS/FAIL | Notes |
+|-------|----------|-----------|-------|
+| Rider map service area | Banner resolves (list, retry, dismiss, or “use current location”) — **never** infinite “Loading service areas…” | **PENDING** | |
+| Rider saved area | After pick, banner hidden; next app open preloads saved area | **PENDING** | |
+| Rider disabled area | If saved city removed, banner returns with safe message | **PENDING** | |
+| Driver map service area | GPS mode: no area banner; Area mode: picker + retry; no infinite loading | **PENDING** | |
+| Official bank RTDB | `app_config/nexride_official_bank_account` set (see seed script below) | **PENDING** | |
+| Admin system health | Service areas card warns if official bank missing | **PENDING** | |
+| Rider bank transfer | Register shows NexRide account + reference; amount = `total_ngn` | **PENDING** | |
+
+**Seed official bank (operator, once per environment):**
+
+```bash
+cd /Users/lexemm/Projects/nexride
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+NEXRIDE_BANK_NAME='Your Bank' \
+NEXRIDE_ACCOUNT_NAME='NexRide Ltd' \
+NEXRIDE_ACCOUNT_NUMBER='0123456789' \
+node tools/seed_nexride_official_bank_account.mjs
+```
+
+Deploy functions after backend changes: `registerBankTransferPayment`, `getNexrideOfficialBankAccount`, `adminGetProductionHealthSnapshot`.
+
+**Automated tests (local):**
+
+```bash
+cd nexride_driver/functions && npm test
+flutter test test/rollout_catalog_hydration_test.dart
+cd nexride_driver && flutter test test/rollout_catalog_hydration_test.dart
+```
+
+**Stacked trips:** design only — `docs/stacked_trip_dispatch_design.md` (not shipped).
+
+---
+
+## Merchant app — payments & orders (release blocker)
+
+| # | Step | Expected | PASS/FAIL | Notes |
+|---|------|----------|-----------|-------|
+| M1 | Merchant → **Orders** (approved store, no orders) | Empty state: **“No orders yet”** — not a generic error | **PENDING** | `merchantListMyOrders` |
+| M2 | Merchant → **Orders** (active order) | List loads; tap opens detail | **PENDING** | |
+| M3 | Merchant → **Wallet** → manual bank transfer | Official NexRide bank name, account number, account name, reference, amount | **PENDING** | RTDB `app_config/nexride_official_bank_account` seeded |
+| M4 | Flutterwave top-up → **Cancel** in browser | Returns to **NexRide Merchant** (not Rider); safe cancelled state | **PENDING** | `https://nexride-8d5bc.web.app/pay/flutterwave-return.html?app=merchant&…` |
+| M5 | Flutterwave → pay → **Verify** in app | Success ties to **your** merchant (`merchant_id` / owner uid); wallet updates | **PENDING** | Callable `verifyPayment` |
+| M6 | Wrong uid / wrong app verifies `tx_ref` | Rejected: `payment_owner_mismatch` / `payment_context_mismatch` / `payment_reference_not_found` | **PENDING** | |
+| M7 | Cancel / retry / second verify | No duplicate successful payment rows; idempotent verify returns `already_verified` | **PENDING** | |
+
+**Deploy — 2026-05-15 (merchant/payment batch):**
+
+| Batch | Functions | Status |
+|-------|-----------|--------|
+| 1 | `merchantListMyOrders`, `merchantCreateBankTransferTopUp`, `merchantStartWalletTopUpFlutterwave` | **DEPLOYED** `nexride-8d5bc` |
+| 2 | `verifyPayment`, `initiateFlutterwavePayment`, `getNexrideOfficialBankAccount` | **DEPLOYED** `nexride-8d5bc` |
+| Hosting | `/pay/flutterwave-return.html` + `firebase.json` rewrites | **DEPLOYED** (see note below) |
+
+**Hosting note:** If full web predeploy fails on a machine, operators may run  
+`NEXRIDE_SKIP_HOSTING_PREDEPLOY=1 firebase deploy --only hosting --project nexride-8d5bc`  
+to publish the current `public/` tree (including `/pay/`). For a full marketing/admin web refresh, run a normal deploy **without** that variable on a Mac where Flutter can build.
+
+**Merchant app:** `cd nexride_merchant && flutter pub get && flutter build apk --release` (or `appbundle`); requires `app_links` + `nexride-merchant://` deep links.
+
+**Official bank seed:** `node tools/seed_nexride_official_bank_account.mjs` with ADC + real bank env vars (operator machine if not already done).
+
+**Merchant deep link scheme:** `nexride-merchant://pay/flutterwave-return`
+
+**Store upload:** Blocked until rider **R1–R10** and merchant **M1–M7** pass on real devices.
+
+---
+
 ## Driver flow
 
 | # | Step | Expected | PASS/FAIL | Notes |
@@ -294,4 +367,4 @@ For each row: run steps → mark **PASS** or **FAIL** in the table below → sav
 | Ops | | | |
 | Engineering | | | |
 
-**Blockers for store upload:** Any FAIL on rows 1–6, 7–16, 22–25, rider pricing **R1–R10**, or infrastructure **red** on System health. (R11 already PASS.)
+**Blockers for store upload:** Any FAIL on rows 1–6, 7–16, 22–25, rider pricing **R1–R10**, merchant **M1–M7**, or infrastructure **red** on System health. (R11 already PASS.)

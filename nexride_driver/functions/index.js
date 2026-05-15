@@ -21,6 +21,8 @@ const db = admin.database();
 exports.monitorSubscriptionExpiry = monitorSubscriptionExpiry;
 exports.sweepDispatchHealth = sweepDispatchHealth;
 exports.cleanExpiredDriverOffers = cleanExpiredDriverOffers;
+const { expireStaleVaPaymentIntents } = require("./va_intent_expiry_jobs");
+exports.expireStaleVaPaymentIntents = expireStaleVaPaymentIntents;
 
 function callableContext(request) {
   return { auth: request.auth };
@@ -43,10 +45,26 @@ const { resolveDriverMonetization, resolveCommissionPolicy } = require("./driver
 const pushNotifications = require("./push_notifications");
 const safetyEscalation = require("./safety_escalation");
 
+const { assertPaymentOwnership } = require("./payment_ownership");
+
 async function verifyPaymentInternal(reference, callerUid = "") {
   const ref = String(reference || "").trim();
+  if (!ref) {
+    return {
+      success: false,
+      reason: "payment_reference_not_found",
+      reason_code: "payment_reference_not_found",
+    };
+  }
   const txRef = db.ref(`payment_transactions/${ref}`);
   const existingSnap = await txRef.get();
+  if (!existingSnap.exists() || !existingSnap.val()) {
+    return {
+      success: false,
+      reason: "payment_reference_not_found",
+      reason_code: "payment_reference_not_found",
+    };
+  }
   const existing = existingSnap.val() || {};
   if (existing.verified === true) {
     return {
@@ -71,6 +89,18 @@ async function verifyPaymentInternal(reference, callerUid = "") {
   let rideId = String(existing.ride_id || "").trim();
   let deliveryId = String(existing.delivery_id || "").trim();
   const riderId = String(existing.rider_id || "").trim();
+  const ownership = assertPaymentOwnership(existing, {
+    callerUid,
+    expectedAppContext: "rider",
+    expectedRiderId: riderId || callerUid,
+  });
+  if (!ownership.ok) {
+    return {
+      success: false,
+      reason: ownership.reason,
+      reason_code: ownership.reason_code,
+    };
+  }
   if (!rideId && !deliveryId) {
     rideId = paymentFlow.extractRideIdFromNexrideTxRef(ref);
     deliveryId = paymentFlow.extractDeliveryIdFromNexrideTxRef(ref);
@@ -131,7 +161,16 @@ async function verifyPaymentInternal(reference, callerUid = "") {
   });
 
   if (!v.ok) {
-    return { success: false, reason: v.reason || "verification_failed" };
+    const failReason = String(v.reason || "verification_failed").trim();
+    const cancelled =
+      failReason === "cancelled" ||
+      failReason === "canceled" ||
+      failReason === "payment_cancelled";
+    return {
+      success: false,
+      reason: cancelled ? "payment_cancelled" : failReason,
+      reason_code: cancelled ? "payment_cancelled" : failReason,
+    };
   }
   const driverId = entityRow ? String(entityRow.driver_id || "").trim() : "";
   await paymentFlow.persistVerifiedFlutterwaveCharge(db, {
@@ -578,6 +617,16 @@ exports.adminGetLiveOperationsDashboard = onCall(rideCallOpts, async (request) =
 );
 exports.adminGetProductionHealthSnapshot = onCall(rideCallOpts, async (request) =>
   productionHealth.adminGetProductionHealthSnapshot(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminListPaymentIntents = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListPaymentIntents(request.data, callableContext(request), db),
+);
+exports.adminExpireStaleVaPaymentIntents = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminExpireStaleVaPaymentIntents(
     request.data,
     callableContext(request),
     db,

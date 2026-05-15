@@ -123,6 +123,7 @@ String? requiredPermissionForSection(AdminSection section) {
     AdminSection.merchants => 'merchants.read',
     AdminSection.settings => 'settings.read',
     AdminSection.auditLogs => 'audit_logs.read',
+    AdminSection.paymentIntents => 'dashboard.read',
   };
 }
 

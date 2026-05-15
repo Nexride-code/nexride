@@ -108,7 +108,40 @@ function deliveryHasVerifiedOnlinePayment(row) {
 }
 
 function paymentAllowsDispatchDelivery(row) {
-  return deliveryHasVerifiedOnlinePayment(row);
+  if (!row || typeof row !== "object") return false;
+  const pm = String(row.payment_method ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const ps = String(row.payment_status ?? "").trim().toLowerCase();
+  if (pm === "cash") return false;
+
+  if (
+    pm === "card" ||
+    pm === "flutterwave" ||
+    pm === "credit_card" ||
+    pm === "creditcard" ||
+    pm === "debit_card"
+  ) {
+    if (["paid", "verified", "prepaid"].includes(ps)) return true;
+    return ps === "pending";
+  }
+
+  if (pm === "bank_transfer") {
+    if (ps === "bank_transfer_expired") {
+      return false;
+    }
+    return [
+      "pending_manual_confirmation",
+      "pending_transfer",
+      "pending_review",
+      "pending",
+      "paid",
+      "verified",
+    ].includes(ps);
+  }
+
+  return ["paid", "verified", "pending"].includes(ps);
 }
 
 /**

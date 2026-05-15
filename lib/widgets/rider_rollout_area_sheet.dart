@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:geolocator/geolocator.dart';
 
 import '../models/rollout_delivery_region_model.dart';
 import '../services/rider_rollout_profile_store.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 
 /// Bottom sheet: pick enabled state + city from [listDeliveryRegions], persist rollout fields.
 class RiderRolloutAreaSheet extends StatefulWidget {
@@ -48,6 +49,7 @@ class _RiderRolloutAreaSheetState extends State<RiderRolloutAreaSheet> {
   String? _regionId;
   String? _cityId;
   bool _saving = false;
+  bool _locating = false;
   String? _error;
 
   @override
@@ -108,6 +110,75 @@ class _RiderRolloutAreaSheetState extends State<RiderRolloutAreaSheet> {
       if (mounted) {
         setState(() {
           _error = 'Could not load areas. Check connection and retry.';
+        });
+      }
+    }
+  }
+
+  Future<void> _useCurrentLocation() async {
+    setState(() {
+      _locating = true;
+      _error = null;
+    });
+    try {
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever) {
+        setState(() {
+          _locating = false;
+          _error = 'Location permission is required to detect your service area.';
+        });
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.medium,
+        timeLimit: const Duration(seconds: 18),
+      );
+      if (_regions.isEmpty) {
+        setState(() {
+          _locating = false;
+          _error = 'No service areas loaded. Tap Retry first.';
+        });
+        return;
+      }
+      final match = matchRideAreaForPickupCoordinates(
+        _regions,
+        lat: pos.latitude,
+        lng: pos.longitude,
+      );
+      if (match == null) {
+        setState(() {
+          _locating = false;
+          _error =
+              'NexRide is not available at your current location yet. Pick a city from the list.';
+        });
+        return;
+      }
+      final uid = FirebaseAuth.instance.currentUser?.uid.trim() ?? '';
+      if (uid.isEmpty) {
+        setState(() {
+          _locating = false;
+          _error = 'Please sign in again.';
+        });
+        return;
+      }
+      await RiderRolloutProfileStore.instance.saveSelection(
+        uid: uid,
+        regionId: match.regionId,
+        cityId: match.cityId,
+        dispatchMarketId: match.dispatchMarketId,
+      );
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _locating = false;
+          _error = 'Could not read your location. Try again or pick a city.';
         });
       }
     }
@@ -200,9 +271,22 @@ class _RiderRolloutAreaSheetState extends State<RiderRolloutAreaSheet> {
                 const Text('No enabled areas loaded.'),
                 const SizedBox(height: 12),
                 OutlinedButton.icon(
-                  onPressed: _saving ? null : _retryLoad,
+                  onPressed: (_saving || _locating) ? null : _retryLoad,
                   icon: const Icon(Icons.refresh),
                   label: const Text('Retry'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: (_saving || _locating) ? null : _useCurrentLocation,
+                  icon: const Icon(Icons.my_location_outlined),
+                  label: const Text('Use current location'),
+                ),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: (_saving || _locating)
+                      ? null
+                      : () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
                 ),
               ],
             )
@@ -246,18 +330,36 @@ class _RiderRolloutAreaSheetState extends State<RiderRolloutAreaSheet> {
                   .toList(),
               onChanged: (v) => setState(() => _cityId = v),
             ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: (_saving || _locating) ? null : _useCurrentLocation,
+              icon: _locating
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.my_location_outlined),
+              label: const Text('Use current location'),
+            ),
             const SizedBox(height: 20),
             Row(
               children: <Widget>[
+                TextButton(
+                  onPressed: (_saving || _locating)
+                      ? null
+                      : () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
                 if (widget.onReloadCatalog != null)
                   TextButton.icon(
-                    onPressed: _saving ? null : _retryLoad,
+                    onPressed: (_saving || _locating) ? null : _retryLoad,
                     icon: const Icon(Icons.refresh),
                     label: const Text('Refresh'),
                   ),
                 const Spacer(),
                 FilledButton(
-                  onPressed: _saving ? null : _save,
+                  onPressed: (_saving || _locating) ? null : _save,
                   child: _saving
                       ? const SizedBox(
                           width: 22,

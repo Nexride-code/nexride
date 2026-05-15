@@ -988,6 +988,19 @@ async function merchantListMyOrders(_data, context, _db) {
     return roleBlock;
   }
   const mid = resolved.ref.id;
+  const m = resolved.data || {};
+  const merchantStatus = String(m.merchant_status ?? m.status ?? "")
+    .trim()
+    .toLowerCase();
+  if (merchantStatus !== "approved") {
+    return {
+      success: false,
+      reason: "merchant_not_approved",
+      reason_code: "merchant_not_approved",
+      user_message:
+        "Your store is not approved yet. Orders will appear after NexRide approves your business.",
+    };
+  }
   const fs = admin.firestore();
   const snap = await ordersCol(fs).where("merchant_id", "==", mid).limit(50).get();
   const orders = snap.docs

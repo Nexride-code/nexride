@@ -256,12 +256,24 @@ class RiderRideCloudFunctionsService {
       );
 
   Future<Map<String, dynamic>> registerBankTransferPayment({
-    required String rideId,
+    String? rideId,
+    String? deliveryId,
   }) =>
-      _call('registerBankTransferPayment', <String, dynamic>{
-        'rideId': rideId,
-        'ride_id': rideId,
-      });
+      _call(
+        'registerBankTransferPayment',
+        <String, dynamic>{
+          if (rideId != null && rideId.trim().isNotEmpty) ...<String, dynamic>{
+            'rideId': rideId.trim(),
+            'ride_id': rideId.trim(),
+          },
+          if (deliveryId != null && deliveryId.trim().isNotEmpty) ...<String,
+              dynamic>{
+            'deliveryId': deliveryId.trim(),
+            'delivery_id': deliveryId.trim(),
+          },
+        },
+        timeout: const Duration(seconds: 45),
+      );
 
   Future<Map<String, dynamic>> getNexrideOfficialBankAccount() =>
       _call('getNexrideOfficialBankAccount', <String, dynamic>{});

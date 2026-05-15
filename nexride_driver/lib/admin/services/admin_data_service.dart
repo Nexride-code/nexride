@@ -552,6 +552,57 @@ class AdminDataService {
     }
   }
 
+  /// Firestore-backed Flutterwave VA payment intents (`adminListPaymentIntents`).
+  Future<Map<String, dynamic>> adminListPaymentIntents({
+    String status = 'all',
+    int limit = 60,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListPaymentIntents',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        if (status.trim().isNotEmpty && status.trim() != 'all')
+          'status': status.trim(),
+        'limit': limit,
+      });
+      return _map(result.data);
+    } catch (e) {
+      debugPrint('[PaymentIntents][DATA] adminListPaymentIntents error: $e');
+      return <String, dynamic>{
+        'success': false,
+        'reason': e.toString(),
+        'intents': <Map<String, dynamic>>[],
+      };
+    }
+  }
+
+  /// Sweep expired VA intents (callable mirror of scheduled job).
+  Future<Map<String, dynamic>> adminExpireStaleVaPaymentIntents({
+    int scanLimit = 400,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminExpireStaleVaPaymentIntents',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 120)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'scan_limit': scanLimit,
+      });
+      return _map(result.data);
+    } catch (e) {
+      debugPrint(
+        '[PaymentIntents][DATA] adminExpireStaleVaPaymentIntents error: $e',
+      );
+      return <String, dynamic>{'success': false, 'reason': e.toString()};
+    }
+  }
+
   Future<Map<String, dynamic>> adminGetServiceArea({
     required String regionId,
     String? cityId,

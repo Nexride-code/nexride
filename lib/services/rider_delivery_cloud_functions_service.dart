@@ -21,7 +21,7 @@ class RiderDeliveryCloudFunctionsService {
   }
 
   final FirebaseFunctions _functions;
-  static const Duration _kCallableTimeout = Duration(seconds: 15);
+  static const Duration _kCallableTimeout = Duration(seconds: 30);
   static const int _kMaxAttempts = 2;
 
   Future<Map<String, dynamic>> _call(

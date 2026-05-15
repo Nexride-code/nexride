@@ -14,6 +14,7 @@ const {
   evaluateDriverForOfferSoft,
   evaluateDriverGeoAndMode,
   evaluateDriverVerificationForOffer,
+  evaluateCarRideVehicleAndCapability,
   loadDispatchGates,
   normalizeDriverAvailabilityMode,
   summarizeDriverForFanout,
@@ -174,7 +175,7 @@ function surfaceAcceptFailureReason(internal, preflightDocPresent) {
  * accept fields via Admin `update` after a fresh read shows the ride still exists and is open.
  * @returns {Promise<{ ok: boolean, reason?: string, finalRide?: object|null, idempotent?: boolean }>}
  */
-async function applyDriverAcceptAdminMerge(rideRef, rideId, driverId, now) {
+async function applyDriverAcceptAdminMerge(db, rideRef, rideId, driverId, now) {
   const snap = await rideRef.get();
   const pathExists = snapExists(snap);
   const cur = rideDocFromSnapshot(snap);
@@ -210,6 +211,17 @@ async function applyDriverAcceptAdminMerge(rideRef, rideId, driverId, now) {
   }
   if (assignedCanon && assignedCanon !== driverId) {
     return { ok: false, reason: "driver_already_set" };
+  }
+  const svcMerge = String(cur.service_type ?? "ride").trim().toLowerCase();
+  if (svcMerge === "ride" || svcMerge === "") {
+    const offerSnapM = await db.ref(`driver_offer_queue/${driverId}/${rideId}`).get();
+    if (!snapExists(offerSnapM)) {
+      return { ok: false, reason: "no_offer" };
+    }
+    const offerM = offerSnapM.val();
+    if (offerM && String(offerM.status ?? "").trim().toLowerCase() === "withdrawn") {
+      return { ok: false, reason: "offer_withdrawn" };
+    }
   }
   const openByTrip = isOpenPoolRide(cur);
   const openByStatus = ACCEPTABLE_OPEN_STATUS.has(status);
@@ -378,8 +390,12 @@ function paymentAllowsDispatch(ride) {
   }
 
   if (method === "bank_transfer") {
+    if (status === "bank_transfer_expired") {
+      return false;
+    }
     return [
       "pending_manual_confirmation",
+      "pending_transfer",
       "pending_review",
       "pending",
       "paid",
@@ -525,6 +541,35 @@ async function withdrawDriverOffer(data, context, db) {
     [`ride_offer_fanout/${rideId}/${driverId}`]: null,
   });
   console.log("DRIVER_WITHDRAW_OFFER", { driverId, rideId });
+  const reason = String(data?.reason ?? data?.withdraw_reason ?? "").trim().toLowerCase();
+  try {
+    await writeAudit(db, {
+      type: "driver_offer_withdrawn",
+      ride_id: rideId,
+      driver_id: driverId,
+      actor_uid: driverId,
+      withdraw_reason: reason || "unspecified",
+    });
+  } catch (e) {
+    console.log("DRIVER_WITHDRAW_OFFER_AUDIT_FAIL", rideId, String(e?.message || e));
+  }
+
+  // Rider stays in searching — offer next eligible drivers (Grab/Bolt-style rematch).
+  try {
+    const rideSnap = await db.ref(`ride_requests/${rideId}`).get();
+    const ride = rideSnap.val() && typeof rideSnap.val() === "object" ? rideSnap.val() : null;
+    if (
+      ride &&
+      paymentAllowsDispatch(ride) &&
+      !canonicalAssignedDriverId(ride) &&
+      String(ride.service_type ?? "ride").trim().toLowerCase() === "ride" &&
+      (isOpenPoolRide(ride) || ACCEPTABLE_OPEN_STATUS.has(String(ride.status ?? "").trim().toLowerCase()))
+    ) {
+      await fanOutDriverOffersIfEligible(db, rideId, ride);
+    }
+  } catch (e) {
+    console.log("DRIVER_WITHDRAW_REFANOUT_FAIL", rideId, String(e?.message || e));
+  }
   return { success: true, rideId, driverId };
 }
 
@@ -767,6 +812,24 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload) {
 
     if (snap.suspended) {
       console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, "reason=suspended");
+      return;
+    }
+
+    const vc = evaluateCarRideVehicleAndCapability(profile, ridePayload);
+    if (!vc.ok) {
+      console.log(
+        "MATCH_DRIVER_FILTERED",
+        `uid=${d}`,
+        `reason=${vc.log || "vehicle_cap"}:${vc.detail || ""}`,
+      );
+      return;
+    }
+
+    const darSnap = await db.ref(`driver_active_ride/${d}`).get();
+    const dar = darSnap.val() && typeof darSnap.val() === "object" ? darSnap.val() : {};
+    const busyRid = normUid(dar.ride_id ?? dar.rideId);
+    if (busyRid) {
+      console.log("MATCH_DRIVER_FILTERED", `uid=${d}`, "reason=driver_active_ride_busy");
       return;
     }
 
@@ -1373,6 +1436,9 @@ async function createRideRequest(data, context, db) {
     service_type: String(
       intentMerged?.service_type ?? data?.service_type ?? data?.serviceType ?? "ride",
     ).trim(),
+    /** Car-hailing (Grab/Bolt-style); fan-out matches only drivers with compatible vehicle + ride capability */
+    vehicle_type: "car",
+    requested_vehicle_type: "car",
     resolved_service_region_id: rolloutGate.region_id || null,
     resolved_service_city_id: rolloutGate.city_id || null,
     resolved_dispatch_market_id: rolloutGate.dispatch_market_id || null,
@@ -1672,30 +1738,25 @@ async function acceptRideRequest(data, context, db) {
     return { success: false, reason: "driver_not_eligible" };
   }
 
+  const vcap = evaluateCarRideVehicleAndCapability(drvProf, pre || {});
+  if (!vcap.ok) {
+    console.log(
+      "DRIVER_ACCEPT_FAIL_REASON",
+      rideId,
+      "driver_not_eligible_vehicle",
+      vcap.log || "vehicle_capability",
+      vcap.detail,
+    );
+    return { success: false, reason: "driver_not_eligible" };
+  }
+
   const offerSnap = await db.ref(`driver_offer_queue/${driverId}/${rideId}`).get();
   const offerPresent = snapExists(offerSnap);
   if (!offerPresent) {
-    const st0 = String(pre?.status ?? "").trim().toLowerCase();
-    const openForAccept =
-      isOpenPoolRide(pre || {}) || ACCEPTABLE_OPEN_STATUS.has(st0);
-    const driverSlotFree = !canonicalAssignedDriverId(pre || {});
-    if (
-      !(
-        openForAccept &&
-        driverSlotFree &&
-        paymentAllowsDispatch(pre || {})
-      )
-    ) {
-      console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "no_offer");
-      return { success: false, reason: "no_offer" };
-    }
-    console.log(
-      "DRIVER_ACCEPT_OFFER_SKIPPED",
-      rideId,
-      driverId,
-      "reason=no_queue_row_open_ride",
-    );
-  } else {
+    console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "no_offer");
+    return { success: false, reason: "no_offer" };
+  }
+  {
     const offer = offerSnap.val();
     if (offer && String(offer.status ?? "").trim().toLowerCase() === "withdrawn") {
       console.log("DRIVER_ACCEPT_FAIL_REASON", rideId, "offer_withdrawn");
@@ -1849,7 +1910,7 @@ async function acceptRideRequest(data, context, db) {
       failureReason === "unknown")
   ) {
     console.log("DRIVER_ACCEPT_MERGE_FALLBACK", rideId, "tx_reason=", failureReason);
-    const merge = await applyDriverAcceptAdminMerge(rideRef, rideId, driverId, now);
+    const merge = await applyDriverAcceptAdminMerge(db, rideRef, rideId, driverId, now);
     if (merge.ok && merge.idempotent) {
       console.log("DRIVER_ACCEPT_TX_SUCCESS", rideId, driverId, "path=admin_merge_idempotent");
       await syncRideTrackPublic(db, rideId);

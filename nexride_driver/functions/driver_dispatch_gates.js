@@ -393,6 +393,9 @@ function summarizeDriverForFanout(driverId, profile) {
     d.driver_availability_mode ?? d.availability_mode ?? "",
   );
   const lastLocTs = Number(d.last_location_updated_at ?? 0) || 0;
+  const vehicleType = String(d.vehicle_type ?? d.vehicleType ?? "")
+    .trim()
+    .toLowerCase();
   return {
     uid: normUid(driverId),
     dispatch_market: dm || "missing",
@@ -408,7 +411,83 @@ function summarizeDriverForFanout(driverId, profile) {
     driver_availability_mode: availabilityMode || "(legacy)",
     last_location_updated_at: lastLocTs,
     selected_service_area_id: String(d.selected_service_area_id ?? "").trim() || "(empty)",
+    vehicle_type: vehicleType || "(empty)",
   };
+}
+
+/** Bike / two-wheel modes must not receive rider car-hailing (`service_type: ride`) offers. */
+const NON_CAR_RIDE_VEHICLE_TYPES = new Set([
+  "bike",
+  "bicycle",
+  "ebike",
+  "e_bike",
+  "motorcycle",
+  "motorbike",
+  "okada",
+  "tricycle",
+  "dispatch_bike",
+]);
+
+const CAR_RIDE_VEHICLE_TYPES = new Set([
+  "car",
+  "sedan",
+  "suv",
+  "van",
+  "minivan",
+  "mpv",
+  "saloon",
+  "hatchback",
+  "wagon",
+]);
+
+/**
+ * Car-hailing ride offers: driver must not be a bike/dispatch-only profile; `service_capabilities.ride`
+ * may opt out. Legacy drivers with no `vehicle_type` stay eligible (treated as car fleet).
+ *
+ * @param {Record<string, unknown>} driverProfile
+ * @param {Record<string, unknown>} ridePayload
+ * @returns {{ ok: true } | { ok: false, log: string, detail: string }}
+ */
+function evaluateCarRideVehicleAndCapability(driverProfile, ridePayload) {
+  const svc = String(ridePayload?.service_type ?? ridePayload?.serviceType ?? "ride")
+    .trim()
+    .toLowerCase();
+  if (svc !== "ride") {
+    return { ok: true };
+  }
+
+  const requested = String(
+    ridePayload?.vehicle_type ?? ridePayload?.requested_vehicle_type ?? "car",
+  )
+    .trim()
+    .toLowerCase();
+  if (requested && requested !== "car") {
+    return { ok: false, log: "RIDE_FILTER_VEHICLE_CLASS", detail: `ride_requests_non_car:${requested}` };
+  }
+
+  const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
+  const caps =
+    d.service_capabilities && typeof d.service_capabilities === "object"
+      ? d.service_capabilities
+      : {};
+  if (caps.ride === false) {
+    return { ok: false, log: "DRIVER_FILTERED_CAPABILITIES", detail: "ride_capability_false" };
+  }
+
+  const vt = String(d.vehicle_type ?? d.vehicleType ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (!vt) {
+    return { ok: true };
+  }
+  if (NON_CAR_RIDE_VEHICLE_TYPES.has(vt)) {
+    return { ok: false, log: "DRIVER_FILTERED_VEHICLE", detail: `non_car:${vt}` };
+  }
+  if (CAR_RIDE_VEHICLE_TYPES.has(vt)) {
+    return { ok: true };
+  }
+  return { ok: false, log: "DRIVER_FILTERED_VEHICLE", detail: `vehicle_not_car_class:${vt}` };
 }
 
 module.exports = {
@@ -418,6 +497,7 @@ module.exports = {
   evaluateDriverForOfferSoft,
   evaluateDriverVerificationForOffer,
   evaluateDriverGeoAndMode,
+  evaluateCarRideVehicleAndCapability,
   loadDispatchGates,
   summarizeDriverForFanout,
   STALE_DRIVER_LOCATION_MS,

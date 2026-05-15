@@ -63,6 +63,10 @@
         "destination": "/pay/card-link-complete.html"
       },
       {
+        "source": "/pay/flutterwave-return",
+        "destination": "/pay/flutterwave-return.html"
+      },
+      {
         "source": "/admin",
         "destination": "/admin/index.html"
       },

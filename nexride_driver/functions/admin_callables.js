@@ -329,13 +329,16 @@ async function filterAdminAuditForTrip(db, tripId) {
   return rows.slice(0, 80);
 }
 
-function summarizeLiveRideRow(rideId, v) {
+function summarizeLiveRideRow(rideId, v, offeredDriverIds = []) {
   const bucket = rideOpsUiBucket(v);
   const created = Number(v.created_at ?? v.requested_at ?? 0) || 0;
   const updated = Number(v.updated_at ?? 0) || 0;
   const elapsedMs = created ? Math.max(0, nowMs() - created) : 0;
   const fare = Number(v.fare ?? v.estimated_fare ?? 0) || 0;
   const finalFare = Number(v.final_fare ?? v.fare_final ?? v.fare ?? 0) || 0;
+  const accepted = normUid(v.accepted_driver_id) || null;
+  const matched = normUid(v.matched_driver_id) || null;
+  const assigned = normUid(v.driver_id) || null;
   return {
     trip_kind: "ride",
     trip_id: rideId,
@@ -345,7 +348,9 @@ function summarizeLiveRideRow(rideId, v) {
     rider_id: normUid(v.rider_id),
     rider_name: strHint(v.rider_name, 120),
     rider_phone: strHint(v.rider_phone ?? v.riderPhone ?? v.phone, 40),
-    driver_id: normUid(v.driver_id) || null,
+    driver_id: assigned || null,
+    accepted_driver_id: accepted,
+    matched_driver_id: matched || accepted,
     driver_name: strHint(v.driver_name ?? v.driverName, 120),
     driver_phone: strHint(v.driver_phone ?? v.driverPhone, 40),
     fare_estimate: fare,
@@ -362,6 +367,9 @@ function summarizeLiveRideRow(rideId, v) {
     elapsed_ms: elapsedMs,
     distance_km: Number(v.distance_km ?? 0) || 0,
     eta_minutes: Number(v.eta_min ?? v.eta_minutes ?? 0) || 0,
+    service_type: String(v.service_type ?? "ride"),
+    vehicle_type: String(v.vehicle_type ?? v.requested_vehicle_type ?? ""),
+    offered_driver_ids: offeredDriverIds,
   };
 }
 
@@ -481,12 +489,20 @@ async function adminListLiveTrips(_data, context, db) {
   ]);
 
   for (const rideId of rideIdUnion) {
-    const rSnap = await db.ref(`ride_requests/${rideId}`).get();
+    const [rSnap, fanSnap] = await Promise.all([
+      db.ref(`ride_requests/${rideId}`).get(),
+      db.ref(`ride_offer_fanout/${rideId}`).get(),
+    ]);
     const v = rSnap.val();
     if (!v || typeof v !== "object") continue;
     if (seen.has(`ride:${rideId}`)) continue;
     seen.add(`ride:${rideId}`);
-    trips.push(summarizeLiveRideRow(rideId, v));
+    const fan = fanSnap.val() && typeof fanSnap.val() === "object" ? fanSnap.val() : {};
+    const offeredDriverIds = Object.keys(fan)
+      .map((k) => normUid(k))
+      .filter(Boolean)
+      .slice(0, 48);
+    trips.push(summarizeLiveRideRow(rideId, v, offeredDriverIds));
   }
 
   for (const deliveryId of delIdUnion) {
@@ -3324,6 +3340,83 @@ async function adminApproveDriverVerification(data, context, db) {
   return { success: true, reason: "approved", reason_code: "driver_verification_approved", driverId };
 }
 
+/**
+ * Operational list of Flutterwave virtual-account bank transfer intents (`payment_intents` / Firestore).
+ */
+async function adminListPaymentIntents(data, context, db) {
+  const deny = await adminPerms.enforceCallable(db, context, "adminListPaymentIntents");
+  if (deny) return deny;
+  const { INTENT_COLLECTION } = require("./bank_transfer_va");
+  const fs = admin.firestore();
+  const status = String(data?.status ?? "").trim().toLowerCase();
+  const limit = Math.min(100, Math.max(1, Number(data?.limit ?? 40) || 40));
+  try {
+    let q = fs.collection(INTENT_COLLECTION);
+    if (status && status !== "all") {
+      q = q.where("status", "==", status);
+    }
+    const snap = await q.limit(limit).get();
+    const intents = [];
+    for (const d of snap.docs) {
+      const x = d.data() || {};
+      const createdTs = x.created_at;
+      const createdMillis =
+        createdTs && typeof createdTs.toMillis === "function"
+          ? createdTs.toMillis()
+          : typeof d.createTime?.toMillis === "function"
+            ? d.createTime.toMillis()
+            : null;
+      intents.push({
+        tx_ref: d.id,
+        owner_uid: x.owner_uid ?? null,
+        app_context: x.app_context ?? null,
+        flow: x.flow ?? null,
+        status: x.status ?? null,
+        settlement_state: x.settlement_state ?? null,
+        amount_ngn: Number(x.amount_ngn ?? 0) || 0,
+        total_ngn: Number(x.total_ngn ?? 0) || 0,
+        currency: x.currency != null ? String(x.currency) : null,
+        ride_id: x.ride_id ?? null,
+        delivery_id: x.delivery_id ?? null,
+        merchant_id: x.merchant_id ?? null,
+        merchant_bank_topup_id: x.merchant_bank_topup_id ?? null,
+        expires_at_ms: Number(x.expires_at_ms ?? 0) || null,
+        created_at_ms: createdMillis,
+        account_number: x.account_number ?? null,
+        bank_name: x.bank_name ?? null,
+        account_name: x.account_name ?? null,
+        flutterwave_order_ref: x.flutterwave_order_ref ?? null,
+        legacy_manual_bank: x.legacy_manual_bank === true,
+        updated_at_ms: x.updated_at?.toMillis?.() ?? null,
+      });
+    }
+    return { success: true, intents };
+  } catch (e) {
+    logger.warn("adminListPaymentIntents failed", { err: String(e?.message || e) });
+    return { success: false, reason: "query_failed" };
+  }
+}
+
+async function adminExpireStaleVaPaymentIntents(_data, context, db) {
+  const deny = await adminPerms.enforceCallable(
+    db,
+    context,
+    "adminExpireStaleVaPaymentIntents",
+  );
+  if (deny) return deny;
+  const fs = admin.firestore();
+  const bankTransferVa = require("./bank_transfer_va");
+  try {
+    return await bankTransferVa.expireStaleBankTransferVaIntents(fs, db, {
+      graceMs: 0,
+      scanLimit: Number(_data?.limit ?? _data?.scan_limit ?? 400) || 400,
+    });
+  } catch (e) {
+    logger.warn("adminExpireStaleVaPaymentIntents failed", { err: String(e?.message || e) });
+    return { success: false, reason: "expire_failed" };
+  }
+}
+
 module.exports = {
   adminListLiveRides,
   adminGetRideDetails,
@@ -3368,4 +3461,6 @@ module.exports = {
   adminFlagUserForSupportContact,
   adminReviewRiderFirestoreIdentity,
   adminApproveDriverVerification,
+  adminListPaymentIntents,
+  adminExpireStaleVaPaymentIntents,
 };

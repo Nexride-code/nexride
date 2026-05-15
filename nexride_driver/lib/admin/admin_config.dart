@@ -89,6 +89,7 @@ class AdminPortalRoutePaths {
   static const String merchants = '/merchants';
   static const String settings = '/settings';
   static const String auditLogs = '/audit-logs';
+  static const String paymentIntents = '/payment-intents';
   static const String accountSecurity = '/account/security';
   static const String changePassword = '/account/change-password';
 
@@ -115,6 +116,7 @@ class AdminPortalRoutePaths {
     '/merchants': merchants,
     '/settings': settings,
     '/audit-logs': auditLogs,
+    '/payment-intents': paymentIntents,
     '/account/security': accountSecurity,
     '/account/change-password': changePassword,
   };
@@ -137,6 +139,7 @@ class AdminPortalRoutePaths {
     merchants,
     settings,
     auditLogs,
+    paymentIntents,
     accountSecurity,
     changePassword,
   ];
@@ -228,6 +231,7 @@ class AdminPortalRoutePaths {
       AdminSection.merchants => merchants,
       AdminSection.settings => settings,
       AdminSection.auditLogs => auditLogs,
+      AdminSection.paymentIntents => paymentIntents,
     };
   }
 
@@ -253,6 +257,7 @@ class AdminPortalRoutePaths {
       merchants => AdminSection.merchants,
       settings => AdminSection.settings,
       auditLogs => AdminSection.auditLogs,
+      paymentIntents => AdminSection.paymentIntents,
       _ => AdminSection.dashboard,
     };
     if (section == AdminSection.liveOperations) {
@@ -283,6 +288,7 @@ enum AdminSection {
   merchants,
   settings,
   auditLogs,
+  paymentIntents,
 }
 
 /// Order of sections in the admin drawer / persistent sidebar.
@@ -309,6 +315,7 @@ const List<AdminSection> kAdminSidebarNavOrder = <AdminSection>[
   AdminSection.regions,
   AdminSection.serviceAreas,
   AdminSection.merchants,
+  AdminSection.paymentIntents,
   AdminSection.auditLogs,
   AdminSection.settings,
 ];
@@ -333,6 +340,7 @@ extension AdminSectionPresentation on AdminSection {
       AdminSection.merchants => 'Merchants',
       AdminSection.settings => 'Settings',
       AdminSection.auditLogs => 'Audit logs',
+      AdminSection.paymentIntents => 'Payment intents',
     };
   }
 
@@ -355,6 +363,7 @@ extension AdminSectionPresentation on AdminSection {
       AdminSection.merchants => 'Merchants',
       AdminSection.settings => 'Settings',
       AdminSection.auditLogs => 'Audit',
+      AdminSection.paymentIntents => 'Payments',
     };
   }
 
@@ -377,6 +386,7 @@ extension AdminSectionPresentation on AdminSection {
       AdminSection.merchants => Icons.storefront_outlined,
       AdminSection.settings => Icons.settings_outlined,
       AdminSection.auditLogs => Icons.fact_check_outlined,
+      AdminSection.paymentIntents => Icons.point_of_sale_outlined,
     };
   }
 }

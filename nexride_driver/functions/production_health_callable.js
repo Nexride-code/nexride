@@ -1,6 +1,6 @@
 /**
  * Admin-only production health snapshot for store-readiness monitoring.
- * Riders have no wallets/withdrawals — payment issue counts are card/bank/unpaid only.
+ * Rider payment diagnostics count only recent/actionable rows (stale/historical excluded).
  */
 
 const admin = require("firebase-admin");
@@ -11,6 +11,7 @@ const { normUid } = require("./admin_auth");
 const adminPerms = require("./admin_permissions");
 const liveOps = require("./live_operations_dashboard_callable");
 const { normalizeServiceAreaRow } = require("./ecosystem/delivery_regions");
+const { loadNexrideOfficialBankAccountFromRtdb } = require("./nexride_official_bank_config");
 
 const firestore = () => admin.firestore();
 
@@ -21,6 +22,26 @@ const STALE_DRIVER_HEARTBEAT_MS = 180_000;
 const STALE_MERCHANT_PORTAL_MS = 600_000;
 const PORTAL_ONLINE_MS = 120_000;
 const SAMPLE_LIMIT = 12;
+
+/**
+ * Rider payment counts are diagnostics-only: exclude historical/stale rows so admin health
+ * reflects live operational risk (not legacy wallet-era noise).
+ */
+const RIDER_PAYMENT_ACTIONABLE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // failed / unpaid
+const RIDER_PAYMENT_CARD_INTENT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // abandoned checkouts
+const RIDER_PAYMENT_BANK_REVIEW_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // manual bank confirmation
+
+/** Terminal / settled payment_status values — never count as open rider-payment issues. */
+const TERMINAL_RIDER_PAYMENT_STATUSES = new Set([
+  "completed",
+  "cancelled",
+  "canceled",
+  "expired",
+  "refunded",
+  "verified",
+  "paid",
+  "prepaid",
+]);
 
 async function requireAdmin(db, ctx, name) {
   const err = await adminPerms.enforceCallable(db, ctx, name);
@@ -218,6 +239,34 @@ function classifyServiceAreaRowWarnings(regionId, area) {
   return { missing_geo, disabled_active_area, missing_dispatch_market_id, warnings };
 }
 
+async function scanOfficialBankAccountWarning(db) {
+  try {
+    const row = await loadNexrideOfficialBankAccountFromRtdb(db);
+    if (row) {
+      return { configured: true, source_path: row.source_path || null, warnings: [] };
+    }
+    return {
+      configured: false,
+      source_path: null,
+      warnings: [
+        {
+          type: "official_bank_not_configured",
+          note: "RTDB app_config/nexride_official_bank_account is missing or incomplete",
+        },
+      ],
+    };
+  } catch (e) {
+    logger.warn("production_health official bank scan failed", {
+      err: String(e?.message || e),
+    });
+    return {
+      configured: false,
+      source_path: null,
+      warnings: [{ type: "official_bank_scan_failed", note: String(e?.message || e) }],
+    };
+  }
+}
+
 async function scanServiceAreaWarnings(db) {
   const warnings = [];
   let missing_geo = 0;
@@ -257,13 +306,119 @@ async function scanServiceAreaWarnings(db) {
   };
 }
 
+function _normPaymentStatus(row) {
+  return String(row?.payment_status ?? row?.paymentStatus ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function riderPaymentActivityTimeMs(row) {
+  if (!row || typeof row !== "object") return 0;
+  const candidates = [
+    row.updated_at,
+    row.updatedAt,
+    row.payment_verified_at,
+    row.paid_at,
+    row.created_at,
+    row.createdAt,
+  ];
+  let max = 0;
+  for (const c of candidates) {
+    const n = Number(c);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return max;
+}
+
+/**
+ * Rows without any payment reference/timestamp/method are usually stale pre-schema wallet-era
+ * mirrors — ignore for health noise.
+ */
+function hasObservedPaymentSchema(row) {
+  if (!row || typeof row !== "object") return false;
+  const refOk =
+    String(row.payment_reference ?? row.customer_transaction_reference ?? "").trim().length > 0;
+  const txOk =
+    String(row.payment_transaction_id ?? row.paymentTransactionId ?? "").trim().length > 0;
+  const methodOk =
+    String(row.payment_method ?? row.paymentMethod ?? "").trim().length > 0;
+  const timeOk = riderPaymentActivityTimeMs(row) > 0;
+  return refOk || txOk || methodOk || timeOk;
+}
+
+function isPaymentVerificationMismatchSignal(row) {
+  if (!row || typeof row !== "object") return false;
+  const parts = [
+    row.payment_failure_reason,
+    row.payment_error,
+    row.payment_issue,
+    row.verify_error,
+    row.last_verify_reason,
+    row.payment_notes,
+    row.payment_issue_code,
+    row.verify_failure_code,
+  ]
+    .filter((x) => x != null)
+    .map((x) => String(x));
+  const blob = parts.join(" ").toLowerCase();
+  const code = String(row.payment_issue_code ?? row.verify_failure_code ?? "")
+    .trim()
+    .toLowerCase();
+  if (
+    code.includes("mismatch") ||
+    code.includes("owner") ||
+    code.includes("amount") ||
+    code.includes("pricing")
+  ) {
+    return true;
+  }
+  return (
+    /mismatch|pricing_total|wrong amount|payment_owner|payment_context|amount_mismatch/i.test(blob) ===
+    true
+  );
+}
+
+function merchantOrderActivityMs(data) {
+  if (!data || typeof data !== "object") return 0;
+  const raw = data.updated_at ?? data.created_at;
+  if (raw && typeof raw.toMillis === "function") return raw.toMillis() || 0;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
 async function countRiderPaymentIssues(db) {
+  return _countRiderPaymentIssuesImpl(db, nowMs());
+}
+
+async function _countRiderPaymentIssuesImpl(db, asOfMs) {
   let failed_card_payments = 0;
   let pending_bank_transfer_confirmations = 0;
   let unpaid_rider_trips_orders = 0;
+  let active_payment_intents = 0;
+  let payment_verification_mismatches = 0;
 
-  const countKeys = (val) =>
-    val && typeof val === "object" ? Object.keys(val).length : 0;
+  const countRtdbMap = (val, windowMs, bucket) => {
+    if (!val || typeof val !== "object") return;
+    const cutoff = asOfMs - windowMs;
+    for (const row of Object.values(val)) {
+      if (!row || typeof row !== "object") continue;
+      if (!hasObservedPaymentSchema(row)) continue;
+      const ps = _normPaymentStatus(row);
+      if (TERMINAL_RIDER_PAYMENT_STATUSES.has(ps)) continue;
+      const t = riderPaymentActivityTimeMs(row);
+      if (!t || t < cutoff) continue;
+      if (bucket === "failed") {
+        failed_card_payments += 1;
+        if (isPaymentVerificationMismatchSignal(row)) payment_verification_mismatches += 1;
+      } else if (bucket === "bank") {
+        pending_bank_transfer_confirmations += 1;
+      } else if (bucket === "unpaid") {
+        unpaid_rider_trips_orders += 1;
+      } else if (bucket === "intent") {
+        active_payment_intents += 1;
+      }
+    }
+  };
 
   try {
     const failedSnap = await db
@@ -272,7 +427,7 @@ async function countRiderPaymentIssues(db) {
       .equalTo("failed")
       .limitToFirst(200)
       .get();
-    failed_card_payments += countKeys(failedSnap.val());
+    countRtdbMap(failedSnap.val(), RIDER_PAYMENT_ACTIONABLE_MAX_AGE_MS, "failed");
   } catch (e) {
     logger.warn("production_health failed payments ride_requests", {
       err: String(e?.message || e),
@@ -286,9 +441,23 @@ async function countRiderPaymentIssues(db) {
       .equalTo("pending_manual_confirmation")
       .limitToFirst(200)
       .get();
-    pending_bank_transfer_confirmations += countKeys(pendingSnap.val());
+    countRtdbMap(pendingSnap.val(), RIDER_PAYMENT_BANK_REVIEW_MAX_AGE_MS, "bank");
   } catch (e) {
     logger.warn("production_health pending bank ride_requests", {
+      err: String(e?.message || e),
+    });
+  }
+
+  try {
+    const pendingVaSnapRide = await db
+      .ref("ride_requests")
+      .orderByChild("payment_status")
+      .equalTo("pending_transfer")
+      .limitToFirst(150)
+      .get();
+    countRtdbMap(pendingVaSnapRide.val(), RIDER_PAYMENT_BANK_REVIEW_MAX_AGE_MS, "bank");
+  } catch (e) {
+    logger.warn("production_health pending_transfer ride_requests", {
       err: String(e?.message || e),
     });
   }
@@ -300,9 +469,23 @@ async function countRiderPaymentIssues(db) {
       .equalTo("unpaid")
       .limitToFirst(200)
       .get();
-    unpaid_rider_trips_orders += countKeys(unpaidSnap.val());
+    countRtdbMap(unpaidSnap.val(), RIDER_PAYMENT_ACTIONABLE_MAX_AGE_MS, "unpaid");
   } catch (e) {
     logger.warn("production_health unpaid ride_requests", {
+      err: String(e?.message || e),
+    });
+  }
+
+  try {
+    const intentSnap = await db
+      .ref("ride_requests")
+      .orderByChild("payment_status")
+      .equalTo("pending")
+      .limitToFirst(150)
+      .get();
+    countRtdbMap(intentSnap.val(), RIDER_PAYMENT_CARD_INTENT_MAX_AGE_MS, "intent");
+  } catch (e) {
+    logger.warn("production_health pending card intents ride_requests", {
       err: String(e?.message || e),
     });
   }
@@ -314,7 +497,7 @@ async function countRiderPaymentIssues(db) {
       .equalTo("failed")
       .limitToFirst(100)
       .get();
-    failed_card_payments += countKeys(delFailed.val());
+    countRtdbMap(delFailed.val(), RIDER_PAYMENT_ACTIONABLE_MAX_AGE_MS, "failed");
   } catch (_) {}
 
   try {
@@ -324,34 +507,90 @@ async function countRiderPaymentIssues(db) {
       .equalTo("pending_manual_confirmation")
       .limitToFirst(100)
       .get();
-    pending_bank_transfer_confirmations += countKeys(delPending.val());
+    countRtdbMap(delPending.val(), RIDER_PAYMENT_BANK_REVIEW_MAX_AGE_MS, "bank");
+  } catch (_) {}
+
+  try {
+    const delPendingVaSnap = await db
+      .ref("delivery_requests")
+      .orderByChild("payment_status")
+      .equalTo("pending_transfer")
+      .limitToFirst(100)
+      .get();
+    countRtdbMap(delPendingVaSnap.val(), RIDER_PAYMENT_BANK_REVIEW_MAX_AGE_MS, "bank");
+  } catch (_) {}
+
+  try {
+    const delUnpaid = await db
+      .ref("delivery_requests")
+      .orderByChild("payment_status")
+      .equalTo("unpaid")
+      .limitToFirst(100)
+      .get();
+    countRtdbMap(delUnpaid.val(), RIDER_PAYMENT_ACTIONABLE_MAX_AGE_MS, "unpaid");
+  } catch (_) {}
+
+  try {
+    const delIntent = await db
+      .ref("delivery_requests")
+      .orderByChild("payment_status")
+      .equalTo("pending")
+      .limitToFirst(100)
+      .get();
+    countRtdbMap(delIntent.val(), RIDER_PAYMENT_CARD_INTENT_MAX_AGE_MS, "intent");
   } catch (_) {}
 
   try {
     const moSnap = await firestore()
       .collection("merchant_orders")
       .where("payment_status", "in", ["failed", "unpaid", "pending_bank_transfer"])
-      .limit(100)
+      .limit(200)
       .get()
       .catch(() => null);
     if (moSnap) {
+      const failCut = asOfMs - RIDER_PAYMENT_ACTIONABLE_MAX_AGE_MS;
+      const bankCut = asOfMs - RIDER_PAYMENT_BANK_REVIEW_MAX_AGE_MS;
       for (const doc of moSnap.docs) {
-        const ps = String(doc.data()?.payment_status ?? "").toLowerCase();
-        if (ps === "failed") failed_card_payments += 1;
-        else if (ps === "pending_bank_transfer") pending_bank_transfer_confirmations += 1;
-        else if (ps === "unpaid") unpaid_rider_trips_orders += 1;
+        const data = doc.data() || {};
+        const ps = String(data.payment_status ?? "")
+          .trim()
+          .toLowerCase();
+        if (!ps) continue;
+        if (TERMINAL_RIDER_PAYMENT_STATUSES.has(ps)) continue;
+        const t = merchantOrderActivityMs(data);
+        if (ps === "failed") {
+          if (!t || t < failCut) continue;
+          failed_card_payments += 1;
+          if (isPaymentVerificationMismatchSignal(data)) payment_verification_mismatches += 1;
+        } else if (ps === "pending_bank_transfer") {
+          if (!t || t < bankCut) continue;
+          pending_bank_transfer_confirmations += 1;
+        } else if (ps === "unpaid") {
+          if (!t || t < failCut) continue;
+          unpaid_rider_trips_orders += 1;
+        }
       }
     }
-  } catch (_) {}
+  } catch (e) {
+    logger.warn("production_health merchant_orders scan failed", { err: String(e?.message || e) });
+  }
+
+  const total =
+    failed_card_payments +
+    pending_bank_transfer_confirmations +
+    unpaid_rider_trips_orders +
+    active_payment_intents;
 
   return {
     failed_card_payments,
     pending_bank_transfer_confirmations,
     unpaid_rider_trips_orders,
-    total:
-      failed_card_payments +
-      pending_bank_transfer_confirmations +
-      unpaid_rider_trips_orders,
+    active_payment_intents,
+    payment_verification_mismatches,
+    total,
+    actionable_window_failed_unpaid_ms: RIDER_PAYMENT_ACTIONABLE_MAX_AGE_MS,
+    actionable_window_bank_review_ms: RIDER_PAYMENT_BANK_REVIEW_MAX_AGE_MS,
+    actionable_window_card_intent_ms: RIDER_PAYMENT_CARD_INTENT_MAX_AGE_MS,
   };
 }
 
@@ -537,6 +776,7 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
 
   const [
     serviceAreas,
+    officialBank,
     riderPayments,
     withdrawals,
     pendingVerifications,
@@ -544,6 +784,7 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
     activeDelSnap,
   ] = await Promise.all([
     scanServiceAreaWarnings(db),
+    scanOfficialBankAccountWarning(db),
     countRiderPaymentIssues(db),
     scanWithdrawals(db),
     countPendingVerifications(),
@@ -615,6 +856,8 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
     serviceAreas.missing_geo +
     serviceAreas.missing_dispatch_market_id +
     serviceAreas.disabled_active_area;
+  const officialBankWarningTotal = officialBank.configured ? 0 : 1;
+  const configurationWarningTotal = serviceAreaWarningTotal + officialBankWarningTotal;
 
   const overall_status = worstStatus(
     infraStatus === "ok" ? "green" : infraStatus === "degraded" ? "yellow" : "red",
@@ -624,7 +867,7 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
     statusLevel(withdrawals.pending_total || 0, 5, 30),
     statusLevel(payoutWarnings, 1, 5),
     statusLevel(support_open, 10, 50),
-    statusLevel(serviceAreaWarningTotal, 1, 5),
+    statusLevel(configurationWarningTotal, 1, 5),
   );
 
   const cards = [
@@ -661,7 +904,7 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
       id: "rider_payments",
       title: "Rider payments",
       status: statusLevel(paymentIssueTotal, 1, 10),
-      summary: `${paymentIssueTotal} issues (card/bank/unpaid — no rider wallets)`,
+      summary: `${paymentIssueTotal} actionable issues (recent card/bank/unpaid intents · excludes stale/historical)`,
     },
     {
       id: "withdrawals",
@@ -690,8 +933,8 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
     {
       id: "service_areas",
       title: "Service areas",
-      status: statusLevel(serviceAreaWarningTotal, 1, 5),
-      summary: `${serviceAreaWarningTotal} configuration warnings`,
+      status: statusLevel(configurationWarningTotal, 1, 5),
+      summary: `${configurationWarningTotal} configuration warnings (areas + official bank)`,
     },
   ];
 
@@ -730,6 +973,7 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
     support: { open: support_open },
     rider_payment_issues: riderPayments,
     service_area_warnings: serviceAreas,
+    official_bank: officialBank,
     payout_warnings: {
       driver_withdrawal_missing_destination: withdrawals.driver_missing_destination,
       merchant_withdrawal_missing_destination: withdrawals.merchant_missing_destination,
@@ -770,6 +1014,9 @@ module.exports = {
   entityTypeOf,
   classifyServiceAreaRowWarnings,
   scanServiceAreaWarnings,
+  scanOfficialBankAccountWarning,
   countRiderPaymentIssues,
+  /** @internal Tests: deterministic `asOf` for rider payment windows. */
+  _countRiderPaymentIssuesAt: (db, asOfMs) => _countRiderPaymentIssuesImpl(db, asOfMs),
   scanWithdrawals,
 };

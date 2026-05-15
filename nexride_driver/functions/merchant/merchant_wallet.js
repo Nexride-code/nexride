@@ -16,9 +16,9 @@ const {
   computeCanonicalPaymentModelFields,
   computeInitialSubscriptionStatusForPaymentModel,
 } = require("./merchant_callables");
-const { loadNexrideOfficialBankAccountFromRtdb } = require("../nexride_official_bank_config");
+const { buildFlutterwaveRedirectUrl } = require("../payment_redirect");
+const { assertPaymentOwnership } = require("../payment_ownership");
 
-const TOPUP_EXPIRY_MS = 30 * 60 * 1000;
 const MIN_TOPUP_NGN = 100;
 const MAX_TOPUP_NGN = 5_000_000;
 
@@ -275,6 +275,32 @@ async function finalizeMerchantFlutterwaveTopUpVerified(db, fs, {
     });
   }
   logger.info("MERCHANT_FW_TOPUP_CREDITED", { merchantId, txRef, payTid: payKey, amount: expectedAmount });
+
+  const topUpReqId = String(pt.merchant_bank_topup_id ?? "").trim();
+  if (topUpReqId) {
+    try {
+      await fs
+        .collection("merchant_bank_topups")
+        .doc(topUpReqId)
+        .set(
+          {
+            status: "completed",
+            completed_at: FieldValue.serverTimestamp(),
+            flutterwave_transaction_id: payTid,
+            updated_at: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+    } catch (err) {
+      logger.warn("MERCHANT_BANK_TOPUP_DOC_UPDATE_FAIL", {
+        merchantId,
+        txRef,
+        topUpReqId,
+        err: String(err?.message || err),
+      });
+    }
+  }
+
   return { success: true, reason: "credited", merchant_id: merchantId, amount_ngn: expectedAmount };
 }
 
@@ -296,9 +322,18 @@ async function verifyAndFinalizeMerchantWalletTopUpForReference(db, fs, txRef, {
       amount: Number(pt.amount || 0),
     };
   }
-  const ownerUid = normUid(pt.owner_uid ?? pt.ownerUid);
-  if (callerUid && ownerUid && normUid(callerUid) !== ownerUid) {
-    return { success: false, reason: "forbidden" };
+  const ownership = assertPaymentOwnership(pt, {
+    callerUid,
+    expectedAppContext: "merchant",
+    expectedMerchantId: pt.merchant_id,
+  });
+  if (!ownership.ok) {
+    logger.warn("MERCHANT_PAYMENT_VERIFY_DENIED", {
+      txRef: ref,
+      callerUid,
+      reason: ownership.reason,
+    });
+    return { success: false, reason: ownership.reason, reason_code: ownership.reason_code };
   }
   const expectCur = String(pt.currency ?? "NGN").trim().toUpperCase() || "NGN";
   const minAmt = Number(pt.amount ?? 0);
@@ -312,7 +347,16 @@ async function verifyAndFinalizeMerchantWalletTopUpForReference(db, fs, txRef, {
     },
   });
   if (!v.ok) {
-    return { success: false, reason: v.reason || "verification_failed" };
+    const failReason = String(v.reason || "verification_failed").trim();
+    const cancelled =
+      failReason === "cancelled" ||
+      failReason === "canceled" ||
+      failReason === "payment_cancelled";
+    return {
+      success: false,
+      reason: cancelled ? "payment_cancelled" : failReason,
+      reason_code: cancelled ? "payment_cancelled" : failReason,
+    };
   }
   const payTid = String(v.flwTransactionId || "").trim();
   if (!payTid) {
@@ -373,7 +417,15 @@ async function merchantStartWalletTopUpFlutterwave(data, context, db) {
     return { success: false, reason: "tx_ref_generation_failed" };
   }
   const redirectUrl = String(
-    data?.redirect_url ?? data?.redirectUrl ?? "https://nexride-8d5bc.web.app/pay/card-link-complete",
+    data?.redirect_url ??
+      data?.redirectUrl ??
+      buildFlutterwaveRedirectUrl({
+        appContext: "merchant",
+        flow: "merchant_topup",
+        txRef: tx_ref,
+        merchantId,
+        uid: ownerUid,
+      }),
   ).trim();
   const body = {
     tx_ref,
@@ -400,13 +452,16 @@ async function merchantStartWalletTopUpFlutterwave(data, context, db) {
   const now = nowMs();
   await db.ref(`payment_transactions/${tx_ref}`).set({
     tx_ref,
+    app_context: "merchant",
     purpose: "merchant_wallet_topup",
+    flow: "merchant_topup",
     merchant_id: merchantId,
     owner_uid: ownerUid,
     ride_id: null,
     delivery_id: null,
     rider_id: null,
     amount,
+    amount_ngn: amount,
     currency,
     status: "pending",
     provider_link: r.link,
@@ -459,55 +514,28 @@ async function merchantCreateBankTransferTopUp(data, context, db) {
   if (!Number.isFinite(amount) || amount < MIN_TOPUP_NGN || amount > MAX_TOPUP_NGN) {
     return { success: false, reason: "invalid_amount" };
   }
-  const bankRow = await loadNexrideOfficialBankAccountFromRtdb(db);
-  if (!bankRow) {
-    return { success: false, reason: "official_bank_not_configured" };
-  }
-  const bank = {
-    bank_name: bankRow.bank_name,
-    account_name: bankRow.account_name,
-    account_number: bankRow.account_number,
-  };
 
-  const col = fs.collection("merchant_bank_topups");
-  const docRef = col.doc();
-  const requestId = docRef.id;
-  const narration = `NXMTOPUP_${requestId.slice(-10).toUpperCase()}`;
-  const expiresAt = nowMs() + TOPUP_EXPIRY_MS;
-  const now = FieldValue.serverTimestamp();
-  await docRef.set({
-    merchant_id: merchantId,
-    owner_uid: ownerUid,
-    amount_ngn: amount,
-    currency: "NGN",
-    status: "pending",
-    bank_name: bank.bank_name,
-    account_name: bank.account_name,
-    account_number: bank.account_number,
-    narration_reference: narration,
-    expires_at_ms: expiresAt,
-    proof_storage_path: null,
-    proof_uploaded_at: null,
-    created_at: now,
-    updated_at: now,
-    reviewed_by: null,
-    admin_note: null,
+  const bankTransferVa = require("../bank_transfer_va");
+  const email = String(
+    data?.email ?? context.auth.token?.email ?? `${ownerUid}@nexride.local`,
+  ).trim();
+  const phone = String(context.auth?.token?.phone_number ?? "").trim();
+  const name = String(context.auth?.token?.name ?? "").trim();
+  const firstName = (name.split(/\s+/)[0] || email.split("@")[0] || "NexRide").slice(0, 80);
+  const lastName =
+    name.split(/\s+/).slice(1).join(" ").trim().slice(0, 80) || "Merchant";
+
+  return bankTransferVa.createMerchantBankVaTopUpIntent({
+    db,
+    fs,
+    merchantId,
+    ownerUid,
+    amount,
+    email,
+    phone,
+    firstName,
+    lastName,
   });
-  return {
-    success: true,
-    request_id: requestId,
-    amount_ngn: amount,
-    currency: "NGN",
-    expires_at_ms: expiresAt,
-    bank: {
-      bank_name: bank.bank_name,
-      account_name: bank.account_name,
-      account_number: bank.account_number,
-    },
-    narration_reference: narration,
-    proof_upload_prefix: `merchant_uploads/${merchantId}/wallet_topups/${requestId}/`,
-    bank_config_rtdb_path: bankRow.source_path,
-  };
 }
 
 async function merchantAttachBankTransferTopUpProof(data, context, db) {
@@ -562,7 +590,14 @@ async function merchantAttachBankTransferTopUpProof(data, context, db) {
   if (normUid(row.merchant_id) !== merchantId) {
     return { success: false, reason: "forbidden" };
   }
-  if (String(row.status || "").trim().toLowerCase() !== "pending") {
+  if (row.automated_va === true) {
+    return { success: false, reason: "proof_not_required_for_automated_va" };
+  }
+  const pst = String(row.status || "").trim().toLowerCase();
+  if (pst === "pending_transfer") {
+    return { success: false, reason: "proof_not_required_for_automated_va" };
+  }
+  if (!["pending", "pending_admin_review"].includes(pst)) {
     return { success: false, reason: "not_pending" };
   }
   const exp = Number(row.expires_at_ms ?? 0) || 0;
@@ -656,7 +691,7 @@ async function merchantListWalletLedger(_data, context, db) {
   for (const d of pend.docs) {
     const x = d.data() || {};
     const st = String(x.status || "").trim().toLowerCase();
-    if (st !== "pending") continue;
+    if (!["pending", "pending_transfer", "pending_admin_review"].includes(st)) continue;
     const exp = Number(x.expires_at_ms ?? 0) || 0;
     if (exp && nowMs() > exp) continue;
     pending_bank_topups.push({
@@ -664,10 +699,28 @@ async function merchantListWalletLedger(_data, context, db) {
       amount_ngn: Number(x.amount_ngn ?? 0) || 0,
       expires_at_ms: exp || null,
       narration_reference: x.narration_reference != null ? String(x.narration_reference) : null,
+      reference: x.reference != null ? String(x.reference) : null,
+      tx_ref: x.tx_ref != null ? String(x.tx_ref) : null,
+      automated_va: !!x.automated_va,
       bank: {
-        bank_name: x.bank_name != null ? String(x.bank_name) : null,
-        account_name: x.account_name != null ? String(x.account_name) : null,
-        account_number: x.account_number != null ? String(x.account_number) : null,
+        bank_name:
+          x.bank_name != null
+            ? String(x.bank_name)
+            : x.va_bank_name != null
+              ? String(x.va_bank_name)
+              : null,
+        account_name:
+          x.account_name != null
+            ? String(x.account_name)
+            : x.va_account_name != null
+              ? String(x.va_account_name)
+              : null,
+        account_number:
+          x.account_number != null
+            ? String(x.account_number)
+            : x.va_account_number != null
+              ? String(x.va_account_number)
+              : null,
       },
       proof_uploaded: !!(x.proof_storage_path ?? x.proofStoragePath),
     });
@@ -836,7 +889,7 @@ async function adminListMerchantBankTopUps(_data, context, db) {
   const fs = admin.firestore();
   const snap = await fs
     .collection("merchant_bank_topups")
-    .where("status", "==", "pending")
+    .where("status", "in", ["pending", "pending_admin_review", "pending_transfer", "pending_review"])
     .limit(80)
     .get();
   const rows = snap.docs.map((d) => {
@@ -848,7 +901,10 @@ async function adminListMerchantBankTopUps(_data, context, db) {
       amount_ngn: Number(x.amount_ngn ?? 0) || 0,
       status: x.status ?? null,
       expires_at_ms: Number(x.expires_at_ms ?? 0) || 0,
-      narration_reference: x.narration_reference ?? null,
+      narration_reference:
+        x.narration_reference != null ? String(x.narration_reference) : null,
+      tx_reference: x.tx_ref != null ? String(x.tx_ref) : null,
+      automated_va: Boolean(x.automated_va === true || x.va_bank_name || x.va_account_number),
       bank_name: x.bank_name ?? null,
       account_name: x.account_name ?? null,
       account_number: x.account_number ?? null,
@@ -878,7 +934,11 @@ async function adminReviewMerchantBankTopUp(data, context, db) {
     return { success: false, reason: "not_found" };
   }
   const row = snap.data() || {};
-  if (String(row.status || "").trim().toLowerCase() !== "pending") {
+  const stBank = String(row.status || "").trim().toLowerCase();
+  if (["pending_transfer"].includes(stBank)) {
+    return { success: false, reason: "automated_va_settles_via_webhook" };
+  }
+  if (!["pending", "pending_admin_review"].includes(stBank)) {
     return { success: false, reason: "not_pending" };
   }
   const merchantId = normUid(row.merchant_id);

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 
 import '../../admin/admin_config.dart';
@@ -11,6 +12,7 @@ import '../merchant_portal_utils.dart';
 import 'merchant_dashboard_status.dart';
 import 'merchant_menu_screen.dart';
 import 'merchant_orders_screen.dart';
+import '../widgets/merchant_va_top_up_sheet.dart';
 
 class MerchantDashboardScreen extends StatefulWidget {
   const MerchantDashboardScreen({super.key, this.initialMerchant});
@@ -38,6 +40,8 @@ class _MerchantDashboardScreenState extends State<MerchantDashboardScreen> {
   String _resubmitPaymentModel = 'subscription';
   bool _resubmitBusy = false;
   String? _resubmitErr;
+  final TextEditingController _walletTopUpAmount = TextEditingController();
+  bool _walletTopUpBusy = false;
 
   @override
   void initState() {
@@ -56,6 +60,7 @@ class _MerchantDashboardScreenState extends State<MerchantDashboardScreen> {
     _resubmitPhone.dispose();
     _resubmitEmail.dispose();
     _resubmitAddress.dispose();
+    _walletTopUpAmount.dispose();
     super.dispose();
   }
 
@@ -218,6 +223,66 @@ class _MerchantDashboardScreenState extends State<MerchantDashboardScreen> {
     }
   }
 
+  Future<void> _startVaWalletTopUp() async {
+    FocusScope.of(context).unfocus();
+    final amt =
+        int.tryParse(_walletTopUpAmount.text.replaceAll(',', '').trim()) ?? 0;
+    if (amt < 100) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Enter at least ₦100 to top up.')),
+        );
+      }
+      return;
+    }
+    setState(() {
+      _walletTopUpBusy = true;
+      _err = null;
+    });
+    try {
+      final fn = MerchantPortalFunctions();
+      final res = await fn.merchantCreateBankTransferTopUp(amountNgn: amt);
+      if (!mpSuccess(res['success'])) {
+        throw StateError(res['reason']?.toString() ?? 'topup_failed');
+      }
+      final txRef =
+          (res['tx_ref'] ?? res['reference'] ?? '').toString().trim();
+      if (txRef.isEmpty) {
+        throw StateError('missing_reference');
+      }
+      if (!mounted) {
+        return;
+      }
+      final refPt =
+          FirebaseDatabase.instance.ref('payment_transactions/$txRef');
+      final outcome = await showModalBottomSheet<String>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (ctx) => MerchantVaTopUpSheet(
+          paymentTransactionsRef: refPt,
+          registration: Map<String, dynamic>.from(res),
+          onRegenerateWithSameAmount: () =>
+              fn.merchantCreateBankTransferTopUp(amountNgn: amt),
+        ),
+      );
+      if (outcome == 'credited' && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Wallet credit confirmed.')),
+        );
+        await _refresh();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _err = e.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _walletTopUpBusy = false);
+      }
+    }
+  }
+
   List<Map<String, dynamic>> _effectiveDocuments(
     Map<String, dynamic> merchant,
   ) {
@@ -322,6 +387,64 @@ class _MerchantDashboardScreenState extends State<MerchantDashboardScreen> {
                 ),
                 if (_str(m['merchant_status'] ?? m['status']).toLowerCase() ==
                     'approved') ...<Widget>[
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Wallet',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        Text(
+                          _str(m['wallet_balance_ngn']).isEmpty
+                              ? 'Wallet balance unavailable in this view.'
+                              : 'Balance (NGN): ${_str(m['wallet_balance_ngn'])}',
+                          style: const TextStyle(height: 1.35),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: _walletTopUpAmount,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'Top-up amount (NGN)',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: _walletTopUpBusy ? null : _startVaWalletTopUp,
+                          child:
+                              _walletTopUpBusy
+                                  ? const SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Text(
+                                      'Bank transfer via virtual account',
+                                    ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'You will receive a unique account number and countdown. Credits apply automatically — no receipt upload.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade700,
+                            height: 1.35,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   const SizedBox(height: 20),
                   const Text(
                     'Commerce',

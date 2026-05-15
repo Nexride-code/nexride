@@ -195,9 +195,73 @@ async function createHostedPaymentLink(body) {
   return { ok, reason: ok ? undefined : "initiate_failed", link, payload };
 }
 
+/**
+ * POST /v3/virtual-account-numbers — dynamic (single-use) NGN virtual accounts.
+ * Response shape varies; we normalize best-effort fields for display + reconciliation.
+ * @param {object} body email, amount, tx_ref, phonenumber, firstname, lastname, narration, ...
+ * @returns {Promise<{ ok: boolean, reason?: string, normalized?: object|null, payload?: object, http_status?: number }>}
+ */
+async function createDynamicNgnVirtualAccount(body) {
+  const secret = flutterwaveSecretForVerify();
+  if (!secret) {
+    return { ok: false, reason: "flutterwave_secret_missing" };
+  }
+  let response;
+  try {
+    response = await fetch("https://api.flutterwave.com/v3/virtual-account-numbers", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    return { ok: false, reason: "network_error", error: String(error) };
+  }
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch (_) {
+    payload = {};
+  }
+
+  const providerStatus = String(payload?.status ?? "").trim().toLowerCase();
+  const okHttp = response.ok && providerStatus === "success";
+  const dataRaw = payload?.data && typeof payload.data === "object" ? payload.data : {};
+
+  let pick = dataRaw;
+  const list = Array.isArray(dataRaw.accounts) ? dataRaw.accounts : Array.isArray(dataRaw.data) ? dataRaw.data : null;
+  if (list && list.length && typeof list[0] === "object") {
+    pick = list[0];
+  }
+
+  const normalized =
+    pick && typeof pick === "object"
+      ? {
+          account_number: String(pick.account_number ?? pick.accountNumber ?? "").trim(),
+          bank_name: String(pick.bank_name ?? pick.bank ?? pick.BankName ?? "").trim(),
+          account_name: String(pick.account_name ?? pick.acc_name ?? "").trim(),
+          order_ref: String(dataRaw.order_ref ?? pick.order_ref ?? pick.flw_ref ?? "").trim(),
+          expires_at: String(pick.expiry_date ?? dataRaw.expiry_date ?? pick.expires_at ?? "").trim(),
+        }
+      : null;
+
+  const ok = okHttp && normalized && !!normalized.account_number;
+
+  return {
+    ok,
+    reason: ok ? undefined : okHttp ? "va_missing_account_number" : "va_create_failed",
+    normalized,
+    payload,
+    http_status: response.status,
+  };
+}
+
 module.exports = {
   verifyTransactionByReference,
   verifyTransactionByIdStrict,
   verifyFlutterwavePaymentStrict,
   createHostedPaymentLink,
+  createDynamicNgnVirtualAccount,
 };

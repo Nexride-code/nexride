@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# Set NEXRIDE_SKIP_HOSTING_PREDEPLOY=1 to upload existing `public/` as-is (e.g. `/pay/*.html` only).
+if [[ "${NEXRIDE_SKIP_HOSTING_PREDEPLOY:-}" == "1" ]]; then
+  echo "Skipping hosting predeploy — uploading current public/ (NEXRIDE_SKIP_HOSTING_PREDEPLOY=1)."
+  exit 0
+fi
+
 # Resolve repo root from this script's real path (works no matter what cwd is).
 TOOLS_DIR="${0:A:h}"
 ROOT_DIR="${TOOLS_DIR:h}"

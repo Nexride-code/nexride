@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
+
+import 'rollout_catalog_hydration.dart';
 
 /// Persists rollout selection on Firestore `users/{uid}` (allowed keys in rules)
 /// and mirrors dispatch market to RTDB `users/{uid}/launch_market_city` for legacy reads.
@@ -17,8 +21,11 @@ class RiderRolloutProfileStore {
     if (id.isEmpty) {
       return null;
     }
-    final snap =
-        await FirebaseFirestore.instance.collection('users').doc(id).get();
+    final snap = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(id)
+        .get()
+        .timeout(kRolloutProfileFetchTimeout);
     if (!snap.exists) {
       return null;
     }

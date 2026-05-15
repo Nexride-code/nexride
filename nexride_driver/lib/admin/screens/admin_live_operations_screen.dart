@@ -765,6 +765,8 @@ class _TripTableCard extends StatelessWidget {
         DataColumn(label: Text('Bucket')),
         DataColumn(label: Text('Region')),
         DataColumn(label: Text('Rider')),
+        DataColumn(label: Text('Offers (driver id)')),
+        DataColumn(label: Text('Accepted id')),
         DataColumn(label: Text('Driver')),
         DataColumn(label: Text('Payment')),
         DataColumn(label: Text('Fare / final')),
@@ -780,6 +782,25 @@ class _TripTableCard extends StatelessWidget {
         final finalFare = (t['final_fare'] is num)
             ? (t['final_fare'] as num).toDouble()
             : fare;
+        final dynamic offeredRaw = t['offered_driver_ids'];
+        final List<String> offerIds = <String>[];
+        if (offeredRaw is List<dynamic>) {
+          for (final dynamic e in offeredRaw) {
+            final String s = e?.toString().trim() ?? '';
+            if (s.isNotEmpty) {
+              offerIds.add(s);
+            }
+          }
+        }
+        final String offerLabel =
+            offerIds.isEmpty ? '—' : offerIds.take(5).join(', ');
+        final String acceptedRaw =
+            (t['accepted_driver_id'] ?? '').toString().trim();
+        final String matchedRaw =
+            (t['matched_driver_id'] ?? '').toString().trim();
+        final String acceptedCell = acceptedRaw.isNotEmpty
+            ? acceptedRaw
+            : (matchedRaw.isNotEmpty ? matchedRaw : '—');
         return DataRow(
           onSelectChanged: (_) {
             onOpen(id);
@@ -792,6 +813,18 @@ class _TripTableCard extends StatelessWidget {
             DataCell(Text(t['ui_bucket']?.toString() ?? '—')),
             DataCell(Text(t['region']?.toString() ?? '—')),
             DataCell(Text(t['rider_name']?.toString() ?? '—')),
+            DataCell(
+              Text(
+                offerLabel,
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+            DataCell(
+              Text(
+                acceptedCell,
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ),
             DataCell(Text(t['driver_name']?.toString() ?? '—')),
             DataCell(
               Text(

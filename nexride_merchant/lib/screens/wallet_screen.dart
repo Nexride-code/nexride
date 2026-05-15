@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -9,6 +10,7 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../state/merchant_app_state.dart';
+import '../services/merchant_payment_return_bus.dart';
 import '../utils/nx_callable_messages.dart';
 
 class WalletScreen extends StatefulWidget {
@@ -26,11 +28,36 @@ class _WalletScreenState extends State<WalletScreen> {
   bool _balancesLoaded = false;
   bool _syncingBalances = false;
   List<Map<String, dynamic>> _ledger = <Map<String, dynamic>>[];
+  StreamSubscription<MerchantPaymentReturnEvent>? _paymentReturnSub;
+  String? _paymentReturnBanner;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _refreshBalances());
+    _paymentReturnSub = MerchantPaymentReturnBus.instance.stream.listen(_onPaymentReturn);
+  }
+
+  Future<void> _onPaymentReturn(MerchantPaymentReturnEvent event) async {
+    if (!mounted) {
+      return;
+    }
+    if (event.isCancelled) {
+      setState(() {
+        _paymentReturnBanner =
+            'Payment cancelled. You can try again when ready — your wallet was not charged.';
+        _verifyTxRefCtl.text = event.txRef;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Payment cancelled')),
+      );
+      return;
+    }
+    setState(() {
+      _paymentReturnBanner = 'Complete verification below if you finished checkout.';
+      _verifyTxRefCtl.text = event.txRef;
+      _lastFlutterwaveTxRef = event.txRef;
+    });
   }
 
   String _fmtNgn(num? v, {required bool loaded}) {
@@ -67,6 +94,7 @@ class _WalletScreenState extends State<WalletScreen> {
 
   @override
   void dispose() {
+    unawaited(_paymentReturnSub?.cancel());
     _amountCtl.dispose();
     _verifyTxRefCtl.dispose();
     super.dispose();
@@ -158,6 +186,13 @@ class _WalletScreenState extends State<WalletScreen> {
       final res = await state.gateway.verifyPayment(ref);
       if (!mounted) return;
       if (res['success'] != true) {
+        final reason = '${res['reason'] ?? res['reason_code'] ?? ''}'.trim();
+        if (reason == 'payment_cancelled') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Payment was cancelled — you can try again.')),
+          );
+          return;
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -400,6 +435,20 @@ class _WalletScreenState extends State<WalletScreen> {
                   const SizedBox(height: 8),
                   Text('Wallet: ${_fmtNgn(m?.walletBalanceNgn, loaded: _balancesLoaded)}'),
                   Text('Withdrawable: ${_fmtNgn(m?.withdrawableEarningsNgn, loaded: _balancesLoaded)}'),
+                  if (_paymentReturnBanner != null) ...<Widget>[
+                    const SizedBox(height: 12),
+                    Material(
+                      color: const Color(0xFFE8F4FD),
+                      borderRadius: BorderRadius.circular(12),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Text(
+                          _paymentReturnBanner!,
+                          style: const TextStyle(fontSize: 13, height: 1.35),
+                        ),
+                      ),
+                    ),
+                  ],
                   if (_ledger.isNotEmpty) ...<Widget>[
                     const SizedBox(height: 12),
                     Text('Recent ledger (${_ledger.length})', style: Theme.of(context).textTheme.titleSmall),

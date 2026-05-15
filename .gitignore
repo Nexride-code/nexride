@@ -27,6 +27,8 @@ android/.gradle/
 android/app/build/
 nexride_driver/android/.gradle/
 nexride_driver/android/app/build/
+nexride_merchant/android/.gradle/
+nexride_merchant/android/app/build/
 
 # Production signing credentials — NEVER commit
 **/android/key.properties

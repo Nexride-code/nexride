@@ -84,6 +84,10 @@ async function getNexrideOfficialBankAccount(_data, context, db) {
   }
   const row = await loadNexrideOfficialBankAccountFromRtdb(db);
   if (!row) {
+    logger.error("OFFICIAL_BANK_NOT_CONFIGURED", {
+      flow: "getNexrideOfficialBankAccount",
+      uid: context.auth?.uid || null,
+    });
     return { success: false, reason: "official_bank_not_configured" };
   }
   return {

@@ -199,6 +199,11 @@ class _DriverRolloutOperatingAreaSheetState
                   icon: const Icon(Icons.refresh),
                   label: const Text('Retry'),
                 ),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
               ],
             )
           else ...<Widget>[
@@ -245,6 +250,10 @@ class _DriverRolloutOperatingAreaSheetState
             const SizedBox(height: 20),
             Row(
               children: <Widget>[
+                TextButton(
+                  onPressed: _saving ? null : () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
                 if (widget.onReloadCatalog != null)
                   TextButton.icon(
                     onPressed: _saving ? null : _retryLoad,

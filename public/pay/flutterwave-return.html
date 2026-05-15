@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NexRide — Payment</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #fff8f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: white; border-radius: 16px; padding: 40px 32px; max-width: 400px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .icon { font-size: 48px; margin-bottom: 16px; }
+    h1 { color: #b8860b; font-size: 22px; margin-bottom: 12px; }
+    p { color: #555; font-size: 15px; line-height: 1.5; margin-bottom: 24px; }
+    .btn { background: #b8860b; color: white; border: none; border-radius: 12px; padding: 14px 32px; font-size: 16px; font-weight: bold; cursor: pointer; text-decoration: none; display: inline-block; }
+    .muted { font-size: 13px; color: #aaa; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon" id="icon">↩️</div>
+    <h1 id="title">Returning to NexRide</h1>
+    <p id="message">Please wait…</p>
+    <a class="btn" id="return-btn" href="#">Open app</a>
+    <p class="muted" id="hint">You can close this tab if the app opens automatically.</p>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const app = (params.get('app') || 'rider').toLowerCase();
+    const flow = params.get('flow') || '';
+    const txRef = params.get('tx_ref') || '';
+    const transactionId = params.get('transaction_id') || '';
+    const status = (params.get('status') || params.get('cancelled') || '').toLowerCase();
+    const merchantId = params.get('merchantId') || params.get('merchant_id') || '';
+    const uid = params.get('uid') || '';
+
+    const DEEP = {
+      rider: 'nexride://card-link-complete',
+      merchant: 'nexride-merchant://pay/flutterwave-return',
+      driver: 'nexride-driver://pay/flutterwave-return',
+    };
+
+    const APP_LABEL = {
+      rider: 'NexRide Rider',
+      merchant: 'NexRide Merchant',
+      driver: 'NexRide Driver',
+    };
+
+    const deepBase = DEEP[app] || DEEP.rider;
+    const deepLink = new URL(deepBase);
+    if (txRef) deepLink.searchParams.set('tx_ref', txRef);
+    if (transactionId) deepLink.searchParams.set('transaction_id', transactionId);
+    if (flow) deepLink.searchParams.set('flow', flow);
+    if (merchantId) deepLink.searchParams.set('merchantId', merchantId);
+    if (uid) deepLink.searchParams.set('uid', uid);
+    if (status) deepLink.searchParams.set('status', status);
+
+    const title = document.getElementById('title');
+    const message = document.getElementById('message');
+    const icon = document.getElementById('icon');
+    const returnBtn = document.getElementById('return-btn');
+    const appName = APP_LABEL[app] || 'NexRide';
+
+    const cancelled = status === 'cancelled' || status === 'canceled' || status === 'cancel';
+
+    if (cancelled) {
+      icon.textContent = '✕';
+      title.textContent = 'Payment cancelled';
+      message.textContent = 'You cancelled checkout. Return to ' + appName + ' to try again or choose another method.';
+    } else if (status === 'successful' || status === 'success') {
+      icon.textContent = '✅';
+      title.textContent = 'Payment complete';
+      message.textContent = 'Return to ' + appName + ' to finish.';
+    } else {
+      icon.textContent = '↩️';
+      title.textContent = 'Return to ' + appName;
+      message.textContent = 'Your payment may still be processing. Open ' + appName + ' to verify status.';
+    }
+
+    returnBtn.textContent = 'Return to ' + appName;
+    returnBtn.setAttribute('href', deepLink.toString());
+    setTimeout(function () {
+      window.location.href = deepLink.toString();
+    }, 800);
+  </script>
+</body>
+</html>

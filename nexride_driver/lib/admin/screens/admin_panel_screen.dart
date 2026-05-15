@@ -32,6 +32,7 @@ import 'admin_rollout_regions_screen.dart';
 import 'admin_service_areas_screen.dart';
 import 'admin_verification_center_screen.dart';
 import 'admin_audit_logs_screen.dart';
+import 'admin_payment_intents_screen.dart';
 import '../support/proof_open.dart';
 import '../../services/driver_finance_service.dart';
 
@@ -265,6 +266,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     } else if (_section == AdminSection.trips ||
         _section == AdminSection.liveOperations ||
         _section == AdminSection.systemHealth ||
+        _section == AdminSection.paymentIntents ||
         _section == AdminSection.auditLogs ||
         _section == AdminSection.regions ||
         _section == AdminSection.serviceAreas ||
@@ -1007,6 +1009,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     } else if (_section == AdminSection.finance) {
       await _loadDashboardOnly();
     } else if (_section == AdminSection.auditLogs ||
+        _section == AdminSection.paymentIntents ||
         _section == AdminSection.liveOperations ||
         _section == AdminSection.systemHealth ||
         _section == AdminSection.trips ||
@@ -1298,12 +1301,16 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         _section == AdminSection.trips ||
         _section == AdminSection.liveOperations ||
         _section == AdminSection.systemHealth ||
+        _section == AdminSection.paymentIntents ||
         _section == AdminSection.auditLogs) {
       if (_section == AdminSection.liveOperations) {
         debugPrint('[LIVE_OPS][AdminPanel] routing to AdminLiveOpsDashboardScreen');
       }
       if (_section == AdminSection.auditLogs) {
         debugPrint('[AUDIT_LOGS][PANEL] routing to AdminAuditLogsScreen');
+      }
+      if (_section == AdminSection.paymentIntents) {
+        debugPrint('[PAYMENT_INTENTS][PANEL] routing to AdminPaymentIntentsScreen');
       }
       return AnimatedSwitcher(
         duration: const Duration(milliseconds: 240),
@@ -1331,6 +1338,10 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   ),
               AdminSection.systemHealth => AdminSystemHealthScreen(
                     dataService: _dataService,
+                  ),
+              AdminSection.paymentIntents => AdminPaymentIntentsScreen(
+                    dataService: _dataService,
+                    session: widget.session,
                   ),
               AdminSection.auditLogs => AdminAuditLogsScreen(
                     dataService: _dataService,
@@ -1596,6 +1607,10 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   ),
               AdminSection.systemHealth => AdminSystemHealthScreen(
                     dataService: _dataService,
+                  ),
+              AdminSection.paymentIntents => AdminPaymentIntentsScreen(
+                    dataService: _dataService,
+                    session: widget.session,
                   ),
               AdminSection.auditLogs => AdminAuditLogsScreen(
                     dataService: _dataService,

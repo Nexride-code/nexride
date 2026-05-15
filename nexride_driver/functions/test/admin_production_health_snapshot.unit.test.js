@@ -7,6 +7,7 @@ const {
   classifyServiceAreaRowWarnings,
   scanWithdrawals,
   countRiderPaymentIssues,
+  _countRiderPaymentIssuesAt,
 } = require("../production_health_callable");
 
 const adminCtx = { auth: { uid: "admin1", token: { admin: true, admin_role: "super_admin" } } };
@@ -67,6 +68,27 @@ function makeEmptyLiveDb(overrides = {}) {
           equalTo: () => ({
             limitToFirst: () => ({
               get: async () => ({ val: () => null, exists: () => false }),
+            }),
+          }),
+        }),
+      };
+    },
+  };
+}
+
+function makeRtdbPaymentScenarioDb(scenarios) {
+  return {
+    ref(path) {
+      const base = String(path);
+      return {
+        orderByChild: () => ({
+          equalTo: (statusVal) => ({
+            limitToFirst: () => ({
+              get: async () => {
+                const key = `${base}|${statusVal}`;
+                const v = scenarios[key];
+                return { val: () => v ?? null, exists: () => v != null };
+              },
             }),
           }),
         }),
@@ -182,6 +204,77 @@ test("countRiderPaymentIssues has no rider wallet fields", async () => {
   assert.ok(typeof r.failed_card_payments === "number");
   assert.ok(typeof r.pending_bank_transfer_confirmations === "number");
   assert.ok(typeof r.unpaid_rider_trips_orders === "number");
+  assert.ok(typeof r.active_payment_intents === "number");
+  assert.ok(typeof r.payment_verification_mismatches === "number");
+});
+
+test("rider payment diagnostics ignore stale failed rows", async () => {
+  const asOf = 1_720_000_000_000;
+  const staleTs = asOf - 10 * 24 * 60 * 60 * 1000;
+  const db = makeRtdbPaymentScenarioDb({
+    "ride_requests|failed": {
+      a: { payment_status: "failed", updated_at: staleTs, payment_reference: "r1" },
+    },
+  });
+  const r = await _countRiderPaymentIssuesAt(db, asOf);
+  assert.equal(r.failed_card_payments, 0);
+  assert.equal(r.total, 0);
+});
+
+test("rider payment diagnostics count recent actionable rows", async () => {
+  const asOf = 1_720_000_000_000;
+  const recentTs = asOf - 2 * 60 * 60 * 1000;
+  const db = makeRtdbPaymentScenarioDb({
+    "ride_requests|failed": {
+      a: { payment_status: "failed", updated_at: recentTs, payment_reference: "r1" },
+    },
+  });
+  const r = await _countRiderPaymentIssuesAt(db, asOf);
+  assert.equal(r.failed_card_payments, 1);
+  assert.equal(r.payment_verification_mismatches, 0);
+  assert.equal(r.total, 1);
+});
+
+test("rider payment diagnostics flag verification mismatch signals on failed rows", async () => {
+  const asOf = 1_720_000_000_000;
+  const recentTs = asOf - 2 * 60 * 60 * 1000;
+  const db = makeRtdbPaymentScenarioDb({
+    "ride_requests|failed": {
+      a: {
+        payment_status: "failed",
+        updated_at: recentTs,
+        payment_reference: "r1",
+        payment_issue_code: "payment_owner_mismatch",
+      },
+    },
+  });
+  const r = await _countRiderPaymentIssuesAt(db, asOf);
+  assert.equal(r.failed_card_payments, 1);
+  assert.equal(r.payment_verification_mismatches, 1);
+});
+
+test("rider payment diagnostics skip rows with no observable payment schema", async () => {
+  const asOf = 1_720_000_000_000;
+  const db = makeRtdbPaymentScenarioDb({
+    "ride_requests|failed": {
+      a: { payment_status: "failed" },
+    },
+  });
+  const r = await _countRiderPaymentIssuesAt(db, asOf);
+  assert.equal(r.failed_card_payments, 0);
+});
+
+test("rider payment diagnostics count recent pending card intents", async () => {
+  const asOf = 1_720_000_000_000;
+  const recentTs = asOf - 30 * 60 * 1000;
+  const db = makeRtdbPaymentScenarioDb({
+    "ride_requests|pending": {
+      a: { payment_status: "pending", updated_at: recentTs, payment_reference: "tx" },
+    },
+  });
+  const r = await _countRiderPaymentIssuesAt(db, asOf);
+  assert.equal(r.active_payment_intents, 1);
+  assert.equal(r.total, 1);
 });
 
 test("structured failure when live dashboard fails", async () => {

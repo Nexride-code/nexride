@@ -201,18 +201,26 @@ class MerchantGatewayService {
     Duration timeout = const Duration(seconds: 45),
   }) async {
     try {
+      if (kDebugMode) {
+        debugPrint('[callable $name] start payloadKeys=${data.keys.join(',')}');
+      }
       final result = await _fn
           .httpsCallable(
             name,
             options: HttpsCallableOptions(timeout: timeout),
           )
           .call(data);
-      return _asMap(result.data);
+      final out = _asMap(result.data);
+      if (kDebugMode && out['success'] != true) {
+        debugPrint(
+          '[callable $name] fail reason=${out['reason']} reason_code=${out['reason_code']}',
+        );
+      }
+      return out;
     } on FirebaseFunctionsException catch (e) {
-      assert(() {
+      if (kDebugMode) {
         debugPrint('[callable $name] code=${e.code} message=${e.message}');
-        return true;
-      }());
+      }
       const supportFns = <String>{
         'merchantListMySupportTickets',
         'merchantAppendSupportTicketMessage',
