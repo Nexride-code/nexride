@@ -1,7 +1,8 @@
 import '../models/rollout_delivery_region_model.dart';
 
-const Duration kRolloutCatalogCallableTimeout = Duration(seconds: 22);
-const Duration kRolloutProfileFetchTimeout = Duration(seconds: 12);
+const Duration kRolloutCatalogCallableTimeout = Duration(seconds: 12);
+const Duration kRolloutProfileFetchTimeout = Duration(seconds: 10);
+const Duration kRolloutCatalogLoadBudget = Duration(seconds: 14);
 
 class RolloutCatalogSelection {
   const RolloutCatalogSelection({

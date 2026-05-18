@@ -1,24 +1,47 @@
-01:54:29.845 [NamespaceSystem-akka.actor.default-dispatcher-4] INFO akka.event.slf4j.Slf4jLogger - Slf4jLogger started
-01:54:29.947 [main] INFO com.firebase.server.forge.App$ - Listening at 127.0.0.1:9000
-01:54:30.371 [NamespaceSystem-akka.actor.default-dispatcher-4] INFO com.firebase.core.namespace.NamespaceActor - nexride-8d5bc-default-rtdb successfully activated FBKV (SurveyIdle(0)) wait: 79ms, init: 0ms
-01:54:30.430 [NamespaceSystem-blocking-namespace-operation-dispatcher-6] INFO com.firebase.core.namespace.StateManager - Namespace nexride-8d5bc-default-rtdb status Active to Active
-01:54:30.725 [FirebaseWorkerPool-1-3] WARN com.firebase.core.persistence.backend.dummy.EmulatorMetadataPersistence - Multiple projectIds are not recommended in single project mode. Requested 
-namespace demo-nexride-driver-rtdb, but the emulator is configured for nexride-8d5bc-default-rtdb. To 
-opt-out of single project mode add/set the singleProjectMode: false property in 
-the firebase.json emulators config. 
-01:54:30.727 [NamespaceSystem-akka.actor.default-dispatcher-5] INFO com.firebase.core.namespace.NamespaceActor - demo-nexride-driver-rtdb successfully activated FBKV (SurveyIdle(0)) wait: 1ms, init: 0ms
-01:54:30.737 [NamespaceSystem-blocking-namespace-operation-dispatcher-6] INFO com.firebase.core.namespace.StateManager - Namespace demo-nexride-driver-rtdb status Active to Active
-01:54:31.061 [FirebaseWorkerPool-1-1] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
-01:54:31.103 [FirebaseWorkerPool-1-2] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
-01:54:31.117 [FirebaseWorkerPool-1-3] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
-01:54:31.137 [FirebaseWorkerPool-1-4] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
-01:54:31.159 [FirebaseWorkerPool-1-2] WARN com.firebase.server.forge.App$ - Received service account token eyJh...X19., assuming ownership.
-01:54:31.170 [FirebaseWorkerPool-1-3] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
-01:54:31.180 [FirebaseWorkerPool-1-4] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
-01:54:31.194 [FirebaseWorkerPool-1-1] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
-01:54:31.215 [FirebaseWorkerPool-1-3] WARN com.firebase.server.forge.App$ - Received service account token eyJh...fX0., assuming ownership.
-01:54:31.742 [Thread-0] INFO com.firebase.server.forge.App$ - Attempting graceful shutdown.
-01:54:31.750 [NamespaceSystem-akka.actor.default-dispatcher-11] INFO com.firebase.core.namespace.Terminator$Terminator - 2 actors left to terminate: nexride-8d5bc-default-rtdb, demo-nexride-driver-rtdb
-01:54:31.753 [NamespaceSystem-akka.actor.default-dispatcher-4] INFO com.firebase.core.namespace.NamespaceActor - stopped namespace actor for nexride-8d5bc-default-rtdb
-01:54:31.753 [NamespaceSystem-akka.actor.default-dispatcher-10] INFO com.firebase.core.namespace.NamespaceActor - stopped namespace actor for demo-nexride-driver-rtdb
-01:54:31.756 [Thread-0] INFO com.firebase.server.forge.App$ - Graceful shutdown complete.
+01:28:22.905 [NamespaceSystem-akka.actor.default-dispatcher-4] INFO akka.event.slf4j.Slf4jLogger - Slf4jLogger started
+01:28:23.009 [main] INFO com.firebase.server.forge.App$ - Listening at 127.0.0.1:9000
+01:28:23.033 [main] WARN io.netty.util.NetUtil - Failed to retrieve the list of available network interfaces
+java.net.SocketException: Operation not permitted (getifaddrs() failed)
+	at java.base/java.net.NetworkInterface.getAll(Native Method)
+	at java.base/java.net.NetworkInterface.getNetworkInterfaces(NetworkInterface.java:347)
+	at io.netty.util.NetUtil.<clinit>(NetUtil.java:154)
+	at io.netty.channel.socket.DefaultServerSocketChannelConfig.<init>(DefaultServerSocketChannelConfig.java:39)
+	at io.netty.channel.socket.nio.NioServerSocketChannel$NioServerSocketChannelConfig.<init>(NioServerSocketChannel.java:195)
+	at io.netty.channel.socket.nio.NioServerSocketChannel$NioServerSocketChannelConfig.<init>(NioServerSocketChannel.java:193)
+	at io.netty.channel.socket.nio.NioServerSocketChannel.<init>(NioServerSocketChannel.java:87)
+	at io.netty.channel.socket.nio.NioServerSocketChannel.<init>(NioServerSocketChannel.java:72)
+	at java.base/jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance(DirectConstructorHandleAccessor.java:62)
+	at java.base/java.lang.reflect.Constructor.newInstanceWithCaller(Constructor.java:502)
+	at java.base/java.lang.reflect.ReflectAccess.newInstance(ReflectAccess.java:128)
+	at java.base/jdk.internal.reflect.ReflectionFactory.newInstance(ReflectionFactory.java:304)
+	at java.base/java.lang.Class.newInstance(Class.java:727)
+	at io.netty.bootstrap.AbstractBootstrap$BootstrapChannelFactory.newChannel(AbstractBootstrap.java:487)
+	at io.netty.bootstrap.AbstractBootstrap.initAndRegister(AbstractBootstrap.java:311)
+	at io.netty.bootstrap.AbstractBootstrap.doBind(AbstractBootstrap.java:273)
+	at io.netty.bootstrap.AbstractBootstrap.bind(AbstractBootstrap.java:269)
+	at io.netty.bootstrap.AbstractBootstrap.bind(AbstractBootstrap.java:251)
+	at com.firebase.server.forge.App$.runFirebase(App.scala:385)
+	at com.firebase.server.forge.App$.main(App.scala:189)
+	at com.firebase.server.forge.App.main(App.scala)
+01:28:23.033 [main] WARN io.netty.util.NetUtil - Failed to find the loopback interface
+01:28:23.041 [main] ERROR com.firebase.server.forge.App$ - Error initializing Netty Listener
+java.net.SocketException: Operation not permitted
+	at java.base/sun.nio.ch.Net.bind0(Native Method)
+	at java.base/sun.nio.ch.Net.bind(Net.java:577)
+	at java.base/sun.nio.ch.ServerSocketChannelImpl.netBind(ServerSocketChannelImpl.java:344)
+	at java.base/sun.nio.ch.ServerSocketChannelImpl.bind(ServerSocketChannelImpl.java:301)
+	at io.netty.channel.socket.nio.NioServerSocketChannel.doBind(NioServerSocketChannel.java:128)
+	at io.netty.channel.AbstractChannel$AbstractUnsafe.bind(AbstractChannel.java:500)
+	at io.netty.channel.DefaultChannelPipeline$HeadContext.bind(DefaultChannelPipeline.java:1226)
+	at io.netty.channel.AbstractChannelHandlerContext.invokeBind(AbstractChannelHandlerContext.java:495)
+	at io.netty.channel.AbstractChannelHandlerContext.bind(AbstractChannelHandlerContext.java:480)
+	at io.netty.channel.DefaultChannelPipeline.bind(DefaultChannelPipeline.java:973)
+	at io.netty.channel.AbstractChannel.bind(AbstractChannel.java:209)
+	at io.netty.bootstrap.AbstractBootstrap$2.run(AbstractBootstrap.java:355)
+	at io.netty.util.concurrent.SingleThreadEventExecutor.runAllTasks(SingleThreadEventExecutor.java:399)
+	at io.netty.channel.nio.NioEventLoop.run(NioEventLoop.java:464)
+	at io.netty.util.concurrent.SingleThreadEventExecutor$2.run(SingleThreadEventExecutor.java:131)
+	at io.netty.util.concurrent.DefaultThreadFactory$DefaultRunnableDecorator.run(DefaultThreadFactory.java:138)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+01:28:23.043 [Thread-0] INFO com.firebase.server.forge.App$ - Attempting graceful shutdown.
+01:28:23.045 [Thread-0] INFO com.firebase.server.forge.App$ - Graceful shutdown complete.

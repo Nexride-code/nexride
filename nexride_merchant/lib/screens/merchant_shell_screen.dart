@@ -7,6 +7,8 @@ import 'package:provider/provider.dart';
 import '../domain/merchant_portal_access.dart';
 import '../services/merchant_connectivity.dart';
 import '../services/merchant_fcm_service.dart';
+import '../services/merchant_session_service.dart';
+import 'login_screen.dart';
 import '../state/merchant_app_state.dart';
 import 'dashboard_screen.dart';
 import 'earnings_withdrawals_screen.dart';
@@ -95,7 +97,7 @@ class _MerchantShellScreenState extends State<MerchantShellScreen> {
                       ),
             ),
           PopupMenuButton<String>(
-            onSelected: (value) {
+            onSelected: (value) async {
               switch (value) {
                 case 'sub':
                   Navigator.of(context).push(
@@ -122,7 +124,14 @@ class _MerchantShellScreenState extends State<MerchantShellScreen> {
                     ),
                   );
                 case 'out':
-                  FirebaseAuth.instance.signOut();
+                  await MerchantSessionService.instance.signOut(context: context);
+                  if (!context.mounted) {
+                    return;
+                  }
+                  await Navigator.of(context).pushAndRemoveUntil(
+                    MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+                    (_) => false,
+                  );
               }
             },
             itemBuilder: (BuildContext context) {

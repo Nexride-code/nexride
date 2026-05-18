@@ -13,14 +13,40 @@ import 'services/merchant_connectivity.dart';
 import 'services/merchant_payment_return_bus.dart';
 import 'state/merchant_app_state.dart';
 import 'theme/merchant_theme.dart';
+import 'support/app_crash_guard.dart';
 
 Future<void> main() async {
+  runMerchantAppGuarded(_bootstrapMerchantApp);
+}
+
+Future<void> _bootstrapMerchantApp() async {
+  debugPrint('APP_START');
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+  configureMerchantCrashGuard();
+  startupStep('main_bindings_ready');
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    startupStep('firebase_init_ok');
+  } catch (error, stackTrace) {
+    startupError('firebase_init', error);
+    debugPrintStack(label: 'STARTUP_ERROR firebase_init', stackTrace: stackTrace);
+    rethrow;
+  }
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-  unawaited(_initMerchantPaymentDeepLinks());
+  unawaited(() async {
+    try {
+      await _initMerchantPaymentDeepLinks();
+    } catch (error, stackTrace) {
+      startupError('payment_deep_links', error);
+      debugPrintStack(
+        label: 'STARTUP_ERROR payment_deep_links',
+        stackTrace: stackTrace,
+      );
+    }
+  }());
+  startupStep('startup_ready');
   runApp(
     MultiProvider(
       providers: [

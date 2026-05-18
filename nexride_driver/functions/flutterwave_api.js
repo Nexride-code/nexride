@@ -3,6 +3,7 @@
  */
 
 const { flutterwaveSecretForVerify } = require("./params");
+const { logger } = require("firebase-functions");
 
 function flutterwaveVerifyUrl(refOrNumericId) {
   const s = String(refOrNumericId || "").trim();
@@ -169,7 +170,15 @@ async function verifyFlutterwavePaymentStrict({ transactionId, txRef, expect = {
 async function createHostedPaymentLink(body) {
   const secret = flutterwaveSecretForVerify();
   if (!secret) {
-    return { ok: false, reason: "flutterwave_secret_missing" };
+    logger.warn("flutterwave_card_init_blocked_secret", {
+      tx_ref: body?.tx_ref,
+      reason: "flutterwave_secret_missing",
+    });
+    return {
+      ok: false,
+      reason: "flutterwave_secret_missing",
+      reason_code: "flutterwave_secret_not_in_runtime",
+    };
   }
   let response;
   try {
@@ -182,7 +191,12 @@ async function createHostedPaymentLink(body) {
       body: JSON.stringify(body),
     });
   } catch (error) {
-    return { ok: false, reason: "network_error", error: String(error) };
+    return {
+      ok: false,
+      reason: "network_error",
+      reason_code: "flutterwave_network_error",
+      error: String(error),
+    };
   }
   let payload = {};
   try {
@@ -192,7 +206,36 @@ async function createHostedPaymentLink(body) {
   }
   const link = String(payload?.data?.link || "").trim();
   const ok = response.ok && !!link;
-  return { ok, reason: ok ? undefined : "initiate_failed", link, payload };
+  const flutterwave_message = String(payload?.message || "").trim() || null;
+  let reason_code;
+  if (ok) {
+    reason_code = undefined;
+  } else if (!response.ok) {
+    reason_code = "flutterwave_http_error";
+  } else if (!link) {
+    reason_code = "flutterwave_checkout_link_missing";
+  } else {
+    reason_code = "flutterwave_payment_init_failed";
+  }
+  if (!ok) {
+    logger.warn("flutterwave_card_init_response", {
+      tx_ref: body?.tx_ref,
+      http_status: response.status,
+      reason_code,
+      flutterwave_message,
+      checkout_url_present: Boolean(link),
+      response_snippet: JSON.stringify(payload ?? {}).slice(0, 5000),
+    });
+  }
+  return {
+    ok,
+    reason: ok ? undefined : "initiate_failed",
+    reason_code,
+    link,
+    payload,
+    http_status: response.status,
+    flutterwave_message,
+  };
 }
 
 /**
@@ -204,7 +247,16 @@ async function createHostedPaymentLink(body) {
 async function createDynamicNgnVirtualAccount(body) {
   const secret = flutterwaveSecretForVerify();
   if (!secret) {
-    return { ok: false, reason: "flutterwave_secret_missing" };
+    logger.warn("flutterwave_va_create_blocked_secret", {
+      tx_ref: body?.tx_ref,
+      reason: "flutterwave_secret_missing",
+      reason_code: "flutterwave_secret_not_in_runtime",
+    });
+    return {
+      ok: false,
+      reason: "flutterwave_secret_missing",
+      reason_code: "flutterwave_secret_not_in_runtime",
+    };
   }
   let response;
   try {
@@ -217,7 +269,12 @@ async function createDynamicNgnVirtualAccount(body) {
       body: JSON.stringify(body),
     });
   } catch (error) {
-    return { ok: false, reason: "network_error", error: String(error) };
+    return {
+      ok: false,
+      reason: "network_error",
+      reason_code: "flutterwave_network_error",
+      error: String(error),
+    };
   }
   let payload = {};
   try {
@@ -249,12 +306,35 @@ async function createDynamicNgnVirtualAccount(body) {
 
   const ok = okHttp && normalized && !!normalized.account_number;
 
+  const reason = ok ? undefined : okHttp ? "va_missing_account_number" : "va_create_failed";
+  const reason_code = ok
+    ? undefined
+    : okHttp
+      ? "flutterwave_va_invalid_response"
+      : "flutterwave_va_http_error";
+
+  const flutterwave_message = String(payload?.message || "").trim() || null;
+  if (!ok) {
+    logger.warn("flutterwave_va_create_response", {
+      tx_ref: body?.tx_ref,
+      http_status: response.status,
+      provider_status: providerStatus,
+      reason,
+      reason_code,
+      flutterwave_message,
+      response_body: JSON.stringify(payload ?? {}).slice(0, 5000),
+    });
+  }
+
   return {
     ok,
-    reason: ok ? undefined : okHttp ? "va_missing_account_number" : "va_create_failed",
+    reason,
+    reason_code,
     normalized,
     payload,
     http_status: response.status,
+    flutterwave_message,
+    provider_http_status: response.status,
   };
 }
 

@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 
 import '../firebase_options.dart';
 import '../portal_security/portal_account_security_screen.dart';
@@ -353,3 +355,37 @@ class _AdminFatalError {
   final Object error;
   final StackTrace? stackTrace;
 }
+
+/// Standalone admin web bootstrap (also used by [main_admin.dart]).
+Future<void> adminMain() async {
+  final tStart = DateTime.now().toIso8601String();
+  debugPrint('[admin_app] adminMain start t=$tStart');
+  WidgetsFlutterBinding.ensureInitialized();
+  if (kIsWeb) {
+    usePathUrlStrategy();
+  }
+  final startupUri = Uri.base;
+  final startupRoute =
+      WidgetsBinding.instance.platformDispatcher.defaultRouteName;
+
+  configureAdminErrorHandling(startupUri: startupUri);
+  logAdminStartup(
+    'adminMain() starting route=$startupRoute uri=$startupUri mode=${kDebugMode ? 'debug' : 'release'}',
+  );
+
+  final initialization = initializeAdminFirebase();
+  logAdminStartup(
+    'Booting standalone AdminApp only; driver startup is disabled for this entrypoint.',
+  );
+  debugPrint('[admin_app] before runApp t=${DateTime.now().toIso8601String()}');
+  runApp(
+    AdminApp(
+      initialization: initialization,
+      startupUri: startupUri,
+      enableRealtimeBadgeListeners: false,
+    ),
+  );
+  debugPrint('[admin_app] after runApp t=${DateTime.now().toIso8601String()}');
+}
+
+Future<void> main() async => adminMain();

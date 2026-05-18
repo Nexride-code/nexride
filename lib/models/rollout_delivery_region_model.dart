@@ -76,7 +76,7 @@ RolloutRideAreaMatch? matchRideAreaForPickupCoordinates(
   required double lng,
 }) {
   RolloutRideAreaMatch? best;
-  var bestRadius = double.infinity;
+  var bestDistanceKm = double.infinity;
   for (final region in catalog) {
     if (!region.supportsRides) {
       continue;
@@ -101,8 +101,8 @@ RolloutRideAreaMatch? matchRideAreaForPickupCoordinates(
       }
       final dMeters = Geolocator.distanceBetween(clat, clng, lat, lng);
       final dKm = dMeters / 1000.0;
-      if (dKm <= rad && rad < bestRadius) {
-        bestRadius = rad;
+      if (dKm <= rad && dKm < bestDistanceKm) {
+        bestDistanceKm = dKm;
         best = RolloutRideAreaMatch(
           regionId: region.regionId,
           cityId: city.cityId,
@@ -188,4 +188,85 @@ List<RolloutDeliveryRegionModel> parseRolloutRegionsResponse(
     out.add(RolloutDeliveryRegionModel.fromMap(rid, m));
   }
   return out;
+}
+
+/// `listDeliveryRegions` returns `source`: `firestore` | `seed_fallback` (legacy: `seed`).
+String? rolloutCatalogSourceFromResponse(Map<String, dynamic> response) {
+  if (response['success'] != true) {
+    return null;
+  }
+  final s = response['source']?.toString().trim();
+  if (s == null || s.isEmpty) {
+    return null;
+  }
+  return s;
+}
+
+/// Minimal Lagos + Abuja bubbles when server returns success but the client parser yields no rows.
+List<RolloutDeliveryRegionModel> rolloutEmergencyFallbackCatalog() {
+  return <RolloutDeliveryRegionModel>[
+    RolloutDeliveryRegionModel(
+      regionId: 'lagos',
+      stateLabel: 'Lagos',
+      dispatchMarketId: 'lagos',
+      supportsRides: true,
+      supportsFood: true,
+      supportsPackage: true,
+      cities: const <RolloutDeliveryCityModel>[
+        RolloutDeliveryCityModel(
+          cityId: 'ikeja',
+          displayName: 'Ikeja',
+          supportsRides: true,
+          supportsFood: true,
+          supportsPackage: true,
+          centerLat: 6.6018,
+          centerLng: 3.3515,
+          serviceRadiusKm: 22,
+        ),
+        RolloutDeliveryCityModel(
+          cityId: 'lekki',
+          displayName: 'Lekki',
+          supportsRides: true,
+          supportsFood: true,
+          supportsPackage: true,
+          centerLat: 6.4698,
+          centerLng: 3.5852,
+          serviceRadiusKm: 28,
+        ),
+      ],
+    ),
+    RolloutDeliveryRegionModel(
+      regionId: 'abuja',
+      stateLabel: 'FCT',
+      dispatchMarketId: 'abuja_fct',
+      supportsRides: true,
+      supportsFood: true,
+      supportsPackage: true,
+      cities: const <RolloutDeliveryCityModel>[
+        RolloutDeliveryCityModel(
+          cityId: 'wuse',
+          displayName: 'Wuse',
+          supportsRides: true,
+          supportsFood: true,
+          supportsPackage: true,
+          centerLat: 9.0765,
+          centerLng: 7.3986,
+          serviceRadiusKm: 14,
+        ),
+      ],
+    ),
+  ];
+}
+
+List<RolloutDeliveryRegionModel> parseRolloutRegionsWithEmergencyFallback(
+  Map<String, dynamic> response,
+) {
+  final parsed = parseRolloutRegionsResponse(response);
+  if (parsed.isNotEmpty) {
+    return parsed;
+  }
+  if (response['success'] == true) {
+    return rolloutEmergencyFallbackCatalog();
+  }
+  return parsed;
 }

@@ -28,6 +28,7 @@ enum DriverWalletTransactionType {
   commissionDebit,
   withdrawalRequest,
   withdrawalProcessed,
+  flutterwaveTopUp,
   adjustment;
 
   String get label {
@@ -36,6 +37,7 @@ enum DriverWalletTransactionType {
       DriverWalletTransactionType.commissionDebit => 'Commission (NexRide)',
       DriverWalletTransactionType.withdrawalRequest => 'Withdrawal request',
       DriverWalletTransactionType.withdrawalProcessed => 'Withdrawal processed',
+      DriverWalletTransactionType.flutterwaveTopUp => 'Wallet top-up (Flutterwave)',
       DriverWalletTransactionType.adjustment => 'Adjustment',
     };
   }
@@ -806,6 +808,7 @@ class DriverFinanceService {
           date: _dateFromCandidates(<dynamic>[
             record['timestamp'],
             record['createdAt'],
+            record['created_at'],
             record['updatedAt'],
           ]),
           type: type,
@@ -1213,6 +1216,10 @@ class DriverFinanceService {
       'withdrawal_paid' ||
       'payout' =>
         DriverWalletTransactionType.withdrawalProcessed,
+      'driver_flutterwave_wallet_topup' ||
+      'flutterwave_wallet_topup' ||
+      'wallet_topup' =>
+        DriverWalletTransactionType.flutterwaveTopUp,
       _ => DriverWalletTransactionType.adjustment,
     };
   }

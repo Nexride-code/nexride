@@ -23,6 +23,8 @@ class DriverFeatureFlags {
 class DriverBusinessConfig {
   static const double commissionRate = 0.10;
   static const double commissionRatePercent = commissionRate * 100;
+  /// Must stay aligned with `DEFAULT_*_SUBSCRIPTION_NGN` in
+  /// `nexride_driver/functions/driver_flutterwave_payments.js` (server fallback).
   static const int weeklySubscriptionPriceNgn = 7000;
   static const int monthlySubscriptionPriceNgn = 25000;
 }

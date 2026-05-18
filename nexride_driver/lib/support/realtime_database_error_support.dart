@@ -4,6 +4,20 @@ import 'package:flutter/foundation.dart';
 
 typedef RealtimeDatabaseAction<T> = Future<T> Function();
 
+/// Structured log for RTDB permission failures (always emitted, not debug-only).
+void logRtdbPermissionDenied({
+  required String path,
+  required String source,
+  String? uid,
+  Object? error,
+}) {
+  final authUid = uid ?? FirebaseAuth.instance.currentUser?.uid ?? 'unauthenticated';
+  debugPrint(
+    '[RTDB_PERMISSION_DENIED] path=$path source=$source uid=$authUid'
+    '${error == null ? '' : ' error=$error'}',
+  );
+}
+
 bool isRealtimeDatabasePermissionDenied(Object error) {
   if (error is FirebaseException) {
     final code = error.code.trim().toLowerCase();
@@ -48,6 +62,9 @@ Future<T> runRequiredRealtimeDatabaseRead<T>({
       error: error,
       stackTrace: stackTrace,
     );
+    if (isRealtimeDatabasePermissionDenied(error)) {
+      logRtdbPermissionDenied(path: path, source: source, error: error);
+    }
     rethrow;
   }
 }
@@ -131,6 +148,9 @@ Future<T?> runOptionalRealtimeDatabaseRead<T>({
       error: error,
       stackTrace: stackTrace,
     );
+    if (isRealtimeDatabasePermissionDenied(error)) {
+      logRtdbPermissionDenied(path: path, source: source, error: error);
+    }
     return null;
   }
 }
@@ -201,6 +221,9 @@ void _logRealtimeDatabaseAccess({
     '[RTDB][$phase] source=$source path=$path uid=$uid optional=$optional'
     '${error == null ? '' : ' error=$error'}',
   );
+  if (error != null && isRealtimeDatabasePermissionDenied(error)) {
+    logRtdbPermissionDenied(path: path, source: source, uid: uid, error: error);
+  }
   if (error != null && stackTrace != null) {
     debugPrintStack(
       label: '[RTDB][$phase] source=$source path=$path',

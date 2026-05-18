@@ -36,6 +36,9 @@ String coerceUserFacingMessage(String? raw) {
       lower.contains('platform_exception')) {
     return kFriendlyGenericFailureMessage;
   }
+  if (lower.contains('flutterwave') && lower.contains('secret')) {
+    return 'Payment provider is temporarily unavailable. Please try again or pick another payment method.';
+  }
   return s;
 }
 

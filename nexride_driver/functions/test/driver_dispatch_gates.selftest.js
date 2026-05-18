@@ -7,6 +7,7 @@ const {
   evaluateDriverForOfferSoft,
   evaluateDriverGeoAndMode,
   summarizeDriverForFanout,
+  driverRideMarketsAligned,
 } = require("../driver_dispatch_gates");
 
 const ride = { market_pool: "lagos", service_type: "ride" };
@@ -108,18 +109,68 @@ const saMismatch = evaluateDriverGeoAndMode(
   {
     driver_availability_mode: "service_area",
     selected_service_area_id: "yaba",
-    dispatch_market: "lagos",
+    dispatch_market_id: "lagos",
+    lat: 6.5,
+    lng: 3.38,
+    location_mode: "area",
   },
-  rideLekki,
+  {
+    market_pool: "abuja_fct",
+    dispatch_market_id: "abuja_fct",
+    resolved_service_city_id: "gwarinpa",
+    pickup: { lat: 9.08, lng: 7.39 },
+  },
   now,
 );
 assert.equal(saMismatch.ok, false);
+
+const abujaCrossCity = evaluateDriverGeoAndMode(
+  {
+    location_mode: "area",
+    dispatch_market_id: "abuja_fct",
+    service_area_city_id: "asokoro",
+    selected_service_area_id: "asokoro",
+    lat: 9.04,
+    lng: 7.52,
+  },
+  {
+    market_pool: "abuja_fct",
+    resolved_service_city_id: "gwarinpa",
+    pickup: { lat: 9.08, lng: 7.39 },
+  },
+  now,
+);
+assert.equal(abujaCrossCity.ok, true);
+
+const softAbujaDispatchId = evaluateDriverForOfferSoft(
+  {
+    is_online: true,
+    status: "available",
+    dispatch_market_id: "abuja_fct",
+    nexride_verified: true,
+    verification: { restrictions: {} },
+  },
+  { market_pool: "abuja_fct" },
+  { require_bvn: false },
+);
+assert.equal(softAbujaDispatchId.ok, true);
+
+assert.equal(
+  driverRideMarketsAligned(
+    { dispatch_market_id: "abuja_fct" },
+    { market_pool: "abuja_fct", resolved_dispatch_market_id: "abuja_fct" },
+  ),
+  true,
+);
 
 const saOk = evaluateDriverGeoAndMode(
   {
     driver_availability_mode: "service_area",
     selected_service_area_id: "lekki",
     dispatch_market: "lagos",
+    lat: 6.45,
+    lng: 3.39,
+    location_mode: "area",
   },
   rideLekki,
   now,
@@ -138,5 +189,19 @@ const gpsOk = evaluateDriverGeoAndMode(
   now,
 );
 assert.equal(gpsOk.ok, true);
+
+const lagosDriverAbujaRide = evaluateDriverGeoAndMode(
+  {
+    driver_availability_mode: "current_location",
+    lat: 9.0765,
+    lng: 7.3986,
+    last_location_updated_at: now - 60_000,
+    dispatch_market: "abuja_fct",
+    rollout_dispatch_market_id: "abuja_fct",
+  },
+  { market_pool: "lagos", pickup: { lat: 6.45, lng: 3.39 } },
+  now,
+);
+assert.equal(lagosDriverAbujaRide.ok, false);
 
 console.log("driver_dispatch_gates.selftest: ok");

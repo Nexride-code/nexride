@@ -111,8 +111,19 @@ class RiderRideCloudFunctionsService {
       );
 
   /// Enabled rollout regions + cities (server-filtered).
-  Future<Map<String, dynamic>> listDeliveryRegions() =>
-      _call('listDeliveryRegions', <String, dynamic>{});
+  Future<Map<String, dynamic>> listDeliveryRegions({
+    String? riderSelectedRegionId,
+    String? riderSelectedCityId,
+  }) =>
+      _call(
+        'listDeliveryRegions',
+        <String, dynamic>{
+          if (riderSelectedRegionId != null && riderSelectedRegionId.trim().isNotEmpty)
+            'rider_selected_region_id': riderSelectedRegionId.trim(),
+          if (riderSelectedCityId != null && riderSelectedCityId.trim().isNotEmpty)
+            'rider_selected_city_id': riderSelectedCityId.trim(),
+        },
+      );
 
   /// Validates state + city + service flags before booking / dispatch.
   Future<Map<String, dynamic>> validateServiceLocation({
@@ -404,5 +415,41 @@ bool riderRideCallableSucceeded(Map<String, dynamic>? response) =>
 String riderRideCallableReason(Map<String, dynamic>? response) {
   final r = response?['reason']?.toString().trim() ?? '';
   return r.isEmpty ? 'unknown' : r;
+}
+
+/// Prefer server [message] / [user_message]; never show raw secret / internal codes in UI.
+String riderRideCallableUserMessage(Map<String, dynamic>? reg) {
+  if (reg == null) {
+    return 'Something went wrong. Please try again.';
+  }
+  for (final key in <String>['message', 'user_message']) {
+    final u = reg[key]?.toString().trim();
+    if (u != null && u.isNotEmpty) {
+      return u;
+    }
+  }
+  final rc = (reg['reason_code'] ?? '').toString().trim().toLowerCase();
+  if (rc == 'flutterwave_secret_not_in_runtime') {
+    return 'Payment provider is temporarily unavailable. Please use a card or try again later.';
+  }
+  final reasonLower = riderRideCallableReason(reg).toLowerCase();
+  if (reasonLower == 'flutterwave_secret_missing' ||
+      reasonLower.contains('flutterwave_secret_missing')) {
+    return 'Payment provider is temporarily unavailable. Please use a card or try again later.';
+  }
+  if (reasonLower == 'payment_provider_unavailable' ||
+      reasonLower.contains('flutterwave_secret')) {
+    return 'Payment provider is temporarily unavailable. Please use a card or try again later.';
+  }
+  if (reasonLower == 'flutterwave_va_failed') {
+    return 'Bank transfer could not be set up. Please try again or choose another payment method.';
+  }
+  if (reasonLower == 'official_bank_not_configured') {
+    return 'Bank transfer is temporarily unavailable (official NexRide account not configured). '
+        'Try card payment or contact support@nexride.africa.';
+  }
+  final human = reasonLower.replaceAll('_', ' ');
+  return 'Bank transfer could not be registered ($human). '
+      'Please try again or pick another payment method.';
 }
 

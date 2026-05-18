@@ -246,6 +246,7 @@ class AdminPortalRoutePaths {
       drivers => AdminSection.drivers,
       trips => AdminSection.trips,
       liveOps => AdminSection.liveOperations,
+      systemHealth => AdminSection.systemHealth,
       finance => AdminSection.finance,
       withdrawals => AdminSection.withdrawals,
       pricing => AdminSection.pricing,
@@ -262,6 +263,9 @@ class AdminPortalRoutePaths {
     };
     if (section == AdminSection.liveOperations) {
       debugPrint('[LIVE_OPS][ROUTE] resolved section=liveOperations');
+    }
+    if (section == AdminSection.systemHealth) {
+      debugPrint('[SYSTEM_HEALTH][ROUTE] resolved section=systemHealth');
     }
     if (section == AdminSection.auditLogs) {
       debugPrint('[AUDIT_LOGS][ROUTE] resolved section=auditLogs');

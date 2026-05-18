@@ -9,14 +9,22 @@ import 'firebase_options.dart';
 import 'map_screen.dart';
 import 'payment_methods_screen.dart';
 import 'services/rider_ride_cloud_functions_service.dart';
+import 'services/rider_android_notification_permission.dart';
 import 'services/rider_push_notification_service.dart';
 import 'services/rider_trip_deep_link_service.dart';
 import 'splash_screen.dart';
+import 'support/app_crash_guard.dart';
 import 'support/app_startup_state.dart';
 
 void main() async {
+  runRiderAppGuarded(_bootstrapRiderApp);
+}
+
+Future<void> _bootstrapRiderApp() async {
   debugPrint('APP_START');
   WidgetsFlutterBinding.ensureInitialized();
+  configureRiderCrashGuard();
+  startupStep('main_bindings_ready');
   debugPrint('FIREBASE_INIT_START');
 
   AppStartupState startupState = const AppStartupState(firebaseReady: false);
@@ -30,6 +38,7 @@ void main() async {
     startupState = const AppStartupState(firebaseReady: true);
     debugPrint('FIREBASE_INIT_OK');
     debugPrint('SPLASH_INIT_OK');
+    startupStep('firebase_init_ok');
   } catch (error) {
     debugPrint('FIREBASE_INIT_FAIL error=$error');
     debugPrint('SPLASH_INIT_FAIL error=$error');
@@ -43,6 +52,14 @@ void main() async {
   runApp(NexRideApp(startupState: startupState));
 
   if (startupState.firebaseReady) {
+    unawaited(
+      RiderAndroidNotificationPermission.instance
+          .ensureForFirstAppOpen()
+          .catchError((Object e) {
+        debugPrint('RIDER_NOTIF_PERM first_open error=$e');
+        return false;
+      }),
+    );
     unawaited(
       RiderPushNotificationService.instance.initialize().catchError((Object e) {
         debugPrint('PUSH_INIT_FAIL error=$e');

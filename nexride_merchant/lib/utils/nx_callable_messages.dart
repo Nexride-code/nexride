@@ -103,6 +103,10 @@ String nxMapFailureMessage(
       return 'Payment reference not found. Check the reference and try again.';
     case 'payment_cancelled':
       return 'Payment was cancelled. You can try again when ready.';
+    case 'payment_provider_unavailable':
+    case 'flutterwave_va_failed':
+    case 'payment_init_failed':
+      return 'Payment provider is temporarily unavailable. Please try again or use another method.';
   }
   return fallback;
 }

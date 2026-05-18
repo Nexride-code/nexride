@@ -9,7 +9,7 @@ const { logger } = require("firebase-functions");
 const { normUid } = require("../admin_auth");
 const adminPerms = require("../admin_permissions");
 const { createHostedPaymentLink, verifyFlutterwavePaymentStrict } = require("../flutterwave_api");
-const { flutterwavePublicKey } = require("../params");
+const { flutterwavePublicKey, flutterwaveSecretBindingDebug, flutterwaveSecretForVerify } = require("../params");
 const merchantVerification = require("./merchant_verification");
 const {
   normalizePaymentModel,
@@ -513,6 +513,33 @@ async function merchantCreateBankTransferTopUp(data, context, db) {
   const amount = Number(data?.amount_ngn ?? data?.amount ?? 0);
   if (!Number.isFinite(amount) || amount < MIN_TOPUP_NGN || amount > MAX_TOPUP_NGN) {
     return { success: false, reason: "invalid_amount" };
+  }
+
+  const secretBinding = flutterwaveSecretBindingDebug();
+  const secretOk = String(flutterwaveSecretForVerify() || "").trim().length > 0;
+  logger.info("merchantCreateBankTransferTopUp_enter", {
+    merchant_id: merchantId,
+    owner_uid: ownerUid,
+    amount_ngn: amount,
+    secret_exists: secretOk,
+    secret_binding: secretBinding,
+  });
+
+  if (!secretOk) {
+    logger.error("merchantCreateBankTransferTopUp_blocked", {
+      merchant_id: merchantId,
+      reason_code: "flutterwave_secret_not_in_runtime",
+      secret_binding: secretBinding,
+    });
+    return {
+      success: false,
+      reason: "payment_provider_unavailable",
+      reason_code: "flutterwave_secret_not_in_runtime",
+      message:
+        "Automated bank transfer is temporarily unavailable. Use card top-up or try again later.",
+      user_message:
+        "Automated bank transfer is temporarily unavailable. Use card top-up or try again later.",
+    };
   }
 
   const bankTransferVa = require("../bank_transfer_va");

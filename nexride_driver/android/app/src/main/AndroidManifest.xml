@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <!-- Allow the offer popup to vibrate even if the channel sound is muted. -->
     <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- Required for geolocator foreground location service (Android 9+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <!-- Required for location foreground service type declaration (Android 14+) -->

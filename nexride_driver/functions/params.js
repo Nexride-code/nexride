@@ -35,7 +35,60 @@ const flutterwavePublicKey = defineString("FLUTTERWAVE_PUBLIC_KEY", {
 const REGION = "us-central1";
 
 function flutterwaveSecretForVerify() {
-  return String(process.env.FLUTTERWAVE_SECRET_KEY || "").trim();
+  const fromEnv = String(process.env.FLUTTERWAVE_SECRET_KEY || "").trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  try {
+    const v = flutterwaveSecretKey.value();
+    if (v == null) {
+      return "";
+    }
+    const s = String(v).trim();
+    return s;
+  } catch (_) {
+    /* defineSecret.value() unavailable outside a secret-bound function (e.g. unit tests). */
+    return "";
+  }
+}
+
+/** Public key for hosted checkout metadata — env override, then Firebase param. */
+function flutterwavePublicKeyForClient() {
+  const fromEnv = String(process.env.FLUTTERWAVE_PUBLIC_KEY || "").trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  try {
+    return String(flutterwavePublicKey.value() || "").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+/** True when both Flutterwave keys are available in this runtime (same binding as payment callables). */
+function flutterwaveKeysReady() {
+  return (
+    Boolean(String(flutterwaveSecretForVerify() || "").trim()) &&
+    Boolean(String(flutterwavePublicKeyForClient() || "").trim())
+  );
+}
+
+/** Safe diagnostics for logs / admin — never returns secret material. */
+function flutterwaveSecretBindingDebug() {
+  const env = String(process.env.FLUTTERWAVE_SECRET_KEY || "").trim();
+  let param = "";
+  let paramErr = "";
+  try {
+    param = String(flutterwaveSecretKey.value() || "").trim();
+  } catch (e) {
+    paramErr = String(e?.message || e);
+  }
+  return {
+    env_FLUTTERWAVE_SECRET_KEY_nonempty: env.length > 0,
+    defineSecret_value_nonempty: param.length > 0,
+    defineSecret_value_error: paramErr || null,
+    resolved_secret_nonempty: env.length > 0 || param.length > 0,
+  };
 }
 
 function readParamNumber(paramDef, fallback, { min = 0 } = {}) {
@@ -63,6 +116,7 @@ function smallOrderThresholdNgn() {
 }
 
 module.exports = {
+  flutterwaveSecretBindingDebug,
   flutterwaveSecretKey,
   flutterwaveWebhookSecret,
   agoraAppIdSecret,
@@ -71,6 +125,8 @@ module.exports = {
   flutterwavePublicKey,
   REGION,
   flutterwaveSecretForVerify,
+  flutterwavePublicKeyForClient,
+  flutterwaveKeysReady,
   platformFeeNgn,
   smallOrderFeeNgn,
   smallOrderThresholdNgn,

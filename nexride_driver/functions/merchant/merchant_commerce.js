@@ -807,7 +807,12 @@ async function riderPlaceMerchantOrder(data, context, db) {
     return { success: false, reason: "merchant_closed" };
   }
 
-  const marketRaw = data?.market ?? data?.city ?? merchant.city_id ?? "";
+  const marketRaw =
+    data?.market ??
+    data?.city ??
+    merchant.dispatch_market_id ??
+    merchant.city_id ??
+    "";
   const market = ride.canonicalDispatchMarket(marketRaw);
   if (!market) {
     return { success: false, reason: "invalid_market" };
@@ -920,9 +925,10 @@ async function riderPlaceMerchantOrder(data, context, db) {
     order_id: oid,
     merchant_id: merchantId,
     customer_uid: customerId,
-    city_id: merchant.city_id ?? null,
-    region_id: merchant.region_id ?? null,
-    market,
+    city_id: merchant.service_area_city_id ?? merchant.city_id ?? null,
+    region_id: merchant.service_area_region_id ?? merchant.region_id ?? null,
+    dispatch_market_id: rolloutGate.dispatch_market_id ?? merchant.dispatch_market_id ?? market,
+    market: rolloutGate.dispatch_market_id ?? market,
     line_items: lineItems,
     subtotal_ngn: subtotal,
     delivery_fee_ngn: deliveryFee,
@@ -1114,6 +1120,7 @@ async function merchantUpdateOrderStatus(data, context, db) {
     return roleBlock;
   }
   const mid = resolved.ref.id;
+  const merchantDoc = resolved.data || {};
   const orderId = trimStr(data?.order_id ?? data?.orderId, 128);
   const next = trimStr(data?.status ?? data?.order_status, 48).toLowerCase();
   if (!orderId || !next) {
@@ -1175,11 +1182,24 @@ async function merchantUpdateOrderStatus(data, context, db) {
     if (!deliveryId) {
       return { success: false, reason: "delivery_id_failed" };
     }
+    const dispatchMarket = ride.canonicalDispatchMarket(
+      String(
+        o.dispatch_market_id ??
+          o.market ??
+          merchantDoc.dispatch_market_id ??
+          merchantDoc.city_id ??
+          "",
+      ),
+    );
+    if (!dispatchMarket) {
+      return { success: false, reason: "merchant_dispatch_market_required" };
+    }
     const built = {
       delivery_id: deliveryId,
       customer_id: customerId,
-      market: String(o.market ?? "lagos"),
-      market_pool: String(o.market ?? "lagos"),
+      market: dispatchMarket,
+      market_pool: dispatchMarket,
+      dispatch_market_id: dispatchMarket,
       pickup,
       dropoff,
       package_description: pkg,

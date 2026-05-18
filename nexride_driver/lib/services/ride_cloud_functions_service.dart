@@ -191,6 +191,36 @@ class RideCloudFunctionsService {
   Future<Map<String, dynamic>> setDriverOffline() =>
       _call('setDriverOffline', <String, dynamic>{});
 
+  /// Clears stale active-trip pointers blocking new offers (server-owned).
+  Future<Map<String, dynamic>> recordDriverOfferPopupAck({
+    required String rideId,
+    required String leaseId,
+    required int generation,
+    required int popupRenderedAtMs,
+  }) =>
+      _call('recordDriverOfferPopupAck', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'lease_id': leaseId,
+        'leaseId': leaseId,
+        'generation': generation,
+        'popup_generation': generation,
+        'popup_rendered_at': popupRenderedAtMs,
+      });
+
+  Future<Map<String, dynamic>> repairDriverDispatchBlockers({
+    required String driverId,
+    String incomingRideId = '',
+    String source = 'driver_app',
+  }) =>
+      _call('repairDriverDispatchBlockers', <String, dynamic>{
+        'driverId': driverId,
+        'driver_id': driverId,
+        if (incomingRideId.trim().isNotEmpty) 'incomingRideId': incomingRideId.trim(),
+        if (incomingRideId.trim().isNotEmpty) 'incoming_ride_id': incomingRideId.trim(),
+        'source': source,
+      });
+
   Future<Map<String, dynamic>> driverUpdateLiveLocation({
     required double latitude,
     required double longitude,
@@ -217,6 +247,88 @@ class RideCloudFunctionsService {
         'flagType': flagType,
         'details': details,
         if (sourceFlagId.trim().isNotEmpty) 'sourceFlagId': sourceFlagId.trim(),
+      });
+
+  Future<Map<String, dynamic>> verifyPayment({required String reference}) =>
+      _call('verifyPayment', <String, dynamic>{
+        'reference': reference,
+        'tx_ref': reference,
+      });
+
+  Future<Map<String, dynamic>> driverStartSubscriptionFlutterwaveCard({
+    required String driverId,
+    required String planType,
+    String? email,
+    String? redirectUrl,
+  }) =>
+      _call('driverStartSubscriptionFlutterwaveCard', <String, dynamic>{
+        'driverId': driverId,
+        'driver_id': driverId,
+        'planType': planType,
+        'plan_type': planType,
+        if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+        if (redirectUrl != null && redirectUrl.trim().isNotEmpty)
+          'redirect_url': redirectUrl.trim(),
+      });
+
+  Future<Map<String, dynamic>> driverCreateSubscriptionFlutterwaveVa({
+    required String driverId,
+    required String planType,
+    String? email,
+  }) =>
+      _call('driverCreateSubscriptionFlutterwaveVa', <String, dynamic>{
+        'driverId': driverId,
+        'driver_id': driverId,
+        'planType': planType,
+        'plan_type': planType,
+        if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+      });
+
+  Future<Map<String, dynamic>> driverPaySubscriptionFromWallet({
+    required String driverId,
+    required String planType,
+  }) =>
+      _call('driverPaySubscriptionFromWallet', <String, dynamic>{
+        'driverId': driverId,
+        'driver_id': driverId,
+        'planType': planType,
+        'plan_type': planType,
+      });
+
+  /// Canonical subscription amounts (same as payment callables). Display only — payment still server-resolved.
+  Future<Map<String, dynamic>> getDriverSubscriptionPricing({required String driverId}) =>
+      _call('getDriverSubscriptionPricing', <String, dynamic>{
+        'driverId': driverId,
+        'driver_id': driverId,
+      });
+
+  Future<Map<String, dynamic>> driverStartWalletTopUpFlutterwaveCard({
+    required String driverId,
+    required int amountNgn,
+    String? email,
+    String? redirectUrl,
+  }) =>
+      _call('driverStartWalletTopUpFlutterwaveCard', <String, dynamic>{
+        'driverId': driverId,
+        'driver_id': driverId,
+        'amount_ngn': amountNgn,
+        'amount': amountNgn,
+        if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+        if (redirectUrl != null && redirectUrl.trim().isNotEmpty)
+          'redirect_url': redirectUrl.trim(),
+      });
+
+  Future<Map<String, dynamic>> driverCreateWalletTopUpFlutterwaveVa({
+    required String driverId,
+    required int amountNgn,
+    String? email,
+  }) =>
+      _call('driverCreateWalletTopUpFlutterwaveVa', <String, dynamic>{
+        'driverId': driverId,
+        'driver_id': driverId,
+        'amount_ngn': amountNgn,
+        'amount': amountNgn,
+        if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
       });
 
   Future<Map<String, dynamic>> getNexrideOfficialBankAccount() =>

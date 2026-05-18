@@ -248,6 +248,7 @@ class _AdminLiveOperationsScreenState extends State<AdminLiveOperationsScreen> {
       final record = _mapOf(data['ride']).isNotEmpty
           ? _mapOf(data['ride'])
           : _mapOf(data['delivery']);
+      final lifecycleOps = _mapOf(data['lifecycle_ops']);
       final payments = _listOfMaps(data['payments']);
       final auditTimeline = _listOfMaps(data['audit_timeline']);
       await showModalBottomSheet<void>(
@@ -265,6 +266,7 @@ class _AdminLiveOperationsScreenState extends State<AdminLiveOperationsScreen> {
                 tripId: tripId,
                 tripKind: tripKind,
                 record: record,
+                lifecycleOps: lifecycleOps,
                 payments: payments,
                 auditTimeline: auditTimeline,
                 scrollController: sc,
@@ -768,10 +770,13 @@ class _TripTableCard extends StatelessWidget {
         DataColumn(label: Text('Offers (driver id)')),
         DataColumn(label: Text('Accepted id')),
         DataColumn(label: Text('Driver')),
-        DataColumn(label: Text('Payment')),
+        DataColumn(label: Text('Payment / tx_ref')),
+        DataColumn(label: Text('Offer status')),
+        DataColumn(label: Text('No eligible')),
         DataColumn(label: Text('Fare / final')),
         DataColumn(label: Text('Elapsed')),
         DataColumn(label: Text('Emergency')),
+        DataColumn(label: Text('Open')),
       ],
       rows: rows.map((Map<String, dynamic> t) {
         final id = t['trip_id']?.toString() ?? '';
@@ -828,7 +833,21 @@ class _TripTableCard extends StatelessWidget {
             DataCell(Text(t['driver_name']?.toString() ?? '—')),
             DataCell(
               Text(
-                '${t['payment_method'] ?? ''} • ${t['payment_status'] ?? ''}',
+                '${t['payment_method'] ?? ''} • ${t['payment_status'] ?? ''}'
+                '${(t['payment_tx_ref'] ?? '').toString().trim().isNotEmpty ? '\n${t['payment_tx_ref']}' : ''}',
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+            DataCell(
+              Text(
+                (t['no_eligible_reason'] ?? '—').toString(),
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+            DataCell(
+              Text(
+                (t['offer_delivery_status'] ?? '—').toString(),
+                style: const TextStyle(fontSize: 12),
               ),
             ),
             DataCell(Text('${formatAdminCurrency(fare)} / ${formatAdminCurrency(finalFare)}')),
@@ -841,6 +860,13 @@ class _TripTableCard extends StatelessWidget {
                 color: t['admin_emergency'] == true
                     ? Colors.deepOrange
                     : Colors.grey,
+              ),
+            ),
+            DataCell(
+              IconButton(
+                tooltip: 'Open trip detail',
+                icon: const Icon(Icons.open_in_new_rounded, size: 20),
+                onPressed: id.isEmpty ? null : () => onOpen(id),
               ),
             ),
           ],
@@ -957,6 +983,7 @@ class _TripDetailSheet extends StatelessWidget {
     required this.tripId,
     required this.tripKind,
     required this.record,
+    required this.lifecycleOps,
     required this.payments,
     required this.auditTimeline,
     required this.scrollController,
@@ -968,6 +995,7 @@ class _TripDetailSheet extends StatelessWidget {
   final String tripId;
   final String tripKind;
   final Map<String, dynamic> record;
+  final Map<String, dynamic> lifecycleOps;
   final List<Map<String, dynamic>> payments;
   final List<Map<String, dynamic>> auditTimeline;
   final ScrollController scrollController;
@@ -1020,6 +1048,50 @@ class _TripDetailSheet extends StatelessWidget {
             '${sentenceCaseStatus(tripKind)} • ${sentenceCaseStatus(record['trip_state']?.toString() ?? '')} • ${sentenceCaseStatus(record['status']?.toString() ?? '')}',
             style: const TextStyle(color: Color(0xFF6B655B)),
           ),
+          if (lifecycleOps.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 12),
+            AdminSurfaceCard(
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    const Text(
+                      'Lifecycle ops',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Rider: ${lifecycleOps['rider_id'] ?? '—'} · '
+                      'Driver: ${lifecycleOps['driver_id'] ?? '—'}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    Text(
+                      'Payment: ${lifecycleOps['payment_method'] ?? '—'} / '
+                      '${lifecycleOps['payment_status'] ?? '—'}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    Text(
+                      'Pickup: ${lifecycleOps['pickup'] ?? '—'}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    Text(
+                      'Dropoff: ${lifecycleOps['dropoff'] ?? '—'}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    Text(
+                      'active_trips: ${lifecycleOps['active_trip_exists'] == true} · '
+                      'driver_active_ride: ${lifecycleOps['driver_active_ride_exists'] == true} · '
+                      'chat: ${lifecycleOps['chat_message_count'] ?? 0} · '
+                      'reports: ${lifecycleOps['report_count'] ?? 0} · '
+                      'tickets: ${lifecycleOps['support_ticket_count'] ?? 0}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           Wrap(
             spacing: 8,

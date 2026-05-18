@@ -1,4 +1,7 @@
 # ninja log v5
-0	305	1776944153290284240	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	49514bf527c53d4c
-307	353	1776944153339512700	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/armeabi-v7a/libiris_rendering_android.so	7b5f34f0d723d6ce
-2	66	1776944546535941377	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/armeabi-v7a/libiris_rendering_android.so	7b5f34f0d723d6ce
+0	291	1778997462251239935	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	49514bf527c53d4c
+292	339	1778997462301608536	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/armeabi-v7a/libiris_rendering_android.so	7b5f34f0d723d6ce
+0	7	0	clean	8590d1a692ac5311
+0	5	0	clean	8590d1a692ac5311
+2	313	1779018845635907493	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	49514bf527c53d4c
+313	372	1779018845696569326	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/armeabi-v7a/libiris_rendering_android.so	7b5f34f0d723d6ce

@@ -64,7 +64,8 @@ async function createWalletTransactionInternal(db, { userId, amount, type, idemp
     const isDebit =
       normalizedType === "rider_payment_debit" ||
       normalizedType === "platform_fee_debit" ||
-      normalizedType === "withdrawal_paid";
+      normalizedType === "withdrawal_paid" ||
+      normalizedType === "driver_wallet_subscription_debit";
     const nextBalance = isDebit ? balance - numericAmount : balance + numericAmount;
     if (isDebit && nextBalance < 0) {
       failureReason = "insufficient_balance";

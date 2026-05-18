@@ -42,6 +42,7 @@ void main() {
 
     expect(find.text('Unable to send message right now.'), findsOneWidget);
     expect(find.byIcon(Icons.send), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 900));
   });
 
   testWidgets('ride chat sheet prevents double send while request is pending', (
@@ -128,11 +129,56 @@ void main() {
         find.text('Sending this message took too long. Please try again.'),
         findsNothing,
       );
-      expect(find.byIcon(Icons.send), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
 
       completer.complete(null);
       await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.send), findsOneWidget);
     },
   );
+
+  testWidgets('ride chat sheet shows safety banner and collapsible payment', (
+    WidgetTester tester,
+  ) async {
+    final messages = ValueNotifier<List<RideChatMessage>>(
+      const <RideChatMessage>[],
+    );
+    addTearDown(messages.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: RideChatSheet(
+            rideId: 'ride-pay',
+            currentUserId: 'rider-1',
+            messagesListenable: messages,
+            onSendMessage: (String rideId, String text) async => null,
+            onRetryMessage: (
+              String rideId,
+              RideChatMessage message,
+            ) async =>
+                null,
+            onSendImage: (String rideId, RideChatImageSource source) async =>
+                null,
+            bankTransferReference: 'nexride_ref_123',
+            bankTransferAmountLabel: '₦2266',
+          ),
+        ),
+      ),
+    );
+
+    expect(find.textContaining('Harassment'), findsOneWidget);
+    expect(find.text('Bank transfer payment'), findsOneWidget);
+    expect(find.text('View payment details'), findsOneWidget);
+    expect(find.text('nexride_ref_123'), findsNothing);
+
+    await tester.tap(find.text('View payment details'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('nexride_ref_123'), findsOneWidget);
+    expect(find.byType(TextField), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 900));
+  });
 }
 

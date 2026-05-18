@@ -118,12 +118,20 @@ class TripStateMachine {
     }
     final d = _normalizeText(rideData['driver_id']);
     dynamic assignedDriverId = rideData['driver_id'];
-    if (d.isEmpty || d == 'waiting') {
-      assignedDriverId = rideData['matched_driver_id'];
+    if (d.isEmpty ||
+        d == 'waiting' ||
+        d == 'pending' ||
+        d == 'null' ||
+        d == 'undefined' ||
+        d == 'none') {
+      assignedDriverId = rideData['matched_driver_id'] ??
+          rideData['matchedDriverId'] ??
+          rideData['accepted_driver_id'] ??
+          rideData['acceptedDriverId'];
     }
     return canonicalStateFromValues(
       tripState: rideData['trip_state'],
-      status: rideData['status'],
+      status: rideData['status'] ?? rideData['request_status'],
       assignedDriverId: assignedDriverId,
     );
   }

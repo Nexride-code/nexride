@@ -11,9 +11,11 @@ const {
 } = require("./flutterwave_api");
 const admin = require("firebase-admin");
 const bankTransferVa = require("./bank_transfer_va");
-const { flutterwavePublicKey } = require("./params");
+const driverFlutterwavePayments = require("./driver_flutterwave_payments");
+const { flutterwavePublicKey, flutterwaveSecretForVerify, flutterwaveSecretBindingDebug } = require("./params");
 const {
   fanOutDriverOffersIfEligible,
+  releaseOpenRideForBankTransferFailure,
   loadRiderCreateGates,
   coordsFromPickup,
   coordsInNgBox,
@@ -22,6 +24,8 @@ const {
 const { fanOutDeliveryOffersIfEligible } = require("./delivery_callables");
 const { syncRideTrackPublic } = require("./track_public");
 const { buildFlutterwaveRedirectUrl } = require("./payment_redirect");
+const { logger } = require("firebase-functions");
+const payDiag = require("./payment_diagnostics_store");
 const DEFAULT_FLUTTERWAVE_REDIRECT_URL = buildFlutterwaveRedirectUrl({
   appContext: "rider",
   flow: "rider_payment",
@@ -42,6 +46,68 @@ function normUid(uid) {
 
 function nowMs() {
   return Date.now();
+}
+
+function safeJsonForLog(obj, max = 6000) {
+  try {
+    const s = JSON.stringify(obj);
+    return s.length > max ? `${s.slice(0, max)}…` : s;
+  } catch (_) {
+    return String(obj);
+  }
+}
+
+function extractFlutterwaveProviderMessage(provider) {
+  if (!provider || typeof provider !== "object") {
+    return null;
+  }
+  return String(provider.message || provider.status || "").trim() || null;
+}
+
+function registerBankTransferVaFailureResponse(created, ctx) {
+  if (created.success) {
+    return created;
+  }
+  const prov = created.provider;
+  const flutterwave_message =
+    String(created.flutterwave_message || "").trim() ||
+    extractFlutterwaveProviderMessage(prov) ||
+    null;
+  const provider_http_status =
+    created.provider_http_status ?? created.flutterwave_http_status ?? null;
+  logger.warn("registerBankTransferPayment_va_create_failed", {
+    callable: "registerBankTransferPayment",
+    uid: ctx.riderId,
+    flow: ctx.flow,
+    ride_id: ctx.rideId || null,
+    delivery_id: ctx.deliveryId || null,
+    tx_ref: created.tx_ref || null,
+    reason: created.reason,
+    reason_code: created.reason_code || null,
+    provider_http_status,
+    flutterwave_message,
+    provider_payload_snippet: safeJsonForLog(prov, 5000),
+    provider: "flutterwave_va",
+  });
+  const out = {
+    success: false,
+    reason: created.reason,
+    reason_code: created.reason_code || null,
+    message: created.message || created.user_message || null,
+    user_message: created.user_message || created.message || null,
+    flutterwave_message,
+    provider_http_status,
+    tx_ref: created.tx_ref || null,
+  };
+  if (String(out.reason || "") === "flutterwave_secret_missing") {
+    out.reason = "payment_provider_unavailable";
+    out.reason_code = out.reason_code || "flutterwave_secret_not_in_runtime";
+    out.message =
+      out.message ||
+      "Automated bank transfer is temporarily unavailable. Please use card payment or try again later.";
+    out.user_message = out.user_message || out.message;
+  }
+  return out;
 }
 
 function flutterwaveWebhookDedupeKey(transactionId, txRef) {
@@ -943,8 +1009,42 @@ async function registerBankTransferPayment(data, context, db) {
   const riderId = normUid(context.auth.uid);
   const rideId = normUid(data?.rideId ?? data?.ride_id);
   const deliveryId = normUid(data?.deliveryId ?? data?.delivery_id);
+
   if ((rideId && deliveryId) || (!rideId && !deliveryId)) {
     return { success: false, reason: "invalid_input" };
+  }
+
+  const secretProbe = flutterwaveSecretBindingDebug();
+  const secret = String(flutterwaveSecretForVerify() || "").trim();
+  logger.info("registerBankTransferPayment_enter", {
+    callable: "registerBankTransferPayment",
+    uid: riderId,
+    ride_id: rideId || null,
+    delivery_id: deliveryId || null,
+    secret_exists: secret.length > 0,
+    secret_len: secret.length,
+    secret_binding: secretProbe,
+    provider: "flutterwave_va",
+  });
+
+  if (!secret) {
+    logger.error("registerBankTransferPayment_blocked", {
+      callable: "registerBankTransferPayment",
+      uid: riderId,
+      ride_id: rideId || null,
+      delivery_id: deliveryId || null,
+      secret_exists: false,
+      secret_binding: secretProbe,
+      reason_code: "flutterwave_secret_not_in_runtime",
+      provider: "flutterwave_va",
+    });
+    return {
+      success: false,
+      reason: "payment_provider_unavailable",
+      reason_code: "flutterwave_secret_not_in_runtime",
+      message:
+        "Automated bank transfer is temporarily unavailable. Please use card payment or try again later.",
+    };
   }
 
   const fs = admin.firestore();
@@ -1035,6 +1135,8 @@ async function registerBankTransferPayment(data, context, db) {
           expMs > nowMs()
         ) {
           await syncRideTrackPublic(db, rideId);
+          const freshVaRide = (await db.ref(`ride_requests/${rideId}`).get()).val();
+          await fanOutDriverOffersIfEligible(db, rideId, freshVaRide || ride);
           const cur = Number(ptExisting.amount ?? ptExisting.total_ngn ?? 0) || 0;
           const curCur = String(ptExisting.currency ?? "NGN").trim().toUpperCase() || "NGN";
           return {
@@ -1068,6 +1170,9 @@ async function registerBankTransferPayment(data, context, db) {
       return { success: false, reason: t.reason };
     }
 
+    const etaMinutes =
+      Number(ride.eta_minutes ?? ride.estimated_duration_min ?? ride.duration_min ?? 0) ||
+      null;
     const created = await bankTransferVa.createRiderBankVaIntent({
       db,
       fs,
@@ -1082,9 +1187,19 @@ async function registerBankTransferPayment(data, context, db) {
       firstName,
       lastName,
       narration: `Ride ${rideId}`,
+      etaMinutes,
     });
     if (!created.success) {
-      return created;
+      await releaseOpenRideForBankTransferFailure(db, rideId, {
+        cancelReason: "payment_failed",
+        paymentStatus: "failed",
+      });
+      return registerBankTransferVaFailureResponse(created, {
+        riderId,
+        flow: "ride_payment",
+        rideId,
+        deliveryId: null,
+      });
     }
 
     const now = nowMs();
@@ -1095,8 +1210,13 @@ async function registerBankTransferPayment(data, context, db) {
       payment_status: "pending_transfer",
       bank_transfer_automated: true,
       total_ngn: t.totalNgn,
+      va_reserved_at_ms: now,
+      va_payment_countdown_active: false,
+      va_expires_at_ms: null,
       updated_at: now,
     });
+    const freshRide = (await db.ref(`ride_requests/${rideId}`).get()).val();
+    await fanOutDriverOffersIfEligible(db, rideId, freshRide || ride);
     await syncRideTrackPublic(db, rideId);
     return {
       success: true,
@@ -1106,7 +1226,9 @@ async function registerBankTransferPayment(data, context, db) {
       amount: created.amount,
       total_ngn: created.total_ngn,
       currency: created.currency,
-      expires_at_ms: created.expires_at_ms,
+      expires_at_ms: null,
+      va_payment_countdown_active: false,
+      va_reserved_at_ms: now,
       bank_name: created.bank_name,
       account_name: created.account_name,
       account_number: created.account_number,
@@ -1205,6 +1327,8 @@ async function registerBankTransferPayment(data, context, db) {
     return { success: false, reason: t2.reason };
   }
 
+  const etaMinutes =
+    Number(del.eta_minutes ?? del.estimated_duration_min ?? 0) || null;
   const created = await bankTransferVa.createRiderBankVaIntent({
     db,
     fs,
@@ -1219,9 +1343,15 @@ async function registerBankTransferPayment(data, context, db) {
     firstName,
     lastName,
     narration: `Dispatch ${deliveryId}`,
+    etaMinutes,
   });
   if (!created.success) {
-    return created;
+    return registerBankTransferVaFailureResponse(created, {
+      riderId,
+      flow: "dispatch_payment",
+      rideId: null,
+      deliveryId,
+    });
   }
 
   const now2 = nowMs();
@@ -1356,6 +1486,22 @@ async function verifyFlutterwavePayment(data, context, db) {
     if (rideId) {
       await syncRideTrackPublic(db, rideId);
     }
+    logger.warn("verifyFlutterwavePayment_failed", {
+      callable: "verifyFlutterwavePayment",
+      uid,
+      ride_id: rideId || null,
+      delivery_id: deliveryId || null,
+      reference,
+      reason: v.reason || "verification_failed",
+      provider_payload_snippet: safeJsonForLog(v.payload, 4000),
+    });
+    payDiag.recordVerifyFailure({
+      uid,
+      ride_id: rideId || null,
+      delivery_id: deliveryId || null,
+      reference,
+      reason: v.reason || "verification_failed",
+    });
     return { success: false, reason: v.reason || "verification_failed" };
   }
   await persistVerifiedFlutterwaveCharge(db, {
@@ -1478,6 +1624,11 @@ async function handleFlutterwaveWebhook(req, res, db) {
   }
 
   console.log("WEBHOOK_HASH_OK");
+  try {
+    payDiag.touchWebhookReceived();
+  } catch (_) {
+    /* ignore */
+  }
 
   if (body?.event === "test") {
     console.log("WEBHOOK_TEST_MODE");
@@ -1633,6 +1784,138 @@ async function handleFlutterwaveWebhook(req, res, db) {
         /* ignore */
       }
       console.log("MERCHANT_TOPUP_APPLY_FAIL", payTidMerchant, String(err?.message || err));
+      res.status(500).send("apply-error");
+      return;
+    }
+  }
+
+  const driverPurpose =
+    pt && typeof pt === "object" ? String(pt.purpose || "").trim() : "";
+  if (
+    driverPurpose === driverFlutterwavePayments.PURPOSE_SUBSCRIPTION ||
+    driverPurpose === driverFlutterwavePayments.PURPOSE_WALLET
+  ) {
+    const expectedCurrency = "NGN";
+    const refForVerify = String(txRef || "").trim();
+    const minAmt = Number(pt.amount ?? 0);
+    const expectOpts = {
+      expectedTxRef: refForVerify || undefined,
+      expectedCurrency,
+    };
+    if (Number.isFinite(minAmt) && minAmt > 0) {
+      expectOpts.minAmount = minAmt;
+    }
+    const vDriver = await verifyFlutterwavePaymentStrict({
+      transactionId,
+      txRef,
+      expect: expectOpts,
+    });
+    if (!vDriver.ok) {
+      console.log(
+        "DRIVER_FW_VERIFY_FAIL",
+        transactionId || txRef,
+        vDriver.reason || "",
+      );
+      res.status(200).send("verify-failed");
+      return;
+    }
+    if (String(vDriver.currency || hookCurrency || "").trim().toUpperCase() !== "NGN") {
+      res.status(200).send("verify-currency-fail");
+      return;
+    }
+    const payTidDriver = String(vDriver.flwTransactionId || transactionId || "").trim();
+    if (!payTidDriver) {
+      res.status(200).send("ignored-no-pay-id");
+      return;
+    }
+    const claimRefDriver = db.ref(`webhook_applied/flutterwave/${payTidDriver}`);
+    const trDriver = await claimRefDriver.transaction((cur) =>
+      nextFlutterwavePayTidSettlementPayload(cur, {
+        applied_at: nowMs(),
+        purpose: driverPurpose,
+      }),
+    );
+    if (!trDriver.committed) {
+      console.log("DRIVER_FW_DUPLICATE", payTidDriver);
+      res.status(200).send("ok-duplicate");
+      return;
+    }
+    try {
+      const fsDriver = admin.firestore();
+      const refFinal = String(vDriver.tx_ref || txRef || "").trim();
+
+      let lateDriver = { mode: "ok" };
+      if (String(pt.provider || "").trim() === "flutterwave_va") {
+        lateDriver = await bankTransferVa.evaluateVaIntentExpiryForSettlement({
+          fs: fsDriver,
+          txRef: refFinal,
+          webhookLabel: event,
+        });
+      }
+      if (lateDriver.mode === "pending_review") {
+        await bankTransferVa.applyVaLateTransferPendingReview(db, fsDriver, {
+          pt,
+          payTid: payTidDriver,
+          rideId: null,
+          deliveryId: null,
+          webhookBody: body,
+        });
+        if (webhookDedupeKey) {
+          await db.ref(`webhook_applied/flutterwave_webhook/${webhookDedupeKey}`).set({
+            applied_at: nowMs(),
+            flutterwave_transaction_id: payTidDriver,
+            tx_ref: refFinal || null,
+            purpose: `${driverPurpose}_late_review`,
+          });
+        }
+        console.log("DRIVER_FW_LATE_REVIEW", payTidDriver);
+        res.status(200).send("ok-late-pending-review");
+        return;
+      }
+
+      let fin;
+      if (driverPurpose === driverFlutterwavePayments.PURPOSE_SUBSCRIPTION) {
+        fin = await driverFlutterwavePayments.finalizeDriverSubscriptionPaymentVerified(
+          db,
+          fsDriver,
+          {
+            payTid: payTidDriver,
+            txRef: refFinal,
+            verifiedAmount: vDriver.amount,
+            currency: vDriver.currency || expectedCurrency,
+            webhookBody: body,
+          },
+        );
+      } else {
+        fin = await driverFlutterwavePayments.finalizeDriverWalletTopUpVerified(db, fsDriver, {
+          payTid: payTidDriver,
+          txRef: refFinal,
+          verifiedAmount: vDriver.amount,
+          currency: vDriver.currency || expectedCurrency,
+          webhookBody: body,
+        });
+      }
+      if (!fin.success) {
+        throw new Error(fin.reason || "finalize_failed");
+      }
+      if (webhookDedupeKey) {
+        await db.ref(`webhook_applied/flutterwave_webhook/${webhookDedupeKey}`).set({
+          applied_at: nowMs(),
+          flutterwave_transaction_id: payTidDriver,
+          tx_ref: String(vDriver.tx_ref || txRef || "").trim() || null,
+          purpose: driverPurpose,
+        });
+      }
+      console.log("DRIVER_FW_APPLIED", payTidDriver, driverPurpose);
+      res.status(200).send("ok");
+      return;
+    } catch (err) {
+      try {
+        await claimRefDriver.remove();
+      } catch (_) {
+        /* ignore */
+      }
+      console.log("DRIVER_FW_APPLY_FAIL", payTidDriver, String(err?.message || err));
       res.status(500).send("apply-error");
       return;
     }

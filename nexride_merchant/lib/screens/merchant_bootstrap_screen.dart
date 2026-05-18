@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../state/merchant_app_state.dart';
+import '../support/app_crash_guard.dart';
 import '../utils/nx_callable_messages.dart';
 import 'login_screen.dart';
 import 'merchant_complete_application_screen.dart';
@@ -25,11 +26,24 @@ class _MerchantBootstrapScreenState extends State<MerchantBootstrapScreen> {
   @override
   void initState() {
     super.initState();
-    _sub = FirebaseAuth.instance.authStateChanges().listen(_onAuthUserChanged);
+    startupStep('merchant_bootstrap_init');
+    _sub = FirebaseAuth.instance.authStateChanges().listen(
+      _onAuthUserChanged,
+      onError: (Object error, StackTrace stackTrace) {
+        startupError('auth_state_stream', error);
+        debugPrintStack(
+          label: 'STARTUP_ERROR auth_state_stream',
+          stackTrace: stackTrace,
+        );
+      },
+    );
   }
 
   void _onAuthUserChanged(User? user) {
     if (!mounted) return;
+    if (user != null) {
+      startupStep('auth_restored', fields: {'uid': user.uid});
+    }
     final state = context.read<MerchantAppState>();
     state.attachAuth(user);
     if (user != null) {
@@ -38,8 +52,18 @@ class _MerchantBootstrapScreenState extends State<MerchantBootstrapScreen> {
   }
 
   Future<void> _refreshMerchantAfterAuth(MerchantAppState state) async {
-    await state.refreshMerchant();
-    if (!mounted) return;
+    try {
+      startupStep('merchant_profile_load_start');
+      await state.refreshMerchant();
+      if (!mounted) return;
+      startupStep('merchant_profile_load_done');
+    } catch (error, stackTrace) {
+      startupError('merchant_profile_load', error);
+      debugPrintStack(
+        label: 'STARTUP_ERROR merchant_profile_load',
+        stackTrace: stackTrace,
+      );
+    }
   }
 
   @override

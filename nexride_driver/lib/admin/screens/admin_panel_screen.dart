@@ -22,6 +22,8 @@ import '../widgets/admin_components.dart';
 import '../widgets/admin_driver_drawer_tabs.dart';
 import '../widgets/admin_entity_drawer.dart';
 import '../widgets/admin_entity_drawer_controller.dart';
+import '../widgets/admin_delivery_chat_transcript_sheet.dart';
+import '../widgets/admin_health_drilldown_nav.dart';
 import '../widgets/admin_permission_gate.dart';
 import '../widgets/admin_shell.dart';
 import 'admin_live_operations_screen.dart';
@@ -1338,6 +1340,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   ),
               AdminSection.systemHealth => AdminSystemHealthScreen(
                     dataService: _dataService,
+                    onDrilldownNavigate: _onHealthDrilldownNavigate,
                   ),
               AdminSection.paymentIntents => AdminPaymentIntentsScreen(
                     dataService: _dataService,
@@ -1607,6 +1610,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   ),
               AdminSection.systemHealth => AdminSystemHealthScreen(
                     dataService: _dataService,
+                    onDrilldownNavigate: _onHealthDrilldownNavigate,
                   ),
               AdminSection.paymentIntents => AdminPaymentIntentsScreen(
                     dataService: _dataService,
@@ -5305,6 +5309,200 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       return;
     }
     await _showDriverDialog(row, initialTabId: link.tab, syncUrl: false);
+  }
+
+  Future<void> _onHealthDrilldownNavigate(
+    String action,
+    Map<String, dynamic> row,
+  ) async {
+    final Map<String, dynamic> fields = row['fields'] is Map
+        ? Map<String, dynamic>.from(row['fields'] as Map)
+        : <String, dynamic>{};
+    final String entityId = '${row['entity_id'] ?? ''}'.trim();
+
+    switch (action) {
+      case 'open_trip':
+        _handleSectionSelected(AdminSection.trips);
+        final String tripId = _firstNonEmptyAdminText(<dynamic>[
+          fields['ride_id'],
+          fields['delivery_id'],
+          row['entity_id'],
+        ]);
+        if (tripId.isNotEmpty && mounted) {
+          await AdminHealthDrilldownNav.openTripDetail(
+            context,
+            _dataService,
+            tripId,
+          );
+        }
+        return;
+      case 'open_driver_profile':
+      case 'view_location_mode':
+      case 'inspect_driver_offer_queue':
+        _handleSectionSelected(AdminSection.drivers);
+        final String driverId = _firstNonEmptyAdminText(<dynamic>[
+          fields['driver_id'],
+          row['entity_id'],
+        ]);
+        if (driverId.isEmpty) {
+          return;
+        }
+        await _openDriverDrawerForDeepLink(
+          AdminDriverDeepLink(driverId: driverId, tab: 'overview'),
+        );
+        if (action != 'open_driver_profile' && mounted) {
+          await AdminHealthDrilldownNav.showRecordSheet(
+            context: context,
+            title: 'Driver $driverId',
+            fields: fields,
+          );
+        }
+        return;
+      case 'open_rider_profile':
+        _handleSectionSelected(AdminSection.riders);
+        final String riderId = _firstNonEmptyAdminText(<dynamic>[
+          fields['rider_id'],
+          fields['customer_id'],
+          row['entity_id'],
+        ]);
+        if (riderId.isEmpty || !mounted) {
+          return;
+        }
+        AdminRiderRecord? rider;
+        for (final AdminRiderRecord r in _ridersOnly ?? const <AdminRiderRecord>[]) {
+          if (r.id == riderId) {
+            rider = r;
+            break;
+          }
+        }
+        await _showRiderDialog(rider ?? AdminHealthDrilldownNav.minimalRider(riderId));
+        return;
+      case 'open_payment_intent':
+        _handleSectionSelected(AdminSection.paymentIntents);
+        if (mounted) {
+          await AdminHealthDrilldownNav.showRecordSheet(
+            context: context,
+            title: 'Payment intent',
+            fields: fields,
+          );
+        }
+        return;
+      case 'open_withdrawals':
+        _handleSectionSelected(AdminSection.withdrawals);
+        if (mounted) {
+          await AdminHealthDrilldownNav.showRecordSheet(
+            context: context,
+            title: 'Withdrawal ${entityId.isEmpty ? '' : entityId}',
+            fields: fields,
+          );
+        }
+        return;
+      case 'open_support':
+        _handleSectionSelected(AdminSection.support);
+        final String ticketId = _firstNonEmptyAdminText(<dynamic>[
+          fields['ticket_id'],
+          fields['support_ticket_id'],
+          row['entity_id'],
+        ]);
+        if (ticketId.isNotEmpty) {
+          await _showSupportTicketAdminDetail(
+            AdminHealthDrilldownNav.minimalSupportTicket(ticketId),
+          );
+        } else {
+          final String deliveryForTicket = _firstNonEmptyAdminText(<dynamic>[
+            fields['delivery_id'],
+            row['entity_id'],
+          ]);
+          if (deliveryForTicket.isNotEmpty && mounted) {
+            await _showSupportTicketAdminDetail(
+              AdminHealthDrilldownNav.minimalSupportTicket(
+                'delivery_report__${deliveryForTicket}__pending',
+              ),
+            );
+          }
+        }
+        return;
+      case 'open_delivery_chat':
+        final String deliveryChatId = _firstNonEmptyAdminText(<dynamic>[
+          fields['delivery_id'],
+          row['entity_id'],
+        ]);
+        if (deliveryChatId.isEmpty || !mounted) {
+          return;
+        }
+        await showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          builder: (ctx) => SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.75,
+            child: AdminDeliveryChatTranscriptSheet(deliveryId: deliveryChatId),
+          ),
+        );
+        return;
+      case 'open_verification':
+        _handleSectionSelected(AdminSection.verification);
+        if (mounted) {
+          await AdminHealthDrilldownNav.showRecordSheet(
+            context: context,
+            title: 'Verification',
+            fields: fields,
+          );
+        }
+        return;
+      case 'open_merchant_profile':
+        _handleSectionSelected(AdminSection.merchants);
+        if (mounted) {
+          await AdminHealthDrilldownNav.showRecordSheet(
+            context: context,
+            title: 'Merchant',
+            fields: fields,
+          );
+        }
+        return;
+      case 'open_payment_diagnostics':
+        _handleSectionSelected(AdminSection.finance);
+        if (mounted) {
+          await AdminHealthDrilldownNav.showRecordSheet(
+            context: context,
+            title: 'Payment diagnostics',
+            fields: fields,
+          );
+        }
+        return;
+      case 'seed_rollout_regions':
+        _handleSectionSelected(AdminSection.regions);
+        return;
+      case 'enable_disable_city':
+      case 'edit_dispatch_market':
+        _handleSectionSelected(AdminSection.serviceAreas);
+        if (mounted) {
+          await AdminHealthDrilldownNav.showRecordSheet(
+            context: context,
+            title: 'Service area',
+            fields: fields,
+          );
+        }
+        return;
+      case 'cancel_stale_delivery':
+        _handleSectionSelected(AdminSection.trips);
+        return;
+      default:
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Navigation not implemented: $action')),
+          );
+        }
+    }
+  }
+
+  String _firstNonEmptyAdminText(List<dynamic> values) {
+    for (final dynamic v in values) {
+      final String s = '${v ?? ''}'.trim();
+      if (s.isNotEmpty) {
+        return s;
+      }
+    }
+    return '';
   }
 
   Future<AdminDriverRecord?> _resolveDriverForDrawer(String driverId) async {

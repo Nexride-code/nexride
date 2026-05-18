@@ -2,7 +2,7 @@ require("./params");
 const { onCall, onRequest } = require("firebase-functions/v2/https");
 const { monitorSubscriptionExpiry } = require("./subscription_expiry_jobs");
 const { sweepDispatchHealth } = require("./dispatch_maintenance_jobs");
-const { cleanExpiredDriverOffers } = require("./offer_cleanup_jobs");
+const productionCleanup = require("./production_cleanup_jobs");
 const admin = require("firebase-admin");
 const { verifyFlutterwavePaymentStrict } = require("./flutterwave_api");
 const { createWalletTransactionInternal } = require("./wallet_core");
@@ -20,7 +20,19 @@ const db = admin.database();
 
 exports.monitorSubscriptionExpiry = monitorSubscriptionExpiry;
 exports.sweepDispatchHealth = sweepDispatchHealth;
-exports.cleanExpiredDriverOffers = cleanExpiredDriverOffers;
+exports.cleanStaleDriverActivePointers = productionCleanup.cleanStaleDriverActivePointers;
+exports.cleanStaleSearchingRides = productionCleanup.cleanStaleSearchingRides;
+exports.cleanExpiredDriverOffers = productionCleanup.cleanExpiredDriverOffers;
+exports.cleanOrphanActiveTrips = productionCleanup.cleanOrphanActiveTrips;
+exports.cleanStaleDeliveryPointers = productionCleanup.cleanStaleDeliveryPointers;
+const dispatchBlockerRepair = require("./repair_driver_dispatch_blockers");
+exports.repairStuckMatchingAndDriverBlockers =
+  dispatchBlockerRepair.repairStuckMatchingAndDriverBlockers;
+const dispatchMatchingJobs = require("./dispatch_matching_jobs");
+exports.advanceStuckMatchingBatches = dispatchMatchingJobs.advanceStuckMatchingBatches;
+exports.sweepStaleOnlineDrivers = dispatchMatchingJobs.sweepStaleOnlineDrivers;
+const dispatchRecovery = require("./dispatch_engine/dispatch_recovery_engine");
+exports.dispatchWatchdog = dispatchRecovery.dispatchWatchdog;
 const { expireStaleVaPaymentIntents } = require("./va_intent_expiry_jobs");
 exports.expireStaleVaPaymentIntents = expireStaleVaPaymentIntents;
 
@@ -82,6 +94,21 @@ async function verifyPaymentInternal(reference, callerUid = "") {
     }
     const fs = admin.firestore();
     return merchantWallet.verifyAndFinalizeMerchantWalletTopUpForReference(db, fs, ref, {
+      callerUid: uid,
+    });
+  }
+
+  const driverPurpose = String(existing.purpose || "").trim();
+  if (
+    driverPurpose === driverFlutterwavePayments.PURPOSE_SUBSCRIPTION ||
+    driverPurpose === driverFlutterwavePayments.PURPOSE_WALLET
+  ) {
+    const uid = String(callerUid || "").trim();
+    if (!uid) {
+      return { success: false, reason: "unauthorized" };
+    }
+    const fs = admin.firestore();
+    return driverFlutterwavePayments.verifyAndFinalizeDriverPurposeForReference(db, fs, ref, driverPurpose, {
       callerUid: uid,
     });
   }
@@ -233,6 +260,15 @@ async function verifyPaymentInternal(reference, callerUid = "") {
 
 const rideCallOpts = { region: REGION };
 
+/** Low-resource profile for acceptRide-only deploys (min Cloud Run CPU reservation). */
+const acceptRideCallOpts = {
+  region: REGION,
+  memory: "256MiB",
+  timeoutSeconds: 60,
+  minInstances: 0,
+  maxInstances: 3,
+};
+
 exports.createRideRequest = onCall(rideCallOpts, async (request) =>
   ride.createRideRequest(request.data, callableContext(request), db),
 );
@@ -284,6 +320,7 @@ exports.backfillUserRolloutRegions = onCall(rideCallOpts, async (request) =>
 // --- Merchant Phase 1 (registration + admin review only; no orders/menus/wallets) ---
 const merchantCallables = require("./merchant/merchant_callables");
 const merchantWallet = require("./merchant/merchant_wallet");
+const driverFlutterwavePayments = require("./driver_flutterwave_payments");
 const nexrideOfficialBankConfig = require("./nexride_official_bank_config");
 exports.merchantRegister = onCall(rideCallOpts, async (request) =>
   merchantCallables.merchantRegister(request.data, callableContext(request), db),
@@ -376,12 +413,14 @@ exports.adminUpdateMerchantLocation = onCall(rideCallOpts, async (request) =>
 );
 
 // --- Merchant wallet / billing (Firestore wallet + RTDB withdrawals + Flutterwave) ---
-exports.merchantCreateBankTransferTopUp = onCall(rideCallOpts, async (request) =>
-  merchantWallet.merchantCreateBankTransferTopUp(
-    request.data,
-    callableContext(request),
-    db,
-  ),
+exports.merchantCreateBankTransferTopUp = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    merchantWallet.merchantCreateBankTransferTopUp(
+      request.data,
+      callableContext(request),
+      db,
+    ),
 );
 exports.merchantAttachBankTransferTopUpProof = onCall(rideCallOpts, async (request) =>
   merchantWallet.merchantAttachBankTransferTopUpProof(
@@ -399,6 +438,58 @@ exports.merchantStartWalletTopUpFlutterwave = onCall(
       db,
     ),
 );
+
+exports.driverStartSubscriptionFlutterwaveCard = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    driverFlutterwavePayments.driverStartSubscriptionFlutterwaveCard(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+exports.driverCreateSubscriptionFlutterwaveVa = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    driverFlutterwavePayments.driverCreateSubscriptionFlutterwaveVa(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+exports.driverPaySubscriptionFromWallet = onCall(rideCallOpts, async (request) =>
+  driverFlutterwavePayments.driverPaySubscriptionFromWallet(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.getDriverSubscriptionPricing = onCall(rideCallOpts, async (request) =>
+  driverFlutterwavePayments.getDriverSubscriptionPricing(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.driverStartWalletTopUpFlutterwaveCard = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    driverFlutterwavePayments.driverStartWalletTopUpFlutterwaveCard(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+exports.driverCreateWalletTopUpFlutterwaveVa = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    driverFlutterwavePayments.driverCreateWalletTopUpFlutterwaveVa(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+
 exports.merchantListWalletLedger = onCall(rideCallOpts, async (request) =>
   merchantWallet.merchantListWalletLedger(
     request.data,
@@ -583,6 +674,7 @@ exports.adminListRiderVerificationDocuments = onCall(rideCallOpts, async (reques
 const productionOps = require("./production_ops_callables");
 const liveOperationsDashboard = require("./live_operations_dashboard_callable");
 const productionHealth = require("./production_health_callable");
+const adminHealthDrilldown = require("./admin_health_drilldown");
 
 exports.adminAssignSupportTicket = onCall(rideCallOpts, async (request) =>
   productionOps.adminAssignSupportTicket(request.data, callableContext(request), db),
@@ -615,18 +707,118 @@ exports.adminGetLiveOperationsDashboard = onCall(rideCallOpts, async (request) =
     db,
   ),
 );
-exports.adminGetProductionHealthSnapshot = onCall(rideCallOpts, async (request) =>
-  productionHealth.adminGetProductionHealthSnapshot(
+exports.adminGetProductionHealthSnapshot = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    productionHealth.adminGetProductionHealthSnapshot(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+exports.adminListPaymentIntents = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListPaymentIntents(request.data, callableContext(request), db),
+);
+
+exports.adminGetPaymentDiagnostics = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    adminCallables.adminGetPaymentDiagnostics(request.data, callableContext(request), db),
+);
+exports.adminExpireStaleVaPaymentIntents = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminExpireStaleVaPaymentIntents(
     request.data,
     callableContext(request),
     db,
   ),
 );
-exports.adminListPaymentIntents = onCall(rideCallOpts, async (request) =>
-  adminCallables.adminListPaymentIntents(request.data, callableContext(request), db),
+exports.adminGetHealthDrilldown = onCall(rideCallOpts, async (request) =>
+  adminHealthDrilldown.adminGetHealthDrilldown(
+    request.data,
+    callableContext(request),
+    db,
+  ),
 );
-exports.adminExpireStaleVaPaymentIntents = onCall(rideCallOpts, async (request) =>
-  adminCallables.adminExpireStaleVaPaymentIntents(
+exports.adminRetryPaymentVerify = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    adminHealthDrilldown.adminRetryPaymentVerify(
+      request.data,
+      callableContext(request),
+      db,
+    ),
+);
+exports.adminExpirePaymentIntent = onCall(rideCallOpts, async (request) =>
+  adminHealthDrilldown.adminExpirePaymentIntent(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminRerunRideMatching = onCall(rideCallOpts, async (request) =>
+  adminHealthDrilldown.adminRerunRideMatching(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminCancelStaleRideSearch = onCall(rideCallOpts, async (request) =>
+  adminHealthDrilldown.adminCancelStaleRideSearch(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminClearDriverStaleActiveRide = onCall(rideCallOpts, async (request) =>
+  adminHealthDrilldown.adminClearDriverStaleActiveRide(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminForceClearDriverActivePointers = onCall(rideCallOpts, async (request) =>
+  adminHealthDrilldown.adminForceClearDriverActivePointers(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.repairDriverDispatchBlockers = onCall(rideCallOpts, async (request) =>
+  dispatchBlockerRepair.repairDriverDispatchBlockersCallable(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminRepairDispatchBlockers = onCall(rideCallOpts, async (request) =>
+  dispatchBlockerRepair.adminRepairDispatchBlockersForRide(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminExpireRideLeases = onCall(rideCallOpts, async (request) =>
+  dispatchRecovery.adminExpireRideLeases(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+const dispatchOrchestrator = require("./dispatch_engine/dispatch_orchestrator");
+exports.recordDriverOfferPopupAck = onCall(rideCallOpts, async (request) => {
+  const uid = normUid(request.auth?.uid);
+  if (!uid) return { success: false, reason: "unauthorized" };
+  return dispatchOrchestrator.recordDriverOfferPopupAck(db, uid, request.data || {});
+});
+exports.adminOrchestratorAction = onCall(rideCallOpts, async (request) =>
+  dispatchOrchestrator.adminOrchestratorAction(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminRerunDeliveryMatching = onCall(rideCallOpts, async (request) =>
+  adminHealthDrilldown.adminRerunDeliveryMatching(
     request.data,
     callableContext(request),
     db,
@@ -737,7 +929,7 @@ exports.syncIdentityVerificationSubmission = onCall(rideCallOpts, async (request
 );
 
 // Single client-facing accept entrypoint: [acceptRide] → ride.acceptRideRequest (implementation).
-exports.acceptRide = onCall(rideCallOpts, async (request) =>
+exports.acceptRide = onCall(acceptRideCallOpts, async (request) =>
   ride.acceptRideRequest(request.data, callableContext(request), db),
 );
 
@@ -861,6 +1053,14 @@ exports.acceptDeliveryRequest = onCall(rideCallOpts, async (request) =>
 
 exports.updateDeliveryState = onCall(rideCallOpts, async (request) =>
   delivery.updateDeliveryState(request.data, callableContext(request), db),
+);
+
+exports.createDeliverySupportTicket = onCall(rideCallOpts, async (request) =>
+  delivery.createDeliverySupportTicket(request.data, callableContext(request), db),
+);
+const deliveryChatTriggers = require("./delivery_chat_triggers");
+exports.notifyDeliveryChatMessage = onCall(rideCallOpts, async (request) =>
+  deliveryChatTriggers.notifyDeliveryChatMessage(request.data, callableContext(request), db),
 );
 
 exports.expireDeliveryRequest = onCall(rideCallOpts, async (request) =>
@@ -1179,12 +1379,14 @@ exports.verifyFlutterwavePayment = onCall(
     ),
 );
 
-exports.registerBankTransferPayment = onCall(rideCallOpts, async (request) =>
-  paymentFlow.registerBankTransferPayment(
-    request.data,
-    callableContext(request),
-    db,
-  ),
+exports.registerBankTransferPayment = onCall(
+  { region: REGION, secrets: [flutterwaveSecretKey] },
+  async (request) =>
+    paymentFlow.registerBankTransferPayment(
+      request.data,
+      callableContext(request),
+      db,
+    ),
 );
 
 exports.getNexrideOfficialBankAccount = onCall(rideCallOpts, async (request) =>

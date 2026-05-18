@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -239,6 +240,9 @@ class _WalletScreenState extends State<WalletScreen> {
       });
       if (!mounted) return;
       if (res['success'] != true) {
+        if (kDebugMode) {
+          debugPrint('[MerchantWallet] merchantCreateBankTransferTopUp failed res=$res');
+        }
         final reason = '${res['reason'] ?? ''}'.trim();
         final friendly = reason == 'official_bank_not_configured'
             ? 'Bank transfer details are not configured yet. Please contact NexRide support.'
@@ -275,6 +279,7 @@ class _WalletScreenState extends State<WalletScreen> {
     final expiresMs = res['expires_at_ms'] is num ? (res['expires_at_ms'] as num).toInt() : 0;
     final bank = res['bank'] is Map ? Map<String, dynamic>.from(res['bank'] as Map) : <String, dynamic>{};
     final prefix = '${res['proof_upload_prefix'] ?? ''}'.trim();
+    final automatedVa = prefix.isEmpty;
 
     await showModalBottomSheet<void>(
       context: context,
@@ -292,7 +297,10 @@ class _WalletScreenState extends State<WalletScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Text('Bank transfer top-up', style: Theme.of(ctx).textTheme.titleLarge),
+                Text(
+                  automatedVa ? 'Flutterwave virtual account' : 'Bank transfer top-up',
+                  style: Theme.of(ctx).textTheme.titleLarge,
+                ),
                 const SizedBox(height: 8),
                 Text('Request ID: $requestId'),
                 if (expiresMs > 0)
@@ -306,37 +314,60 @@ class _WalletScreenState extends State<WalletScreen> {
                 Text('Account number: ${bank['account_number'] ?? '—'}'),
                 const SizedBox(height: 8),
                 SelectableText('Narration / reference: $narration'),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton.icon(
-                    onPressed: narration.isEmpty
-                        ? null
-                        : () async {
-                            await Clipboard.setData(ClipboardData(text: narration));
-                            if (ctx.mounted) {
-                              ScaffoldMessenger.of(ctx).showSnackBar(
-                                const SnackBar(content: Text('Copied narration')),
+                Row(
+                  children: <Widget>[
+                    TextButton.icon(
+                      onPressed: () async {
+                        final acct =
+                            '${bank['account_number'] ?? ''}'.trim();
+                        if (acct.isEmpty) return;
+                        await Clipboard.setData(ClipboardData(text: acct));
+                        if (ctx.mounted) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(
+                            const SnackBar(content: Text('Account number copied')),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.copy, size: 18),
+                      label: const Text('Copy account'),
+                    ),
+                    TextButton.icon(
+                      onPressed: narration.isEmpty
+                          ? null
+                          : () async {
+                              await Clipboard.setData(
+                                ClipboardData(text: narration),
                               );
-                            }
-                          },
-                    icon: const Icon(Icons.copy, size: 18),
-                    label: const Text('Copy narration'),
-                  ),
+                              if (ctx.mounted) {
+                                ScaffoldMessenger.of(ctx).showSnackBar(
+                                  const SnackBar(content: Text('Reference copied')),
+                                );
+                              }
+                            },
+                      icon: const Icon(Icons.copy, size: 18),
+                      label: const Text('Copy reference'),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'Transfer exactly ₦${res['amount_ngn'] ?? ''} and include the narration above. '
-                  'Then upload a screenshot or PDF of the transfer.',
+                  automatedVa
+                      ? 'Transfer exactly ₦${res['amount_ngn'] ?? ''} into this virtual account. '
+                          'Your wallet is credited automatically when Flutterwave confirms the payment — no proof upload.'
+                      : 'Transfer exactly ₦${res['amount_ngn'] ?? ''} and include the narration above. '
+                          'Then upload a screenshot or PDF of the transfer.',
                   style: Theme.of(ctx).textTheme.bodyMedium,
                 ),
-                const SizedBox(height: 12),
-                FilledButton.tonalIcon(
-                  onPressed: prefix.isEmpty || requestId.isEmpty
-                      ? null
-                      : () => _pickAndUploadProof(ctx, state, requestId, prefix),
-                  icon: const Icon(Icons.upload_file),
-                  label: const Text('Upload payment proof'),
-                ),
+                if (!automatedVa) ...<Widget>[
+                  const SizedBox(height: 12),
+                  FilledButton.tonalIcon(
+                    onPressed: prefix.isEmpty || requestId.isEmpty
+                        ? null
+                        : () => _pickAndUploadProof(ctx, state, requestId, prefix),
+                    icon: const Icon(Icons.upload_file),
+                    label: const Text('Upload payment proof'),
+                  ),
+                ],
               ],
             ),
           ),
@@ -501,18 +532,17 @@ class _WalletScreenState extends State<WalletScreen> {
                   ],
                   const SizedBox(height: 24),
                   Text(
-                    'Manual bank transfer',
+                    'Bank transfer (Flutterwave virtual account)',
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Creates a pending request (30 minutes). Official NexRide account details are returned from the server. '
-                    'Wallet is credited only after admin approval.',
+                    'Generates a one-time virtual account. Your wallet credits automatically when Flutterwave confirms the transfer — no proof upload for automated VA.',
                   ),
                   const SizedBox(height: 12),
                   FilledButton.tonal(
                     onPressed: state.isApproved && !_busy ? () => _createBankTopUp(state) : null,
-                    child: const Text('Start manual bank transfer'),
+                    child: const Text('Generate virtual account'),
                   ),
                   if (!state.isApproved) ...<Widget>[
                     const SizedBox(height: 24),

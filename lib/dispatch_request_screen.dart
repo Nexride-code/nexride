@@ -18,7 +18,11 @@ import 'config/rider_app_config.dart';
 import 'config/rtdb_ride_request_contract.dart';
 import 'services/rider_delivery_cloud_functions_service.dart';
 import 'services/rider_ride_cloud_functions_service.dart'
-    show RiderRideCloudFunctionsService, riderRideCallableReason, riderRideCallableSucceeded;
+    show
+        RiderRideCloudFunctionsService,
+        riderRideCallableReason,
+        riderRideCallableSucceeded,
+        riderRideCallableUserMessage;
 import 'services/rider_rollout_profile_store.dart';
 import 'config/rollout_copy.dart';
 import 'models/rollout_delivery_region_model.dart';
@@ -29,12 +33,20 @@ import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'services/trip_safety_service.dart';
 import 'service_type.dart';
+import 'trip_sync/delivery_state_machine.dart';
 import 'support/rider_backend_pricing.dart';
 import 'support/rider_fare_support.dart';
 import 'support/friendly_firebase_errors.dart';
 import 'support/rtdb_flow_debug_log.dart';
 import 'support/startup_rtdb_support.dart';
+import 'trip_sync/delivery_state_machine.dart';
 import 'trip_sync/trip_state_machine.dart';
+import 'services/delivery_chat_service.dart';
+import 'services/delivery_report_service.dart';
+import 'services/call_service.dart';
+import 'widgets/delivery_chat_sheet.dart';
+import 'widgets/delivery_live_tracking_panel.dart';
+import 'support/delivery_chat_support.dart';
 import 'services/rider_compliance_service.dart';
 import 'widgets/rider_identity_verification_banner.dart';
 import 'widgets/rider_flutterwave_va_payment_sheet.dart';
@@ -96,6 +108,13 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       TripSafetyTelemetryService();
 
   StreamSubscription<rtdb.DatabaseEvent>? _activeRequestSubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _deliveryChatSubscription;
+  final ValueNotifier<List<DeliveryChatMessage>> _deliveryChatMessages =
+      ValueNotifier<List<DeliveryChatMessage>>(<DeliveryChatMessage>[]);
+  final DeliveryChatService _deliveryChatService = DeliveryChatService();
+  final DeliveryReportService _deliveryReportService = DeliveryReportService();
+  final CallService _callService = CallService();
+  bool _isStartingDeliveryCall = false;
   String? _activeRequestId;
   Map<String, dynamic>? _activeRequest;
   RiderBackendPricingQuote? _dispatchFarePreview;
@@ -106,11 +125,13 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   bool _rolloutCatalogLoading = false;
   bool _rolloutCatalogHydrated = false;
   Object? _rolloutCatalogError;
+  String? _rolloutCatalogSource;
   String? _rolloutRegionId;
   String? _rolloutCityId;
   String? _rolloutDispatchMarketId;
   bool _rolloutSavedAreaDisabled = false;
   int _rolloutCatalogLoadSeq = 0;
+  bool _rolloutBannerDismissed = false;
   bool _loading = true;
   bool _submitting = false;
   /// Hosted Flutterwave card link vs Flutterwave virtual-account bank transfer.
@@ -174,32 +195,40 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       setState(() {
         _rolloutCatalogLoading = true;
         _rolloutCatalogError = null;
+        _rolloutBannerDismissed = false;
       });
     }
     List<RolloutDeliveryRegionModel> regions = const <RolloutDeliveryRegionModel>[];
     RolloutCatalogSelection selection = const RolloutCatalogSelection();
     Object? loadError;
+    String? catalogSource;
     try {
-      final raw = await _rideCloud
-          .listDeliveryRegions()
-          .timeout(kRolloutCatalogCallableTimeout);
-      if (raw['success'] != true) {
-        throw StateError('listDeliveryRegions_failed');
-      }
-      regions = parseRolloutRegionsResponse(raw);
-      Map<String, String>? saved;
-      try {
-        saved = await RiderRolloutProfileStore.instance.fetchSelection(uid);
-      } catch (_) {
-        saved = null;
-      }
-      selection = mergeSavedRolloutWithCatalog(
-        regions: regions,
-        saved: saved,
-        regionKey: RiderRolloutProfileStore.kRegionId,
-        cityKey: RiderRolloutProfileStore.kCityId,
-        dispatchKey: RiderRolloutProfileStore.kDispatchMarketId,
-      );
+      await (() async {
+        final raw = await _rideCloud
+            .listDeliveryRegions(
+              riderSelectedRegionId: _rolloutRegionId?.trim(),
+              riderSelectedCityId: _rolloutCityId?.trim(),
+            )
+            .timeout(kRolloutCatalogCallableTimeout);
+        if (raw['success'] != true) {
+          throw StateError('listDeliveryRegions_failed');
+        }
+        catalogSource = rolloutCatalogSourceFromResponse(Map<String, dynamic>.from(raw));
+        regions = parseRolloutRegionsWithEmergencyFallback(Map<String, dynamic>.from(raw));
+        Map<String, String>? saved;
+        try {
+          saved = await RiderRolloutProfileStore.instance.fetchSelection(uid);
+        } catch (_) {
+          saved = null;
+        }
+        selection = mergeSavedRolloutWithCatalog(
+          regions: regions,
+          saved: saved,
+          regionKey: RiderRolloutProfileStore.kRegionId,
+          cityKey: RiderRolloutProfileStore.kCityId,
+          dispatchKey: RiderRolloutProfileStore.kDispatchMarketId,
+        );
+      })().timeout(kRolloutCatalogLoadBudget);
     } catch (e) {
       loadError = e;
     } finally {
@@ -212,10 +241,13 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         _rolloutCatalogError = loadError;
         if (loadError == null) {
           _rolloutCatalog = regions;
+          _rolloutCatalogSource = catalogSource;
           _rolloutRegionId = selection.regionId;
           _rolloutCityId = selection.cityId;
           _rolloutDispatchMarketId = selection.dispatchMarketId;
           _rolloutSavedAreaDisabled = selection.savedAreaDisabled;
+        } else {
+          _rolloutCatalogSource = null;
         }
         return;
       }
@@ -225,6 +257,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         _rolloutCatalogError = loadError;
         if (loadError == null) {
           _rolloutCatalog = regions;
+          _rolloutCatalogSource = catalogSource;
           _rolloutRegionId = selection.regionId;
           _rolloutCityId = selection.cityId;
           _rolloutDispatchMarketId = selection.dispatchMarketId;
@@ -234,6 +267,8 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
               _rolloutDispatchMarketId,
             ).city;
           }
+        } else {
+          _rolloutCatalogSource = null;
         }
       });
     }
@@ -248,17 +283,22 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       regions: _rolloutCatalog,
       initialRegionId: _rolloutRegionId,
       initialCityId: _rolloutCityId,
+      catalogSource: _rolloutCatalogSource,
       onReloadCatalog: () async {
         final raw = await _rideCloud
-            .listDeliveryRegions()
-            .timeout(const Duration(seconds: 22));
+            .listDeliveryRegions(
+              riderSelectedRegionId: _rolloutRegionId?.trim(),
+              riderSelectedCityId: _rolloutCityId?.trim(),
+            )
+            .timeout(kRolloutCatalogCallableTimeout);
         if (raw['success'] != true) {
           throw StateError('listDeliveryRegions_failed');
         }
-        final regions = parseRolloutRegionsResponse(raw);
+        final regions = parseRolloutRegionsWithEmergencyFallback(Map<String, dynamic>.from(raw));
         if (mounted) {
           setState(() {
             _rolloutCatalog = regions;
+            _rolloutCatalogSource = rolloutCatalogSourceFromResponse(Map<String, dynamic>.from(raw));
             _rolloutCatalogError = null;
           });
         }
@@ -286,6 +326,11 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       }
       if (riderRideCallableSucceeded(vr)) {
         _showMessage('Service area saved.');
+        if (mounted) {
+          setState(() {
+            _rolloutBannerDismissed = true;
+          });
+        }
       } else {
         _showMessage(RolloutCopy.notAvailableInArea);
       }
@@ -304,6 +349,8 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   @override
   void dispose() {
     _activeRequestSubscription?.cancel();
+    _deliveryChatSubscription?.cancel();
+    _deliveryChatMessages.dispose();
     _pickupController.dispose();
     _dropoffController.dispose();
     _packageController.dispose();
@@ -1182,6 +1229,12 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             setState(() {
               _activeRequestId = requestId;
               _activeRequest = data;
+              if (data != null &&
+                  DeliveryStateMachine.snapshotShowsAssignedDriver(data)) {
+                _submitting = false;
+                _loading = false;
+                _startDeliveryChatListener(requestId);
+              }
             });
           },
           onError: (Object error) {
@@ -1367,6 +1420,11 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   }
 
   String _statusLabel(String status) {
+    if (_activeRequest != null && _activeRequest!.isNotEmpty) {
+      return DeliveryStateMachine.uiStatusLabel(
+        DeliveryStateMachine.canonicalStateFromSnapshot(_activeRequest),
+      );
+    }
     return riderServiceStatusLabel(RiderServiceType.dispatchDelivery, status);
   }
 
@@ -1631,7 +1689,9 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
           );
           if (bankReg['success'] != true) {
             debugPrint(
-              '[DispatchPayment] bank VA register failed raw=${riderRideCallableReason(bankReg)}',
+              '[DispatchPayment] bank VA register failed '
+              'userMsg=${riderRideCallableUserMessage(Map<String, dynamic>.from(bankReg))} '
+              'raw=$bankReg',
             );
             await _deliveryCloud.cancelDeliveryRequest(
               deliveryId: effectiveRequestId,
@@ -1922,9 +1982,130 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     );
   }
 
+  void _startDeliveryChatListener(String deliveryId) {
+    _deliveryChatSubscription?.cancel();
+    _deliveryChatSubscription = _deliveryChatService.startListener(
+      deliveryId: deliveryId,
+      onMessages: (messages) {
+        if (mounted) {
+          _deliveryChatMessages.value = messages;
+        }
+      },
+      onError: (error) {
+        debugPrint('[Dispatch] chat listener error: $error');
+      },
+    );
+  }
+
+  Future<void> _openDeliveryChat() async {
+    final deliveryId = _activeRequestId;
+    final user = FirebaseAuth.instance.currentUser;
+    if (deliveryId == null || user == null) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      builder: (ctx) {
+        return SizedBox(
+          height: MediaQuery.of(ctx).size.height * 0.75,
+          child: DeliveryChatSheet(
+            deliveryId: deliveryId,
+            currentUserId: user.uid,
+            messagesListenable: _deliveryChatMessages,
+            onSendMessage: (id, text) => _deliveryChatService.sendText(
+              deliveryId: id,
+              senderRole: 'customer',
+              text: text,
+            ),
+            onRetryMessage: (id, msg) => _deliveryChatService.sendText(
+              deliveryId: id,
+              senderRole: 'customer',
+              text: msg.text,
+              retryMessageId: msg.id,
+            ),
+            onStartVoiceCall: () => unawaited(_startDeliveryCall()),
+            showCallButton: DeliveryStateMachine.snapshotShowsAssignedDriver(
+              _activeRequest,
+            ),
+            isCallButtonEnabled: !_isStartingDeliveryCall,
+            isCallButtonBusy: _isStartingDeliveryCall,
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _startDeliveryCall() async {
+    final deliveryId = _activeRequestId;
+    final user = FirebaseAuth.instance.currentUser;
+    if (deliveryId == null || user == null || _isStartingDeliveryCall) {
+      return;
+    }
+    setState(() => _isStartingDeliveryCall = true);
+    try {
+      await _callService.prefetchAgoraToken(
+        channelId: deliveryId,
+        uid: user.uid,
+      );
+      final driverId =
+          DeliveryStateMachine.canonicalAssignedDriverId(_activeRequest);
+      if (driverId.isEmpty) {
+        _showMessage('Driver is not assigned yet.');
+        return;
+      }
+      await _callService.requestOutgoingVoiceCall(
+        rideId: deliveryId,
+        riderId: user.uid,
+        driverId: driverId,
+        startedBy: 'rider',
+      );
+    } catch (e) {
+      if (mounted) {
+        _showMessage('Call could not start: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isStartingDeliveryCall = false);
+      }
+    }
+  }
+
+  Future<void> _reportDeliveryIssue() async {
+    final deliveryId = _activeRequestId;
+    if (deliveryId == null) {
+      return;
+    }
+    try {
+      await _deliveryReportService.submitReport(
+        deliveryId: deliveryId,
+        reason: 'order_issue',
+        message: 'Customer reported an issue from dispatch screen.',
+        reporterRole: 'customer',
+        customerId: FirebaseAuth.instance.currentUser?.uid,
+        driverId: DeliveryStateMachine.canonicalAssignedDriverId(_activeRequest),
+      );
+      if (mounted) {
+        _showMessage('Report submitted. Support will follow up.');
+      }
+    } catch (e) {
+      if (mounted) {
+        _showMessage('Could not submit report: $e');
+      }
+    }
+  }
+
   Widget _buildActiveRequestCard() {
     final activeRequest = _activeRequest ?? <String, dynamic>{};
-    final status = activeRequest['status']?.toString() ?? 'searching';
+    final status = TripStateMachine.uiStatusFromSnapshot(activeRequest);
+    final deliveryCanon =
+        DeliveryStateMachine.canonicalStateFromSnapshot(activeRequest);
+    final assignedDriverId =
+        DeliveryStateMachine.canonicalAssignedDriverId(activeRequest);
     final driverName = activeRequest['driver_name']?.toString().trim() ?? '';
     final dispatchDetails = _asStringDynamicMap(
       activeRequest['dispatch_details'],
@@ -1984,6 +2165,27 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
               fontSize: 12,
               color: Colors.black.withValues(alpha: 0.55),
             ),
+          ),
+          const SizedBox(height: 16),
+          DeliveryLiveTrackingPanel(
+            deliveryData: activeRequest,
+            statusLabel: DeliveryStateMachine.uiStatusLabel(deliveryCanon),
+            driverName: driverName.isNotEmpty ? driverName : 'Driver',
+            driverRating: (activeRequest['rating'] is num)
+                ? (activeRequest['rating'] as num).toDouble()
+                : null,
+            vehicleLabel: activeRequest['car']?.toString() ?? '',
+            plate: activeRequest['plate']?.toString() ?? '',
+            pickupLabel: activeRequest['pickup_address']?.toString() ?? '',
+            dropoffLabel: activeRequest['destination_address']?.toString() ?? '',
+            etaMinutes: activeRequest['eta_minutes'] is num
+                ? (activeRequest['eta_minutes'] as num).toInt()
+                : null,
+            showChat: DeliveryStateMachine.isChatEligible(activeRequest),
+            showCall: assignedDriverId.isNotEmpty,
+            onOpenChat: _openDeliveryChat,
+            onCall: () => unawaited(_startDeliveryCall()),
+            onReport: _reportDeliveryIssue,
           ),
           const SizedBox(height: 16),
           Builder(
@@ -2162,6 +2364,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                     catalog: _rolloutCatalog,
                     selectionComplete: _rolloutSelectionComplete,
                     savedAreaDisabled: _rolloutSavedAreaDisabled,
+                    bannerDismissed: _rolloutBannerDismissed,
                   )) ...[
                     Material(
                       color: const Color(0xFFFFF2E0),
@@ -2173,11 +2376,9 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                           children: <Widget>[
                             InkWell(
                               borderRadius: BorderRadius.circular(8),
-                              onTap: _rolloutCatalogLoading
-                                  ? null
-                                  : () {
-                                      unawaited(_openRolloutSheet());
-                                    },
+                              onTap: () {
+                                unawaited(_openRolloutSheet());
+                              },
                               child: Row(
                                 children: <Widget>[
                                   Icon(
@@ -2206,6 +2407,17 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                                             fontSize: 13,
                                           ),
                                         ),
+                                        if (_rolloutCatalogLoading) ...<Widget>[
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            'You can open the picker, use GPS, or retry while the catalog loads.',
+                                            style: TextStyle(
+                                              color: Colors.brown.shade800,
+                                              fontSize: 12,
+                                              height: 1.25,
+                                            ),
+                                          ),
+                                        ],
                                         if (!_rolloutCatalogLoading &&
                                             _rolloutCatalogError == null) ...<Widget>[
                                           const SizedBox(height: 4),
@@ -2223,7 +2435,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                                         if (_rolloutCatalogError != null) ...<Widget>[
                                           const SizedBox(height: 4),
                                           Text(
-                                            'Tap this banner to retry.',
+                                            'Tap the banner or Retry. GPS is available in the picker.',
                                             style: TextStyle(
                                               color: Colors.brown.shade800,
                                               fontSize: 12,
@@ -2233,24 +2445,35 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                                       ],
                                     ),
                                   ),
-                                  if (!_rolloutCatalogLoading)
-                                    const Icon(
-                                      Icons.chevron_right,
-                                      color: Color(0xFFB57A2A),
-                                    ),
+                                  const Icon(
+                                    Icons.chevron_right,
+                                    color: Color(0xFFB57A2A),
+                                  ),
                                 ],
                               ),
                             ),
-                            Align(
-                              alignment: Alignment.centerRight,
-                              child: TextButton(
-                                onPressed: _rolloutCatalogLoading
-                                    ? null
-                                    : () {
-                                        unawaited(_openRolloutSheet());
-                                      },
-                                child: const Text('Choose service area'),
-                              ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: <Widget>[
+                                TextButton(
+                                  onPressed: () {
+                                    setState(() {
+                                      _rolloutBannerDismissed = true;
+                                    });
+                                  },
+                                  child: const Text('Dismiss'),
+                                ),
+                                TextButton(
+                                  onPressed: () {
+                                    unawaited(_openRolloutSheet());
+                                  },
+                                  child: Text(
+                                    _rolloutCatalogError != null
+                                        ? 'Retry catalog'
+                                        : 'Choose area',
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),

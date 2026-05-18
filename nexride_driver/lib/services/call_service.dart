@@ -732,8 +732,8 @@ class CallService {
       return _cachedToken;
     }
 
-    debugPrint('[CALL_TOKEN_FETCH_START] rideId=$rideId uid=$agoraUid');
-    debugPrint('[CALL_SERVICE] invoking generateAgoraToken rideId=$rideId');
+    debugPrint('RIDE_CALL_TOKEN_REQUEST rideId=$rideId uid=$agoraUid');
+    debugPrint('[CALL_SERVICE] invoking getRideCallRtcToken rideId=$rideId');
 
     Future<Map<String, dynamic>> requestToken({required bool force}) {
       return RideCloudFunctionsService()
@@ -789,12 +789,12 @@ class CallService {
         _cachedTokenUserId = normalizedUserId;
         _cachedToken = token;
 
-        debugPrint('[CALL_TOKEN_FETCH_OK] rideId=$rideId source=callable');
+        debugPrint('RIDE_CALL_TOKEN_SUCCESS rideId=$rideId source=callable');
         return token;
       }
 
       debugPrint(
-        '[CALL_TOKEN_FETCH_FAIL] rideId=$rideId source=callable '
+        'RIDE_CALL_TOKEN_FAIL rideId=$rideId source=callable '
         'reason=${responseMap['reason']} payload=$responseMap',
       );
     } catch (error) {

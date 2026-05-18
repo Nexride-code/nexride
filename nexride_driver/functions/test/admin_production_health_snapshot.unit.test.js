@@ -141,6 +141,11 @@ test("adminGetProductionHealthSnapshot returns bounded shape for super_admin", a
   assert.equal(snap.rider_payment_issues.rider_wallet_count, undefined);
   assert.equal(snap.rider_payment_issues.rider_withdrawal_count, undefined);
   assert.ok(Array.isArray(snap.cards));
+  assert.equal(typeof snap.payment_providers?.flutterwave_secret_configured, "boolean");
+  assert.equal(
+    snap.payment_providers?.registerBankTransferPayment_secret_ready,
+    snap.payment_providers?.flutterwave_secret_configured,
+  );
   assert.ok(snap.withdrawals && typeof snap.withdrawals.pending_driver === "number");
 });
 
@@ -262,6 +267,50 @@ test("rider payment diagnostics skip rows with no observable payment schema", as
   });
   const r = await _countRiderPaymentIssuesAt(db, asOf);
   assert.equal(r.failed_card_payments, 0);
+});
+
+test("rider payment diagnostics exclude active flutterwave VA pending_transfer from red total", async () => {
+  const asOf = 1_720_000_000_000;
+  const recentTs = asOf - 2 * 60 * 60 * 1000;
+  const db = makeRtdbPaymentScenarioDb({
+    "ride_requests|pending_transfer": {
+      a: {
+        payment_status: "pending_transfer",
+        payment_method: "bank_transfer",
+        bank_transfer_automated: true,
+        trip_state: "searching",
+        va_expires_at_ms: asOf + 60 * 60 * 1000,
+        updated_at: recentTs,
+        payment_reference: "tx_va",
+      },
+    },
+  });
+  const r = await _countRiderPaymentIssuesAt(db, asOf);
+  assert.equal(r.pending_va_awaiting_transfer, 1);
+  assert.equal(r.red_total, 0);
+  assert.equal(r.total, 0);
+  assert.equal(r.yellow_total, 1);
+});
+
+test("rider payment diagnostics count expired VA pending_transfer as red", async () => {
+  const asOf = 1_720_000_000_000;
+  const recentTs = asOf - 2 * 60 * 60 * 1000;
+  const db = makeRtdbPaymentScenarioDb({
+    "ride_requests|pending_transfer": {
+      a: {
+        payment_status: "pending_transfer",
+        payment_method: "bank_transfer",
+        bank_transfer_automated: true,
+        trip_state: "searching",
+        va_expires_at_ms: asOf - 1000,
+        updated_at: recentTs,
+        payment_reference: "tx_va_exp",
+      },
+    },
+  });
+  const r = await _countRiderPaymentIssuesAt(db, asOf);
+  assert.equal(r.expired_va_pending_transfer, 1);
+  assert.equal(r.red_total, 1);
 });
 
 test("rider payment diagnostics count recent pending card intents", async () => {

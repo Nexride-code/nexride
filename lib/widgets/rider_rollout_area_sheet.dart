@@ -13,12 +13,15 @@ class RiderRolloutAreaSheet extends StatefulWidget {
     this.initialRegionId,
     this.initialCityId,
     this.onReloadCatalog,
+    this.catalogSource,
   });
 
   final List<RolloutDeliveryRegionModel> regions;
   final String? initialRegionId;
   final String? initialCityId;
   final Future<List<RolloutDeliveryRegionModel>> Function()? onReloadCatalog;
+  /// Backend `listDeliveryRegions` `source` (e.g. `firestore`, `seed_fallback`).
+  final String? catalogSource;
 
   static Future<void> show(
     BuildContext context, {
@@ -26,6 +29,7 @@ class RiderRolloutAreaSheet extends StatefulWidget {
     String? initialRegionId,
     String? initialCityId,
     Future<List<RolloutDeliveryRegionModel>> Function()? onReloadCatalog,
+    String? catalogSource,
   }) {
     return showModalBottomSheet<void>(
       context: context,
@@ -36,6 +40,7 @@ class RiderRolloutAreaSheet extends StatefulWidget {
         initialRegionId: initialRegionId,
         initialCityId: initialCityId,
         onReloadCatalog: onReloadCatalog,
+        catalogSource: catalogSource,
       ),
     );
   }
@@ -52,10 +57,21 @@ class _RiderRolloutAreaSheetState extends State<RiderRolloutAreaSheet> {
   bool _locating = false;
   String? _error;
 
+  String _emptyCatalogHint() {
+    final src = (widget.catalogSource ?? '').trim().toLowerCase();
+    if (src == 'seed_fallback' || src == 'seed') {
+      return 'Service areas could not be displayed from this response. Tap Retry to reload from NexRide.';
+    }
+    return 'No enabled areas loaded.';
+  }
+
   @override
   void initState() {
     super.initState();
     _regions = List<RolloutDeliveryRegionModel>.from(widget.regions);
+    if (_regions.isEmpty) {
+      _regions = List<RolloutDeliveryRegionModel>.from(rolloutEmergencyFallbackCatalog());
+    }
     _regionId = widget.initialRegionId?.trim().isNotEmpty == true
         ? widget.initialRegionId!.trim()
         : null;
@@ -98,7 +114,10 @@ class _RiderRolloutAreaSheetState extends State<RiderRolloutAreaSheet> {
       _error = null;
     });
     try {
-      final next = await loader();
+      var next = await loader();
+      if (next.isEmpty) {
+        next = List<RolloutDeliveryRegionModel>.from(rolloutEmergencyFallbackCatalog());
+      }
       if (!mounted) {
         return;
       }
@@ -268,7 +287,10 @@ class _RiderRolloutAreaSheetState extends State<RiderRolloutAreaSheet> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-                const Text('No enabled areas loaded.'),
+                Text(
+                  _emptyCatalogHint(),
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
                 const SizedBox(height: 12),
                 OutlinedButton.icon(
                   onPressed: (_saving || _locating) ? null : _retryLoad,

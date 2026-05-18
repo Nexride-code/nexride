@@ -11,11 +11,14 @@ const { FieldValue } = require("firebase-admin/firestore");
 const { logger } = require("firebase-functions");
 const { normUid } = require("./admin_auth");
 const { createDynamicNgnVirtualAccount } = require("./flutterwave_api");
+const payDiag = require("./payment_diagnostics_store");
 
 const INTENT_COLLECTION = "payment_intents";
 
-/** Dynamic VA default TTL when provider omits explicit expiry (Flutterwave: ~1h). */
-const DEFAULT_VA_EXPIRY_MS = 60 * 60 * 1000;
+/** Minimum VA window shown to riders/drivers/merchants. */
+const MIN_VA_EXPIRY_MS = 15 * 60 * 1000;
+/** Legacy fallback when ETA is unknown (still capped for UX). */
+const DEFAULT_VA_EXPIRY_MS = 30 * 60 * 1000;
 
 function nowMs() {
   return Date.now();
@@ -27,6 +30,26 @@ function makeVaTxRef(segment) {
     .slice(0, 24);
   const suffix = crypto.randomBytes(5).toString("hex");
   return `nexride_va_${safe}_${Date.now().toString(36)}_${suffix}`;
+}
+
+function extractFlutterwaveProviderMessage(provider) {
+  if (!provider || typeof provider !== "object") {
+    return null;
+  }
+  return String(provider.message || provider.status || "").trim() || null;
+}
+
+/**
+ * Rider-facing VA TTL: max(15 minutes, trip ETA / 2). Ignores long provider defaults (~119m).
+ * @param {{ etaMinutes?: number|null|undefined }} opts
+ */
+function computeVaExpiryMs({ etaMinutes } = {}) {
+  const now = nowMs();
+  const etaMin = Number(etaMinutes);
+  const etaHalfMs =
+    Number.isFinite(etaMin) && etaMin > 0 ? (etaMin / 2) * 60 * 1000 : 0;
+  const ttlMs = Math.max(MIN_VA_EXPIRY_MS, etaHalfMs);
+  return now + ttlMs;
 }
 
 function parseExpiryMsFromVaPayload(normalized, payload) {
@@ -72,6 +95,30 @@ async function upsertIntentDoc(fs, fields) {
 }
 
 /**
+ * Persist a failed attempt so admin / ops can inspect without RTDB rows.
+ */
+async function recordFailedPaymentIntent(fs, fields) {
+  const txRef = String(fields.tx_ref || "").trim();
+  if (!txRef) return;
+  try {
+    await fs.collection(INTENT_COLLECTION).doc(txRef).set(
+      {
+        ...fields,
+        tx_ref: txRef,
+        status: fields.status ?? "failed",
+        settlement_state: fields.settlement_state ?? "failed",
+        provider: fields.provider ?? "flutterwave_va",
+        created_at: fields.created_at ?? FieldValue.serverTimestamp(),
+        updated_at: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  } catch (e) {
+    logger.warn("recordFailedPaymentIntent_failed", { tx_ref: txRef, err: String(e) });
+  }
+}
+
+/**
  * Rider ride or dispatch row: create VA + Firestore intent + RTDB payment_transactions.
  */
 async function createRiderBankVaIntent({
@@ -88,11 +135,12 @@ async function createRiderBankVaIntent({
   firstName,
   lastName,
   narration,
+  etaMinutes,
 }) {
   const rid = normUid(riderId);
   const flow = rideId ? "ride_payment" : "dispatch_payment";
   const tx_ref = makeVaTxRef(rideId ? "ride" : "del");
-  const expFallback = nowMs() + DEFAULT_VA_EXPIRY_MS;
+  const expFallback = computeVaExpiryMs({ etaMinutes });
 
   const fwBody = {
     email: email || `${rid}@nexride.local`,
@@ -106,13 +154,70 @@ async function createRiderBankVaIntent({
 
   const va = await createDynamicNgnVirtualAccount(fwBody);
   if (!va.ok || !va.normalized?.account_number) {
-    logger.warn("RIDER_VA_CREATE_FAIL", { tx_ref: tx_ref, reason: va.reason, http: va.http_status });
-    return { success: false, reason: va.reason || "flutterwave_va_failed", provider: va.payload };
+    const reason = va.reason || "flutterwave_va_failed";
+    const reason_code =
+      reason === "flutterwave_secret_missing"
+        ? "flutterwave_secret_not_in_runtime"
+        : va.reason_code ||
+          (reason === "network_error" ? "flutterwave_network_error" : "flutterwave_va_create_failed");
+    const clientReason =
+      reason === "flutterwave_secret_missing" || reason === "network_error"
+        ? "payment_provider_unavailable"
+        : "flutterwave_va_failed";
+    const user_message =
+      reason === "flutterwave_secret_missing" || reason === "network_error"
+        ? "Automated bank transfer is temporarily unavailable. Please use a card or try again in a moment."
+        : "Bank transfer could not be set up. Please try again or pick another payment method.";
+    logger.warn("RIDER_VA_CREATE_FAIL", {
+      tx_ref,
+      reason,
+      reason_code,
+      http: va.http_status,
+      flutterwave_message: extractFlutterwaveProviderMessage(va.payload),
+      provider_payload_snippet: JSON.stringify(va.payload ?? {}).slice(0, 5000),
+    });
+    payDiag.recordVaCreateFailure({
+      flow,
+      rider_id: rid,
+      tx_ref,
+      reason,
+      reason_code,
+      provider_http_status: va.http_status ?? null,
+      flutterwave_message: extractFlutterwaveProviderMessage(va.payload),
+    });
+    await recordFailedPaymentIntent(fs, {
+      tx_ref,
+      owner_uid: rid,
+      rider_id: rid,
+      app_context: "rider",
+      flow,
+      ride_id: rideId ? normUid(rideId) : null,
+      delivery_id: deliveryId ? normUid(deliveryId) : null,
+      provider: "flutterwave_va",
+      reason_code,
+      payment_failure_reason: reason,
+      flutterwave_http_status: va.http_status ?? null,
+    });
+    const flutterwave_message = extractFlutterwaveProviderMessage(va.payload);
+    return {
+      success: false,
+      reason: clientReason,
+      reason_code,
+      message: user_message,
+      user_message,
+      flutterwave_message,
+      provider_http_status: va.http_status ?? null,
+      flutterwave_http_status: va.http_status ?? null,
+    };
   }
 
   const n = va.normalized;
-  const expMs = parseExpiryMsFromVaPayload(n, va.payload) || expFallback;
   const ts = nowMs();
+  const providerExp = parseExpiryMsFromVaPayload(n, va.payload);
+  let expMs = computeVaExpiryMs({ etaMinutes });
+  if (providerExp > ts && providerExp < expMs) {
+    expMs = providerExp;
+  }
 
   const rtdbRow = {
     tx_ref,
@@ -200,7 +305,7 @@ async function createMerchantBankVaTopUpIntent({
   const mid = normUid(merchantId);
   const oid = normUid(ownerUid);
   const tx_ref = makeVaTxRef("mwtop");
-  const expFallback = nowMs() + DEFAULT_VA_EXPIRY_MS;
+  const expFallback = computeVaExpiryMs({});
 
   const fwBody = {
     email: email || `${oid}@nexride.local`,
@@ -214,11 +319,67 @@ async function createMerchantBankVaTopUpIntent({
 
   const va = await createDynamicNgnVirtualAccount(fwBody);
   if (!va.ok || !va.normalized?.account_number) {
-    logger.warn("MERCHANT_VA_CREATE_FAIL", { tx_ref: tx_ref, reason: va.reason });
-    return { success: false, reason: va.reason || "flutterwave_va_failed", provider: va.payload };
+    const rawReason = va.reason || "flutterwave_va_failed";
+    const reason_code =
+      rawReason === "flutterwave_secret_missing"
+        ? "flutterwave_secret_not_in_runtime"
+        : va.reason_code ||
+          (rawReason === "network_error" ? "flutterwave_network_error" : "flutterwave_va_create_failed");
+    const user_message =
+      rawReason === "flutterwave_secret_missing" || rawReason === "network_error"
+        ? "Automated bank transfer is temporarily unavailable. Use card top-up or try again in a moment."
+        : "Bank transfer top-up could not be created. Try again or use card.";
+    logger.warn("MERCHANT_VA_CREATE_FAIL", {
+      tx_ref,
+      merchant_id: mid,
+      owner_uid: oid,
+      reason: rawReason,
+      reason_code,
+      provider_http_status: va.http_status ?? null,
+      flutterwave_message: extractFlutterwaveProviderMessage(va.payload),
+      provider_payload_snippet: JSON.stringify(va.payload ?? {}).slice(0, 5000),
+    });
+    payDiag.recordVaCreateFailure({
+      flow: "merchant_wallet_topup",
+      merchant_id: mid,
+      owner_uid: oid,
+      tx_ref,
+      reason: rawReason,
+      reason_code,
+      provider_http_status: va.http_status ?? null,
+      flutterwave_message: extractFlutterwaveProviderMessage(va.payload),
+    });
+    await recordFailedPaymentIntent(fs, {
+      tx_ref,
+      owner_uid: oid,
+      merchant_id: mid,
+      app_context: "merchant",
+      flow: "merchant_wallet_topup",
+      provider: "flutterwave_va",
+      reason_code,
+      payment_failure_reason: rawReason,
+      flutterwave_http_status: va.http_status ?? null,
+    });
+    return {
+      success: false,
+      reason:
+        rawReason === "flutterwave_secret_missing" || rawReason === "network_error"
+          ? "payment_provider_unavailable"
+          : "flutterwave_va_failed",
+      message: user_message,
+      user_message,
+      reason_code,
+      flutterwave_message: extractFlutterwaveProviderMessage(va.payload),
+      provider_http_status: va.http_status ?? null,
+      flutterwave_http_status: va.http_status ?? null,
+    };
   }
   const n = va.normalized;
-  const expMs = parseExpiryMsFromVaPayload(n, va.payload) || expFallback;
+  const providerExpLegacy = parseExpiryMsFromVaPayload(n, va.payload);
+  let expMs = expFallback;
+  if (providerExpLegacy > nowMs() && providerExpLegacy < expMs) {
+    expMs = providerExpLegacy;
+  }
   const ts = nowMs();
   const col = fs.collection("merchant_bank_topups");
   const docRef = col.doc();
@@ -312,6 +473,205 @@ async function createMerchantBankVaTopUpIntent({
 }
 
 /**
+ * Driver subscription or driver wallet top-up via dynamic VA.
+ * @param {object} opts
+ * @param {string} opts.purpose `driver_subscription_payment` | `driver_wallet_topup`
+ * @param {string} opts.flow `driver_subscription` | `driver_wallet_topup`
+ * @param {string|null} [opts.subscriptionPlanType] weekly | monthly when purpose is subscription
+ */
+async function createDriverBankVaIntent({
+  db,
+  fs,
+  driverId,
+  ownerUid,
+  amount,
+  purpose,
+  flow,
+  subscriptionPlanType,
+  email,
+  phone,
+  firstName,
+  lastName,
+  narration,
+}) {
+  const did = normUid(driverId);
+  const oid = normUid(ownerUid);
+  const purposeStr = String(purpose || "").trim();
+  const flowStr = String(flow || "").trim();
+  if (!did || !oid) {
+    return { success: false, reason: "invalid_driver" };
+  }
+  if (
+    (purposeStr === "driver_subscription_payment" && flowStr !== "driver_subscription") ||
+    (purposeStr === "driver_wallet_topup" && flowStr !== "driver_wallet_topup")
+  ) {
+    return { success: false, reason: "flow_purpose_mismatch" };
+  }
+  const tx_ref = makeVaTxRef(flowStr === "driver_wallet_topup" ? "dwtop" : "dsub");
+  const expFallback = computeVaExpiryMs({});
+
+  const fwBody = {
+    email: email || `${oid}@nexride.local`,
+    amount: Math.round(Number(amount) * 100) / 100,
+    tx_ref,
+    phonenumber: String(phone || "08000000000").replace(/\D/g, "").slice(0, 11) || "08000000000",
+    firstname: String(firstName || "NexRide").slice(0, 80),
+    lastname: String(lastName || "Driver").slice(0, 80),
+    narration: String(narration || "NexRide driver").slice(0, 120),
+  };
+
+  const va = await createDynamicNgnVirtualAccount(fwBody);
+  if (!va.ok || !va.normalized?.account_number) {
+    const rawReason = va.reason || "flutterwave_va_failed";
+    const reason_code =
+      rawReason === "flutterwave_secret_missing"
+        ? "flutterwave_secret_not_in_runtime"
+        : va.reason_code ||
+          (rawReason === "network_error" ? "flutterwave_network_error" : "flutterwave_va_create_failed");
+    const user_message =
+      rawReason === "flutterwave_secret_missing" || rawReason === "network_error"
+        ? "Automated bank transfer is temporarily unavailable. Try again in a moment or use card payment."
+        : "Bank transfer could not be created. Please try again.";
+    logger.warn("DRIVER_VA_CREATE_FAIL", {
+      tx_ref,
+      driver_id: did,
+      reason: rawReason,
+      reason_code,
+      purpose: purposeStr,
+      provider_http_status: va.http_status ?? null,
+      flutterwave_message: extractFlutterwaveProviderMessage(va.payload),
+      provider_payload_snippet: JSON.stringify(va.payload ?? {}).slice(0, 5000),
+    });
+    payDiag.recordVaCreateFailure({
+      flow: flowStr,
+      driver_id: did,
+      owner_uid: oid,
+      purpose: purposeStr,
+      tx_ref,
+      reason: rawReason,
+      reason_code,
+      provider_http_status: va.http_status ?? null,
+      flutterwave_message: extractFlutterwaveProviderMessage(va.payload),
+    });
+    await recordFailedPaymentIntent(fs, {
+      tx_ref,
+      owner_uid: oid,
+      driver_id: did,
+      app_context: "driver",
+      flow: flowStr,
+      purpose: purposeStr,
+      provider: "flutterwave_va",
+      reason_code,
+      payment_failure_reason: rawReason,
+      flutterwave_http_status: va.http_status ?? null,
+    });
+    return {
+      success: false,
+      reason:
+        rawReason === "flutterwave_secret_missing" || rawReason === "network_error"
+          ? "payment_provider_unavailable"
+          : "flutterwave_va_failed",
+      message: user_message,
+      user_message,
+      reason_code,
+      flutterwave_message: extractFlutterwaveProviderMessage(va.payload),
+      provider_http_status: va.http_status ?? null,
+      flutterwave_http_status: va.http_status ?? null,
+    };
+  }
+  const n = va.normalized;
+  const providerExpLegacy = parseExpiryMsFromVaPayload(n, va.payload);
+  let expMs = expFallback;
+  if (providerExpLegacy > nowMs() && providerExpLegacy < expMs) {
+    expMs = providerExpLegacy;
+  }
+  const ts = nowMs();
+
+  const planType =
+    String(subscriptionPlanType ?? "")
+      .trim()
+      .toLowerCase() === "weekly"
+      ? "weekly"
+      : purposeStr === "driver_subscription_payment"
+        ? "monthly"
+        : null;
+
+  const rtdbRow = {
+    tx_ref,
+    app_context: "driver",
+    flow: flowStr,
+    purpose: purposeStr,
+    provider: "flutterwave_va",
+    va_intent: true,
+    driver_id: did,
+    owner_uid: oid,
+    amount,
+    amount_ngn: amount,
+    total_ngn: amount,
+    currency: "NGN",
+    status: "pending_transfer",
+    verified: false,
+    bank_name: n.bank_name || null,
+    account_name: n.account_name || null,
+    account_number: n.account_number || null,
+    flutterwave_order_ref: n.order_ref || null,
+    va_expires_at_ms: expMs,
+    expires_at_ms: expMs,
+    flutterwave_va_create_response: va.payload?.data || null,
+    created_at: ts,
+    updated_at: ts,
+  };
+  if (planType) {
+    rtdbRow.subscription_plan_type = planType;
+  }
+
+  await db.ref(`payment_transactions/${tx_ref}`).set(rtdbRow);
+
+  const intentFields = {
+    tx_ref,
+    owner_uid: oid,
+    app_context: "driver",
+    flow: flowStr,
+    driver_id: did,
+    amount_ngn: amount,
+    total_ngn: amount,
+    currency: "NGN",
+    status: "pending_transfer",
+    expires_at_ms: expMs,
+    settlement_state: "awaiting_transfer",
+    account_number: n.account_number,
+    bank_name: n.bank_name,
+    account_name: n.account_name,
+    flutterwave_order_ref: n.order_ref || null,
+    legacy_manual_bank: false,
+    provider: "flutterwave_va",
+    purpose: purposeStr,
+    created_at: FieldValue.serverTimestamp(),
+  };
+  if (planType) {
+    intentFields.subscription_plan_type = planType;
+  }
+  await upsertIntentDoc(fs, intentFields);
+  await appendIntentAudit(fs, tx_ref, { type: "va_issued", source: "createDriverBankVaIntent", purpose: purposeStr });
+
+  return {
+    success: true,
+    amount_ngn: amount,
+    currency: "NGN",
+    expires_at_ms: expMs,
+    tx_ref,
+    reference: tx_ref,
+    bank: {
+      bank_name: n.bank_name,
+      account_name: n.account_name,
+      account_number: n.account_number,
+    },
+    status: "pending_transfer",
+    instructions: "Transfer exactly the shown amount. Payment confirms automatically when Flutterwave verifies.",
+  };
+}
+
+/**
  * After strict API verify: if intent expired, mark pending_review instead of auto-settling.
  * @returns {{ mode: "ok" } | { mode: "pending_review", reason: string }}
  */
@@ -373,6 +733,25 @@ async function applyVaLateTransferPendingReview(db, fs, { pt, payTid, rideId, de
     return;
   }
 
+  const driverLateId = normUid(pt?.driver_id);
+  if (purpose === "driver_subscription_payment" && driverLateId) {
+    await db.ref(`drivers/${driverLateId}/businessModel/subscription`).update({
+      paymentStatus: "late_transfer_review",
+      late_flutterwave_transaction_id: tid || null,
+      last_webhook_event: String(webhookBody?.event || ""),
+      updatedAt: now,
+    });
+    return;
+  }
+  if (purpose === "driver_wallet_topup" && driverLateId) {
+    await db.ref(`drivers/${driverLateId}`).update({
+      wallet_flutterwave_late_review: true,
+      wallet_flutterwave_late_tx_id: tid || null,
+      updated_at: now,
+    });
+    return;
+  }
+
   if (rideId) {
     await db.ref(`ride_requests/${rideId}`).update({
       payment_status: "pending_review",
@@ -406,10 +785,13 @@ async function applyVaLateTransferPendingReview(db, fs, { pt, payTid, rideId, de
 async function markIntentSettledOk(fs, txRef, fields) {
   const ref = String(txRef || "").trim();
   if (!ref) return;
+  const now = Date.now();
   await fs.collection(INTENT_COLLECTION).doc(ref).set(
     {
       status: "paid",
       settlement_state: "settled",
+      webhook_result: "settled",
+      webhook_applied_at_ms: now,
       ...fields,
       updated_at: FieldValue.serverTimestamp(),
     },
@@ -505,18 +887,11 @@ async function expireStaleBankTransferVaIntents(
         (pref === txRef || pref2 === txRef) &&
         String(ride.payment_status ?? "").trim().toLowerCase() === "pending_transfer"
       ) {
-        await db.ref(`ride_requests/${rideId}`).update({
-          payment_status: "bank_transfer_expired",
-          bank_transfer_va_expired_at: now,
-          updated_at: now,
+        const { releaseOpenRideForBankTransferFailure } = require("./ride_callables");
+        await releaseOpenRideForBankTransferFailure(db, rideId, {
+          cancelReason: "bank_transfer_expired",
+          paymentStatus: "bank_transfer_expired",
         });
-        const activeSnap = await db.ref(`active_trips/${rideId}`).get();
-        if (activeSnap.exists()) {
-          await db.ref(`active_trips/${rideId}`).update({
-            payment_status: "bank_transfer_expired",
-            updated_at: now,
-          });
-        }
       }
     } else if (flowStr === "dispatch_payment" && deliveryId) {
       const delId = deliveryId;
@@ -554,6 +929,29 @@ async function expireStaleBankTransferVaIntents(
           );
       }
     }
+
+    const driverIdForExpire = normUidLocal(pt?.driver_id ?? x.driver_id);
+    if (
+      driverIdForExpire &&
+      (flowStr === "driver_subscription" || flowStr === "driver_wallet_topup")
+    ) {
+      if (flowStr === "driver_subscription") {
+        await db.ref(`drivers/${driverIdForExpire}/businessModel/subscription`).update({
+          paymentStatus: "gateway_va_expired",
+          pendingTxRef: null,
+          pendingExpiresAtMs: null,
+          updatedAt: now,
+        });
+      } else {
+        await db.ref(`drivers/${driverIdForExpire}`).update({
+          wallet_flutterwave_pending_tx_ref: null,
+          wallet_flutterwave_pending_amount_ngn: null,
+          wallet_flutterwave_pending_expires_at_ms: null,
+          wallet_flutterwave_pending_mode: null,
+          updated_at: now,
+        });
+      }
+    }
   }
 
   if (expired > 0) {
@@ -564,12 +962,17 @@ async function expireStaleBankTransferVaIntents(
 
 module.exports = {
   INTENT_COLLECTION,
+  MIN_VA_EXPIRY_MS,
+  computeVaExpiryMs,
   makeVaTxRef,
+  upsertIntentDoc,
   createRiderBankVaIntent,
   createMerchantBankVaTopUpIntent,
+  createDriverBankVaIntent,
   evaluateVaIntentExpiryForSettlement,
   applyVaLateTransferPendingReview,
   markIntentSettledOk,
   appendIntentAudit,
+  recordFailedPaymentIntent,
   expireStaleBankTransferVaIntents,
 };

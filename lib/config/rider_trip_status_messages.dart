@@ -21,7 +21,9 @@ abstract final class RiderTripStatusMessages {
     final payStatus =
         ride['payment_status']?.toString().trim().toLowerCase() ?? '';
 
-    if (payStatus == 'failed' || payStatus == 'declined') {
+    if (payStatus == 'failed' ||
+        payStatus == 'declined' ||
+        payStatus == 'bank_transfer_expired') {
       return paymentFailed;
     }
     if (payStatus == 'pending' || payStatus == 'processing') {

@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/nexride_official_bank_account_service.dart';
 import '../support/friendly_firebase_errors.dart';
+import '../support/ride_chat_moderation.dart';
 import '../support/ride_chat_support.dart';
 
 enum RideChatImageSource { camera, gallery }
@@ -72,6 +74,10 @@ class RideChatSheet extends StatefulWidget {
     this.isCallButtonBusy = false,
     this.bankTransferReference = '',
     this.bankTransferAmountLabel = '',
+    this.bankTransferUsesFlutterwaveVa = false,
+    this.bankTransferPaymentTxRef = '',
+    this.peerName = '',
+    this.peerSubtitle = '',
   });
 
   final String rideId;
@@ -90,17 +96,31 @@ class RideChatSheet extends StatefulWidget {
   final bool isCallButtonBusy;
   final String bankTransferReference;
   final String bankTransferAmountLabel;
+  /// When true, bank instructions load from [payment_transactions/{tx_ref}] (Flutterwave VA).
+  final bool bankTransferUsesFlutterwaveVa;
+  final String bankTransferPaymentTxRef;
+  final String peerName;
+  final String peerSubtitle;
 
   @override
   State<RideChatSheet> createState() => _RideChatSheetState();
 }
 
 class _RideChatSheetState extends State<RideChatSheet> {
+  static final Map<String, bool> _paymentExpandedByRide = <String, bool>{};
+
   final TextEditingController _messageController = TextEditingController();
+  final FocusNode _messageFocusNode = FocusNode();
   final ScrollController _scrollController = ScrollController();
   int _lastMessageCount = 0;
   NexrideOfficialBankAccount? _officialBank;
   bool _officialBankLoaded = false;
+  Map<String, dynamic>? _vaPaymentRow;
+  bool _vaPaymentLoaded = false;
+  bool _paymentDetailsExpanded = false;
+  bool _isSending = false;
+  bool _showHydratingSkeleton = true;
+  Timer? _hydrateFallbackTimer;
 
   Future<void> _copyReference(String reference) async {
     await Clipboard.setData(ClipboardData(text: reference));
@@ -113,12 +133,62 @@ class _RideChatSheetState extends State<RideChatSheet> {
   @override
   void initState() {
     super.initState();
+    _paymentDetailsExpanded =
+        _paymentExpandedByRide[widget.rideId.trim()] ?? false;
     _messageController.text = widget.initialDraft;
     _lastMessageCount = widget.messagesListenable.value.length;
+    if (_lastMessageCount > 0) {
+      _showHydratingSkeleton = false;
+    }
     widget.messagesListenable.addListener(_onRemoteMessagesChanged);
     WidgetsBinding.instance
         .addPostFrameCallback((_) => _scrollToBottom(animated: false));
-    unawaited(_loadOfficialBank());
+    _hydrateFallbackTimer = Timer(const Duration(milliseconds: 900), () {
+      if (!mounted) {
+        return;
+      }
+      if (_showHydratingSkeleton) {
+        setState(() {
+          _showHydratingSkeleton = false;
+        });
+      }
+    });
+    if (widget.bankTransferUsesFlutterwaveVa &&
+        widget.bankTransferPaymentTxRef.trim().isNotEmpty) {
+      unawaited(_loadVaPaymentInstructions());
+    } else {
+      unawaited(_loadOfficialBank());
+    }
+  }
+
+  Future<void> _loadVaPaymentInstructions() async {
+    final txRef = widget.bankTransferPaymentTxRef.trim();
+    try {
+      final snap = await FirebaseDatabase.instance
+          .ref('payment_transactions/$txRef')
+          .get()
+          .timeout(const Duration(seconds: 12));
+      final raw = snap.value;
+      if (raw is Map) {
+        final row = raw.map((k, v) => MapEntry(k.toString(), v));
+        final provider =
+            (row['provider']?.toString() ?? '').trim().toLowerCase();
+        if (provider == 'flutterwave_va') {
+          if (!mounted) return;
+          setState(() {
+            _vaPaymentRow = row;
+            _vaPaymentLoaded = true;
+            _officialBankLoaded = true;
+          });
+          return;
+        }
+      }
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _vaPaymentLoaded = true;
+      _officialBankLoaded = true;
+    });
   }
 
   Future<void> _loadOfficialBank() async {
@@ -149,18 +219,111 @@ class _RideChatSheetState extends State<RideChatSheet> {
 
   @override
   void dispose() {
+    _hydrateFallbackTimer?.cancel();
+    _hydrateFallbackTimer = null;
     widget.messagesListenable.removeListener(_onRemoteMessagesChanged);
     _messageController.dispose();
+    _messageFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   void _onRemoteMessagesChanged() {
     final nextCount = widget.messagesListenable.value.length;
+    if (_showHydratingSkeleton && nextCount >= 0) {
+      if (mounted) {
+        setState(() {
+          _showHydratingSkeleton = false;
+        });
+      } else {
+        _showHydratingSkeleton = false;
+      }
+    }
     if (nextCount != _lastMessageCount) {
       _lastMessageCount = nextCount;
       _scrollToBottom(animated: true);
     }
+  }
+
+  void _togglePaymentExpanded() {
+    setState(() {
+      _paymentDetailsExpanded = !_paymentDetailsExpanded;
+      _paymentExpandedByRide[widget.rideId.trim()] = _paymentDetailsExpanded;
+    });
+  }
+
+  String _bankTransferCompactSummary() {
+    final amt = widget.bankTransferAmountLabel.isNotEmpty
+        ? widget.bankTransferAmountLabel
+        : '₦--';
+    if (widget.bankTransferUsesFlutterwaveVa && _vaPaymentRow != null) {
+      final row = _vaPaymentRow!;
+      final bank = (row['bank_name'] ?? '').toString().trim();
+      final acct = (row['account_number'] ?? '').toString().trim();
+      final expMs = row['expires_at_ms'] ?? row['va_expires_at_ms'];
+      var expiry = '';
+      final exp = expMs is num
+          ? expMs.toInt()
+          : int.tryParse(expMs?.toString() ?? '') ?? 0;
+      if (exp > 0) {
+        final dt = DateTime.fromMillisecondsSinceEpoch(exp).toLocal();
+        expiry =
+            ' · Exp ${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')} '
+            '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+      }
+      return '$amt · ${bank.isEmpty ? 'Bank' : bank} · ${acct.isEmpty ? '—' : acct}$expiry';
+    }
+    final ob = _officialBank;
+    if (ob != null) {
+      return '$amt · ${ob.bankName} · ${ob.accountNumber}';
+    }
+    return '$amt · Tap to view payment details';
+  }
+
+  Widget _buildHydratingSkeleton() {
+    return ListView.builder(
+      padding: const EdgeInsets.all(14),
+      itemCount: 4,
+      itemBuilder: (context, index) {
+        final alignRight = index.isOdd;
+        return Align(
+          alignment:
+              alignRight ? Alignment.centerRight : Alignment.centerLeft,
+          child: Container(
+            width: MediaQuery.of(context).size.width * (alignRight ? 0.45 : 0.55),
+            height: 44,
+            margin: const EdgeInsets.only(bottom: 10),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(14),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<bool> _confirmModerationWarning(RideChatModerationWarning warning) async {
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Safety check'),
+        content: Text(
+          '$rideChatModerationDialogBody\n\nDetected: ${warning.reason}.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Edit message'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Send anyway'),
+          ),
+        ],
+      ),
+    );
+    return proceed == true;
   }
 
   String _bankTransferInstructionsBody() {
@@ -168,6 +331,46 @@ class _RideChatSheetState extends State<RideChatSheet> {
     final amt = widget.bankTransferAmountLabel.isNotEmpty
         ? widget.bankTransferAmountLabel
         : '₦--';
+    if (widget.bankTransferUsesFlutterwaveVa) {
+      if (!_vaPaymentLoaded) {
+        return 'Please transfer your fare of $amt to the virtual account below.\n'
+            'Loading payment account details…\n'
+            'Reference: $ref';
+      }
+      final row = _vaPaymentRow;
+      if (row == null || row.isEmpty) {
+        return 'Please transfer your fare of $amt using your payment reference.\n'
+            'Virtual account details could not be loaded. Open the payment sheet from the map or try again.\n'
+            'Reference: $ref';
+      }
+      final bankName = (row['bank_name'] ?? '').toString().trim();
+      final acctNum = (row['account_number'] ?? '').toString().trim();
+      final acctName = (row['account_name'] ?? '').toString().trim();
+      final txRef = (row['tx_ref'] ?? ref).toString().trim();
+      final amountNgn = row['total_ngn'] ?? row['amount'] ?? row['amount_ngn'];
+      final amountLabel = amountNgn is num
+          ? '₦${amountNgn.round()}'
+          : amt;
+      final expMs = row['expires_at_ms'] ?? row['va_expires_at_ms'];
+      var expiryLine = '';
+      final exp = expMs is num
+          ? expMs.toInt()
+          : int.tryParse(expMs?.toString() ?? '') ?? 0;
+      if (exp > 0) {
+        final dt = DateTime.fromMillisecondsSinceEpoch(exp).toLocal();
+        expiryLine =
+            'Expires: ${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')} '
+            '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}\n';
+      }
+      return 'Transfer exactly $amountLabel to this virtual account:\n'
+          'Bank: ${bankName.isEmpty ? '—' : bankName}\n'
+          'Account name: ${acctName.isEmpty ? '—' : acctName}\n'
+          'Account number: ${acctNum.isEmpty ? '—' : acctNum}\n'
+          'Reference / tx_ref: $txRef\n'
+          '$expiryLine'
+          'Payment confirms automatically when Flutterwave receives your transfer. '
+          'No receipt upload required.';
+    }
     if (!_officialBankLoaded) {
       return 'Please transfer your fare of $amt to NexRide.\n'
           'Loading official bank details…\n'
@@ -189,15 +392,208 @@ class _RideChatSheetState extends State<RideChatSheet> {
         'Upload your payment proof during or after the trip so your driver can verify.';
   }
 
+  String get _bankTransferBannerTitle => 'Bank transfer payment';
+
+  bool get _hasBankTransfer =>
+      widget.bankTransferReference.trim().isNotEmpty;
+
+  String get _headerTitle {
+    final name = widget.peerName.trim();
+    return name.isEmpty ? 'Ride Chat' : name;
+  }
+
+  String _formatMessageTime(int createdAtMs) {
+    if (createdAtMs <= 0) {
+      return '';
+    }
+    final dt = DateTime.fromMillisecondsSinceEpoch(createdAtMs).toLocal();
+    final hour = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+    final minute = dt.minute.toString().padLeft(2, '0');
+    final period = dt.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $period';
+  }
+
+  Widget _buildSafetyBanner() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F6F9),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFDCE3EA)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.shield_outlined, size: 18, color: Color(0xFF4B5563)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              rideChatSafetyBannerText,
+              style: const TextStyle(
+                fontSize: 11.5,
+                height: 1.35,
+                color: Color(0xFF374151),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPaymentCollapsible(double maxHeight) {
+    return Material(
+      color: const Color(0xFFFFF8EC),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: _togglePaymentExpanded,
+        child: Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFE7C776)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _bankTransferBannerTitle,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF5F4A16),
+                        ),
+                      ),
+                    ),
+                    Text(
+                      _paymentDetailsExpanded
+                          ? 'Hide details'
+                          : 'View payment details',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFFB57A2A),
+                      ),
+                    ),
+                    Icon(
+                      _paymentDetailsExpanded
+                          ? Icons.expand_less
+                          : Icons.expand_more,
+                      color: const Color(0xFFB57A2A),
+                    ),
+                  ],
+                ),
+              ),
+              if (!_paymentDetailsExpanded)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                  child: Text(
+                    _bankTransferCompactSummary(),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF6B5A2B),
+                      height: 1.3,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              if (_paymentDetailsExpanded)
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: maxHeight),
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _bankTransferInstructionsBody(),
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: const Color(0xFF6B5A2B),
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 9,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFFBEE),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: const Color(0xFFE2C476),
+                                  ),
+                                ),
+                                child: Text(
+                                  widget.bankTransferReference.trim(),
+                                  style: const TextStyle(
+                                    fontFamily: 'monospace',
+                                    fontSize: 13,
+                                    color: Color(0xFF4D3E1A),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              onPressed: () => _copyReference(
+                                widget.bankTransferReference.trim(),
+                              ),
+                              icon: const Icon(Icons.copy, size: 16),
+                              label: const Text('Copy'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFF6C551C),
+                                side: const BorderSide(
+                                  color: Color(0xFFD6B563),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _handleSend() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty) {
+    if (text.isEmpty || _isSending) {
       return;
+    }
+
+    final moderation = scanRideChatMessage(text);
+    if (moderation != null) {
+      final proceed = await _confirmModerationWarning(moderation);
+      if (!proceed || !mounted) {
+        return;
+      }
     }
 
     if (!mounted) {
       return;
     }
+    setState(() {
+      _isSending = true;
+    });
     _messageController.clear();
     widget.onDraftChanged?.call('');
     _scrollToBottom(animated: true);
@@ -241,7 +637,15 @@ class _RideChatSheetState extends State<RideChatSheet> {
           ),
         ),
       );
-    } finally {}
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+        });
+      } else {
+        _isSending = false;
+      }
+    }
   }
 
   Future<void> _handleRetry(RideChatMessage message) async {
@@ -314,136 +718,83 @@ class _RideChatSheetState extends State<RideChatSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final sheetHeight = MediaQuery.of(context).size.height * 0.72;
+    final paymentMaxHeight = sheetHeight * 0.25;
+    final subtitle = widget.peerSubtitle.trim();
+
+    final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+
     return SafeArea(
       child: Padding(
-        padding: EdgeInsets.only(
-          left: 16,
-          right: 16,
-          top: 16,
-          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-        ),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
         child: SizedBox(
-          height: MediaQuery.of(context).size.height * 0.58,
+          height: sheetHeight,
           child: Column(
             children: [
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Expanded(
-                    child: Text(
-                      'Ride Chat',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                      ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _headerTitle,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        if (subtitle.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            subtitle,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF6B7280),
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                   if (widget.showCallButton)
-                    Container(
-                      margin: const EdgeInsets.only(right: 4),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF6E7CF),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: IconButton(
-                        onPressed:
-                            widget.isCallButtonEnabled &&
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: OutlinedButton.icon(
+                        onPressed: widget.isCallButtonEnabled &&
                                 !widget.isCallButtonBusy
                             ? widget.onStartVoiceCall
                             : null,
-                        tooltip: 'Call driver',
                         icon: widget.isCallButtonBusy
                             ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Color(0xFFB57A2A),
-                                ),
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
                               )
-                            : const Icon(
-                                Icons.call_outlined,
-                                color: Color(0xFFB57A2A),
-                              ),
+                            : const Icon(Icons.call_outlined, size: 18),
+                        label: const Text('Call'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFFB57A2A),
+                          side: const BorderSide(color: Color(0xFFB57A2A)),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                        ),
                       ),
                     ),
                   IconButton(
                     onPressed: () => Navigator.of(context).pop(),
                     icon: const Icon(Icons.close),
+                    tooltip: 'Close',
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
-              if (widget.bankTransferReference.trim().isNotEmpty)
-                Container(
-                  width: double.infinity,
-                  margin: const EdgeInsets.only(bottom: 8),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFF4D6),
-                    border: Border.all(color: const Color(0xFFE7C776)),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Bank Transfer Instructions',
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          color: const Color(0xFF5F4A16),
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        _bankTransferInstructionsBody(),
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: const Color(0xFF6B5A2B),
-                          height: 1.35,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 9,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFFFBEE),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: const Color(0xFFE2C476),
-                                ),
-                              ),
-                              child: Text(
-                                widget.bankTransferReference.trim(),
-                                style: const TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 13,
-                                  color: Color(0xFF4D3E1A),
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          OutlinedButton.icon(
-                            onPressed: () => _copyReference(
-                              widget.bankTransferReference.trim(),
-                            ),
-                            icon: const Icon(Icons.copy, size: 16),
-                            label: const Text('Copy'),
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: const Color(0xFF6C551C),
-                              side: const BorderSide(color: Color(0xFFD6B563)),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
+              _buildSafetyBanner(),
+              if (_hasBankTransfer)
+                _buildPaymentCollapsible(paymentMaxHeight),
               Expanded(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
@@ -453,10 +804,13 @@ class _RideChatSheetState extends State<RideChatSheet> {
                   child: ValueListenableBuilder<List<RideChatMessage>>(
                     valueListenable: widget.messagesListenable,
                     builder: (context, messages, _) {
+                      if (_showHydratingSkeleton && messages.isEmpty) {
+                        return _buildHydratingSkeleton();
+                      }
                       if (messages.isEmpty) {
                         return const Center(
                           child: Text(
-                            'Send a message to your driver.',
+                            'No messages yet',
                             style: TextStyle(color: Colors.black54),
                           ),
                         );
@@ -509,7 +863,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
                               ),
                               constraints: BoxConstraints(
                                 maxWidth:
-                                    MediaQuery.of(context).size.width * 0.72,
+                                    MediaQuery.of(context).size.width * 0.75,
                               ),
                               decoration: BoxDecoration(
                                 color: isMine
@@ -529,6 +883,7 @@ class _RideChatSheetState extends State<RideChatSheet> {
                                           ? Colors.white
                                           : Colors.black87,
                                     ),
+                                    softWrap: true,
                                   ),
                                   if (message.hasImage) ...[
                                     const SizedBox(height: 8),
@@ -555,6 +910,16 @@ class _RideChatSheetState extends State<RideChatSheet> {
                                           width: 130,
                                           fit: BoxFit.cover,
                                         ),
+                                      ),
+                                    ),
+                                  ],
+                                  if (message.createdAt > 0) ...[
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      _formatMessageTime(message.createdAt),
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        color: Color(0xFF9CA3AF),
                                       ),
                                     ),
                                   ],
@@ -619,13 +984,16 @@ class _RideChatSheetState extends State<RideChatSheet> {
                   ),
                 ),
               ),
-              const SizedBox(height: 12),
-              Row(
+              Padding(
+                padding: EdgeInsets.only(top: 12, bottom: keyboardInset + 12),
+                child: Row(
                 children: [
                   Expanded(
                     child: TextField(
                       controller: _messageController,
+                      focusNode: _messageFocusNode,
                       textInputAction: TextInputAction.send,
+                      enabled: !_isSending,
                       onChanged: widget.onDraftChanged,
                       onSubmitted: (_) => unawaited(_handleSend()),
                       decoration: InputDecoration(
@@ -634,7 +1002,9 @@ class _RideChatSheetState extends State<RideChatSheet> {
                         fillColor: const Color(0xFFF4F4F4),
                         prefixIcon: IconButton(
                           tooltip: 'Attach photo',
-                          onPressed: () => unawaited(_handleImageSend()),
+                          onPressed: _isSending
+                              ? null
+                              : () => unawaited(_handleImageSend()),
                           icon: const Icon(Icons.photo_camera_outlined),
                         ),
                         border: OutlineInputBorder(
@@ -656,11 +1026,21 @@ class _RideChatSheetState extends State<RideChatSheet> {
                           borderRadius: BorderRadius.circular(16),
                         ),
                       ),
-                      onPressed: () => unawaited(_handleSend()),
-                      child: const Icon(Icons.send, color: Colors.white),
+                      onPressed: _isSending ? null : () => unawaited(_handleSend()),
+                      child: _isSending
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.send, color: Colors.white),
                     ),
                   ),
                 ],
+              ),
               ),
             ],
           ),

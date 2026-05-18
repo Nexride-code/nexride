@@ -581,6 +581,133 @@ class AdminDataService {
   }
 
   /// Sweep expired VA intents (callable mirror of scheduled job).
+  Future<Map<String, dynamic>> adminGetHealthDrilldown({
+    required String card,
+    String statusFilter = 'all',
+    int limit = 40,
+    int offset = 0,
+    Map<String, dynamic>? infrastructureSubsystems,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetHealthDrilldown',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 90)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'card': card.trim(),
+        'status_filter': statusFilter.trim(),
+        'limit': card.trim() == 'matching' ? (limit > 0 ? limit : 50) : limit,
+        if (card.trim() == 'matching' && offset > 0) 'offset': offset,
+        if (infrastructureSubsystems != null && infrastructureSubsystems.isNotEmpty)
+          'subsystems': infrastructureSubsystems,
+      });
+      return _map(result.data);
+    } catch (e) {
+      debugPrint('[HealthDrilldown] adminGetHealthDrilldown error: $e');
+      return <String, dynamic>{'success': false, 'reason': e.toString()};
+    }
+  }
+
+  Future<Map<String, dynamic>> adminRetryPaymentVerify({String? txRef}) async {
+    return _healthActionCallable('adminRetryPaymentVerify', <String, dynamic>{
+      if (txRef != null && txRef.trim().isNotEmpty) 'tx_ref': txRef.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminExpirePaymentIntent({String? txRef}) async {
+    return _healthActionCallable('adminExpirePaymentIntent', <String, dynamic>{
+      if (txRef != null && txRef.trim().isNotEmpty) 'tx_ref': txRef.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminRerunRideMatching({String? rideId}) async {
+    return _healthActionCallable('adminRerunRideMatching', <String, dynamic>{
+      if (rideId != null && rideId.trim().isNotEmpty) 'rideId': rideId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminRepairDispatchBlockers({String? rideId}) async {
+    return _healthActionCallable('adminRepairDispatchBlockers', <String, dynamic>{
+      if (rideId != null && rideId.trim().isNotEmpty) 'rideId': rideId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminExpireRideLeases({String? rideId}) async {
+    return _healthActionCallable('adminExpireRideLeases', <String, dynamic>{
+      if (rideId != null && rideId.trim().isNotEmpty) 'rideId': rideId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminOrchestratorAction({
+    required String action,
+    String? rideId,
+    String? queue,
+    String? reason,
+  }) async {
+    return _healthActionCallable('adminOrchestratorAction', <String, dynamic>{
+      'action': action.trim(),
+      if (rideId != null && rideId.trim().isNotEmpty) 'rideId': rideId.trim(),
+      if (queue != null && queue.trim().isNotEmpty) 'queue': queue.trim(),
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminCancelStaleRideSearch({String? rideId}) async {
+    return _healthActionCallable('adminCancelStaleRideSearch', <String, dynamic>{
+      if (rideId != null && rideId.trim().isNotEmpty) 'rideId': rideId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminClearDriverStaleActiveRide({
+    String? driverId,
+  }) async {
+    return _healthActionCallable('adminClearDriverStaleActiveRide', <String, dynamic>{
+      if (driverId != null && driverId.trim().isNotEmpty)
+        'driverId': driverId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminRerunDeliveryMatching({
+    String? deliveryId,
+  }) async {
+    return _healthActionCallable('adminRerunDeliveryMatching', <String, dynamic>{
+      if (deliveryId != null && deliveryId.trim().isNotEmpty)
+        'deliveryId': deliveryId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> adminForceDriverOffline({
+    String? driverId,
+    String? reason,
+  }) async {
+    return _healthActionCallable('adminForceDriverOffline', <String, dynamic>{
+      if (driverId != null && driverId.trim().isNotEmpty)
+        'driverId': driverId.trim(),
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> _healthActionCallable(
+    String name,
+    Map<String, dynamic> payload,
+  ) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        name,
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+      );
+      final result = await callable.call(payload);
+      return _map(result.data);
+    } catch (e) {
+      debugPrint('[HealthDrilldown] $name error: $e');
+      return <String, dynamic>{'success': false, 'reason': e.toString()};
+    }
+  }
+
   Future<Map<String, dynamic>> adminExpireStaleVaPaymentIntents({
     int scanLimit = 400,
   }) async {

@@ -6,15 +6,22 @@ import '../admin_config.dart';
 import '../services/admin_data_service.dart';
 import '../utils/admin_formatters.dart';
 import '../widgets/admin_components.dart';
+import '../widgets/admin_health_drilldown_panel.dart';
 
 /// Production system health (`adminGetProductionHealthSnapshot`).
 ///
 /// Hosted inside [AdminPanelScreen]'s vertical [SingleChildScrollView] — use
 /// [MainAxisSize.min] on all [Column]s (no nested vertical scroll).
 class AdminSystemHealthScreen extends StatefulWidget {
-  const AdminSystemHealthScreen({super.key, required this.dataService});
+  const AdminSystemHealthScreen({
+    super.key,
+    required this.dataService,
+    this.onDrilldownNavigate,
+  });
 
   final AdminDataService dataService;
+  final Future<void> Function(String action, Map<String, dynamic> row)?
+      onDrilldownNavigate;
 
   @override
   State<AdminSystemHealthScreen> createState() => _AdminSystemHealthScreenState();
@@ -22,17 +29,52 @@ class AdminSystemHealthScreen extends StatefulWidget {
 
 class _AdminSystemHealthScreenState extends State<AdminSystemHealthScreen> {
   static const Duration _pollInterval = Duration(seconds: 30);
+  static const Duration _matchingPollInterval = Duration(seconds: 10);
 
   bool _loading = true;
   String? _fatalError;
   Map<String, dynamic> _snapshot = const <String, dynamic>{};
   Timer? _timer;
+  String? _selectedCardId;
+  String? _selectedCardTitle;
+  String _selectedCardStatus = 'all';
+
+  static const Set<String> _drilldownCardIds = <String>{
+    'rides',
+    'deliveries',
+    'rider_payments',
+    'matching',
+    'drivers',
+    'merchants',
+    'service_areas',
+    'payment_providers',
+    'withdrawals',
+    'verifications',
+    'support',
+    'payout_destinations',
+    'payout_warnings',
+    'infrastructure',
+  };
+
+  String _drilldownCardKey(String? rawId) {
+    final String id = rawId?.trim() ?? '';
+    if (id == 'payout_warnings') return 'payout_destinations';
+    return id;
+  }
 
   @override
   void initState() {
     super.initState();
     unawaited(_load());
-    _timer = Timer.periodic(_pollInterval, (_) {
+    _restartHealthPollTimer();
+  }
+
+  Duration get _effectivePollInterval =>
+      _selectedCardId == 'matching' ? _matchingPollInterval : _pollInterval;
+
+  void _restartHealthPollTimer() {
+    _timer?.cancel();
+    _timer = Timer.periodic(_effectivePollInterval, (_) {
       if (mounted) {
         unawaited(_load(silent: true));
       }
@@ -129,15 +171,31 @@ class _AdminSystemHealthScreenState extends State<AdminSystemHealthScreen> {
     };
   }
 
+  void _onHealthCardTap(Map<String, dynamic> card) {
+    final String id = card['id']?.toString() ?? '';
+    if (!_drilldownCardIds.contains(id)) return;
+    final String status = card['status']?.toString() ?? 'all';
+    setState(() {
+      _selectedCardId = _drilldownCardKey(id);
+      _selectedCardTitle = card['title']?.toString() ?? id;
+      _selectedCardStatus = status == 'green' ? 'all' : status;
+    });
+    _restartHealthPollTimer();
+    if (id == 'matching') {
+      unawaited(_load(silent: true));
+    }
+  }
+
   Widget _healthCard({
     required String title,
     required String status,
     required String summary,
     String? detail,
+    VoidCallback? onTap,
+    bool selected = false,
   }) {
     final Color c = _statusColor(status);
-    return AdminSurfaceCard(
-      child: Column(
+    final Widget inner = Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -187,6 +245,34 @@ class _AdminSystemHealthScreenState extends State<AdminSystemHealthScreen> {
             ),
           ],
         ],
+      );
+    if (onTap == null) {
+      return AdminSurfaceCard(child: inner);
+    }
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(24),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: selected ? c : AdminThemeTokens.border,
+              width: selected ? 2 : 1,
+            ),
+            boxShadow: const <BoxShadow>[
+              BoxShadow(
+                color: Color(0x11000000),
+                blurRadius: 28,
+                offset: Offset(0, 16),
+              ),
+            ],
+          ),
+          padding: const EdgeInsets.all(20),
+          child: inner,
+        ),
       ),
     );
   }
@@ -337,6 +423,7 @@ class _AdminSystemHealthScreenState extends State<AdminSystemHealthScreen> {
     final Map<String, dynamic> merchants = _mapOf(_snapshot['merchants']);
     final Map<String, dynamic> withdrawals = _mapOf(_snapshot['withdrawals']);
     final Map<String, dynamic> riderPay = _mapOf(_snapshot['rider_payment_issues']);
+    final Map<String, dynamic> matching = _mapOf(_snapshot['matching_pipeline']);
     final Map<String, dynamic> svc = _mapOf(_snapshot['service_area_warnings']);
     final Map<String, dynamic> payout = _mapOf(_snapshot['payout_warnings']);
     final Map<String, dynamic> ver = _mapOf(_snapshot['verifications']);
@@ -383,14 +470,20 @@ class _AdminSystemHealthScreenState extends State<AdminSystemHealthScreen> {
             runSpacing: 12,
             children: cards
                 .map(
-                  (Map<String, dynamic> c) => SizedBox(
-                    width: 280,
-                    child: _healthCard(
-                      title: c['title']?.toString() ?? 'Check',
-                      status: c['status']?.toString() ?? 'yellow',
-                      summary: c['summary']?.toString() ?? '',
-                    ),
-                  ),
+                  (Map<String, dynamic> c) {
+                    final String id = c['id']?.toString() ?? '';
+                    final bool tappable = _drilldownCardIds.contains(id);
+                    return SizedBox(
+                      width: 280,
+                      child: _healthCard(
+                        title: c['title']?.toString() ?? 'Check',
+                        status: c['status']?.toString() ?? 'yellow',
+                        summary: c['summary']?.toString() ?? '',
+                        selected: _drilldownCardKey(id) == _selectedCardId,
+                        onTap: tappable ? () => _onHealthCardTap(c) : null,
+                      ),
+                    );
+                  },
                 )
                 .toList(),
           )
@@ -401,6 +494,20 @@ class _AdminSystemHealthScreenState extends State<AdminSystemHealthScreen> {
             summary: 'Health cards unavailable — see metrics below.',
           ),
         const SizedBox(height: 20),
+        if (_selectedCardId != null && _selectedCardTitle != null) ...<Widget>[
+          AdminHealthDrilldownPanel(
+            dataService: widget.dataService,
+            cardId: _selectedCardId!,
+            cardTitle: _selectedCardTitle!,
+            statusFilter: _selectedCardStatus,
+            infrastructureSubsystems: _selectedCardId == 'infrastructure'
+                ? _mapOf(infra['subsystems'])
+                : null,
+            onNavigate: widget.onDrilldownNavigate,
+            onSnapshotRefresh: () => unawaited(_load(silent: true)),
+          ),
+          const SizedBox(height: 16),
+        ],
         _buildInfrastructureCard(infra),
         const SizedBox(height: 12),
         AdminSurfaceCard(
@@ -468,6 +575,14 @@ class _AdminSystemHealthScreenState extends State<AdminSystemHealthScreen> {
                 '${_asInt(riderPay['pending_bank_transfer_confirmations'])}',
               ),
               _metricRow(
+                'Active VA awaiting transfer',
+                '${_asInt(riderPay['pending_va_awaiting_transfer'])}',
+              ),
+              _metricRow(
+                'Expired VA (pending_transfer)',
+                '${_asInt(riderPay['expired_va_pending_transfer'])}',
+              ),
+              _metricRow(
                 'Unpaid rider trips/orders',
                 '${_asInt(riderPay['unpaid_rider_trips_orders'])}',
               ),
@@ -491,6 +606,69 @@ class _AdminSystemHealthScreenState extends State<AdminSystemHealthScreen> {
             ],
           ),
         ),
+        const SizedBox(height: 12),
+        if (matching.isNotEmpty)
+          AdminSurfaceCard(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Matching pipeline',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: AdminThemeTokens.ink,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _metricRow(
+                  'Ride matching',
+                  matching['ride_matching_status']?.toString() ?? '—',
+                ),
+                _metricRow(
+                  'Dispatch matching',
+                  matching['dispatch_matching_status']?.toString() ?? '—',
+                ),
+                _metricRow(
+                  'Merchant delivery matching',
+                  matching['merchant_delivery_matching_status']?.toString() ?? '—',
+                ),
+                _metricRow(
+                  'Last offer created',
+                  _formatTs(matching['last_offer_created_at']),
+                ),
+                _metricRow(
+                  'Open requests without offers',
+                  '${_asInt(matching['open_requests_without_offers'])}',
+                ),
+                _metricRow(
+                  'Eligible online drivers',
+                  '${_asInt(matching['eligible_online_drivers'])}',
+                ),
+                _metricRow(
+                  'Pending offers',
+                  '${_asInt(matching['pending_offers'])}',
+                ),
+                _metricRow(
+                  'Online GPS drivers',
+                  '${_asInt(_mapOf(matching['location_diagnostics'])['online_gps_drivers'])}',
+                ),
+                _metricRow(
+                  'Online Area-mode drivers',
+                  '${_asInt(_mapOf(matching['location_diagnostics'])['online_area_drivers'])}',
+                ),
+                _metricRow(
+                  'Stale GPS drivers',
+                  '${_asInt(_mapOf(matching['location_diagnostics'])['stale_gps_drivers'])}',
+                ),
+                _metricRow(
+                  'Missing dispatch market',
+                  '${_asInt(_mapOf(matching['location_diagnostics'])['missing_dispatch_market_id'])}',
+                ),
+              ],
+            ),
+          ),
         const SizedBox(height: 24),
       ],
     );

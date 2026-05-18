@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../services/driver_finance_service.dart';
+import 'driver_wallet_topup_screen.dart';
 
 class WalletScreen extends StatefulWidget {
   const WalletScreen({super.key, required this.driverId});
@@ -428,6 +431,25 @@ class _WalletScreenState extends State<WalletScreen> {
                       _WalletBalanceHero(
                         balance: DriverFinanceService.formatNaira(
                           snapshot.currentWalletBalance,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: () {
+                            unawaited(
+                              Navigator.of(context).push<void>(
+                                MaterialPageRoute<void>(
+                                  builder: (_) => DriverWalletTopUpScreen(
+                                    driverId: widget.driverId,
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.add_card_outlined),
+                          label: const Text('Top up with Flutterwave'),
                         ),
                       ),
                       const SizedBox(height: 16),

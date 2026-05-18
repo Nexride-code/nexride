@@ -37,12 +37,18 @@ class DeliveryCloudFunctionsService {
   Future<Map<String, dynamic>> updateDeliveryState({
     required String deliveryId,
     String? deliveryState,
+    double? driverLat,
+    double? driverLng,
+    bool forceGeoOverride = false,
   }) =>
       _call('updateDeliveryState', <String, dynamic>{
         'deliveryId': deliveryId,
         'delivery_id': deliveryId,
         if (deliveryState != null && deliveryState.isNotEmpty)
           'delivery_state': deliveryState,
+        if (driverLat != null) 'driver_lat': driverLat,
+        if (driverLng != null) 'driver_lng': driverLng,
+        if (forceGeoOverride) 'force_geo_override': true,
       });
 }
 

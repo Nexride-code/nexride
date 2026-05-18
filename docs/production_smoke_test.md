@@ -6,6 +6,66 @@ Run after each production deploy (hosting + functions). Mark **PASS** / **FAIL**
 
 ---
 
+## PR 2 — Driver subscription + wallet — release validation — **2026-05-15** (wallet pay + intents)
+
+**Scope:** Release validation only (tests, analyze, targeted deploys, APK build, device smoke checklist). **No** website polish, discounts, biker/fleet, or new features beyond payment flows already in scope.
+
+**Store / production release remains BLOCKED** until **device smoke** (below) is **PASS** on a **real device** with a **release APK** built on an operator Mac.
+
+### 1. Automated — backend tests
+
+| Step | Command | PASS/FAIL | Notes |
+|------|---------|-----------|-------|
+| Backend unit tests | `cd /Users/lexemm/Projects/nexride/nexride_driver/functions && npm test` | **PASS** | **149/149** (2026-05-15; includes subscription default ₦7k/₦25k) |
+
+**Subscription pricing (must match UI):** Server resolves amounts from RTDB `app_config/pricing`, else defaults **₦7,000 weekly / ₦25,000 monthly** (`driver_flutterwave_payments.js`, aligned with `DriverBusinessConfig`). Callable **`getDriverSubscriptionPricing`** returns the same numbers the payment callables use; driver subscription screen prefers it for display. **`listDeliveryRegions`** uses Firestore `delivery_regions` where `enabled == true`; if the collection is empty it falls back to in-code **`ROLLOUT_SEED`** (safety net). Admins with `service_areas.write` can seed production regions via **`adminSeedRolloutDeliveryRegions`** (also exposed from **Admin → Rollout regions** / `admin_rollout_regions_screen.dart`). Single-field `enabled` queries do **not** require a composite index in `firestore.indexes.json`; deploy indexes after any index file change: `firebase deploy --only firestore:indexes --project nexride-8d5bc`.
+
+### 2. Automated — driver static analysis + release build
+
+| Step | Command | PASS/FAIL | Notes |
+|------|---------|-----------|-------|
+| Driver analyze | `cd /Users/lexemm/Projects/nexride/nexride_driver && flutter analyze` | **NOT RUN** | **Agent/CI:** Flutter CLI cannot write Homebrew `engine.stamp` (`Operation not permitted`). **Operator:** run on a normal Mac; fix only real analyzer errors. |
+| Driver release APK | `flutter clean && flutter pub get && flutter build apk --release` | **NOT RUN** | Same restriction as analyze. **Operator:** run after `flutter analyze` is clean. |
+
+### 3. Production deploy — `nexride_dispatch` (`nexride-8d5bc`)
+
+Run from repo root: `cd /Users/lexemm/Projects/nexride`
+
+| Batch | `firebase deploy --only` | PASS/FAIL | Notes |
+|-------|----------------------------|-----------|-------|
+| 1 | `functions:nexride_dispatch:getDriverSubscriptionPricing`, `driverPaySubscriptionFromWallet`, `driverStartSubscriptionFlutterwaveCard`, `driverCreateSubscriptionFlutterwaveVa` | **PASS** | 2026-05-15 — `getDriverSubscriptionPricing` **Successful create**; wallet + card + VA **Successful update** (pricing defaults ₦7k/₦25k) |
+| 2 | `functions:nexride_dispatch:driverStartWalletTopUpFlutterwaveCard`, `driverCreateWalletTopUpFlutterwaveVa` | **PASS** | 2026-05-15 — **Successful update** (both) |
+| 3 | `functions:nexride_dispatch:verifyPayment`, `flutterwaveWebhook`, `adminListPaymentIntents` | **PASS** | 2026-05-15 — **Successful update** (all three) |
+
+### 3b. Firestore indexes (`firestore.indexes.json`)
+
+| Step | Command | PASS/FAIL | Notes |
+|------|---------|-----------|-------|
+| Deploy indexes | `cd /Users/lexemm/Projects/nexride && firebase deploy --only firestore:indexes` | **PASS** | 2026-05-15 — **Deploy complete** (`payment_intents` composite indexes; `delivery_regions` single-field `enabled` does not need a composite) |
+
+### 4–5. Device smoke — **PENDING** (operator, release build)
+
+Run after operator `flutter analyze` + `flutter build apk --release` + install on device.
+
+| # | Check | PASS/FAIL | Notes |
+|---|--------|-----------|-------|
+| DV-0 | **Plan amount on screen = payment intent amount** (weekly/monthly matches server `getDriverSubscriptionPricing` / wallet & Flutterwave init) | **PENDING** | |
+| DV-1 | Tapping **weekly/monthly** plan does **not** show subscription confirmed by itself | **PENDING** | Expect payment method sheet first |
+| DV-2 | **Payment method sheet** opens (wallet / card / VA) | **PENDING** | |
+| DV-3 | **Insufficient** wallet balance → **does not** activate subscription | **PENDING** | |
+| DV-4 | **Sufficient** wallet → server debit + subscription **active** | **PENDING** | |
+| DV-5 | **Card** → pending intent; **no** activate until verified (webhook / verify) | **PENDING** | |
+| DV-6 | **VA** → account shown; **no** activate until verified | **PENDING** | |
+| DV-7 | Webhook success → activate / credit **exactly once** | **PENDING** | |
+| DV-8 | **Duplicate** webhook → **no** double activate / double credit | **PENDING** | |
+| DV-9 | **Expired** VA → **does not** auto-activate | **PENDING** | |
+| DV-10 | Driver can return to **map/menu** while payment **pending** | **PENDING** | |
+| AD-3 | Admin **`/admin/payment-intents`** shows **provider**, **driver_id**, **flow**, **status** (and filters incl. `all` / pending states) | **PENDING** | Callable returns `provider` after deploy |
+
+**Sign-off:** Set each **PENDING** → **PASS** or **FAIL** with operator, date, build id, and short evidence. Then update `production_release_readiness_final.md`. Store upload stays **blocked** until this section is green.
+
+---
+
 ## Backend deploy (pricing + health) — 2026-05-15
 
 Deployed to `nexride-8d5bc` (batches ~75s apart):
@@ -42,7 +102,7 @@ RIDER_TEST_EMAIL='test-rider@email.com' node tools/production_backend_verify.mjs
 # or: RIDER_ID_TOKEN='eyJhbG…' node tools/production_backend_verify.mjs
 ```
 
-**Unit tests:** `cd nexride_driver/functions && npm test` → 94/94 PASS.
+**Unit tests:** `cd nexride_driver/functions && npm test` → **149/149 PASS** (2026-05-15; subscription default pricing test).
 
 ### Live verification sign-off (2026-05-15)
 

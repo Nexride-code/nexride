@@ -292,12 +292,17 @@ class _RideTypeScreenState extends State<RideTypeScreen>
     if (!mounted) return false;
 
     List<RolloutDeliveryRegionModel> regions = const <RolloutDeliveryRegionModel>[];
+    String? catalogSource;
     try {
       final raw = await RiderRideCloudFunctionsService.instance
-          .listDeliveryRegions()
+          .listDeliveryRegions(
+            riderSelectedRegionId: selection?[RiderRolloutProfileStore.kRegionId],
+            riderSelectedCityId: cityId.isNotEmpty ? cityId : null,
+          )
           .timeout(const Duration(seconds: 22));
       if (raw['success'] == true) {
-        regions = parseRolloutRegionsResponse(raw);
+        regions = parseRolloutRegionsWithEmergencyFallback(Map<String, dynamic>.from(raw));
+        catalogSource = rolloutCatalogSourceFromResponse(Map<String, dynamic>.from(raw));
       }
     } catch (_) {}
 
@@ -307,14 +312,19 @@ class _RideTypeScreenState extends State<RideTypeScreen>
       regions: regions,
       initialRegionId: selection?[RiderRolloutProfileStore.kRegionId],
       initialCityId: cityId.isEmpty ? null : cityId,
+      catalogSource: catalogSource,
       onReloadCatalog: () async {
+        final sel = await RiderRolloutProfileStore.instance.fetchSelection(riderId);
         final raw = await RiderRideCloudFunctionsService.instance
-            .listDeliveryRegions()
+            .listDeliveryRegions(
+              riderSelectedRegionId: sel?[RiderRolloutProfileStore.kRegionId],
+              riderSelectedCityId: sel?[RiderRolloutProfileStore.kCityId],
+            )
             .timeout(const Duration(seconds: 22));
         if (raw['success'] != true) {
           throw StateError('listDeliveryRegions_failed');
         }
-        return parseRolloutRegionsResponse(raw);
+        return parseRolloutRegionsWithEmergencyFallback(Map<String, dynamic>.from(raw));
       },
     );
 

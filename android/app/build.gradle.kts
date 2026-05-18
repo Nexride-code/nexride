@@ -22,6 +22,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -69,6 +70,7 @@ flutter {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation("com.google.android.libraries.places:places:3.4.0")
     // Required for R8 with minifyShrink: Flutter engine references deferred-components /
     // Play Store dynamic feature APIs even when the app does not use split installs.

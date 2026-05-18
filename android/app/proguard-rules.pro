@@ -6,5 +6,33 @@
 -keep class io.flutter.** { *; }
 -keep class io.flutter.plugins.** { *; }
 
-# Play Core — optional refs from Flutter embedding (deferred components); keep splits install API.
+# Play Core — optional refs from Flutter embedding (deferred components).
 -dontwarn com.google.android.play.core.**
+-keep class com.google.android.play.core.** { *; }
+
+# Firebase Cloud Messaging
+-keep class com.google.firebase.messaging.** { *; }
+-keep class com.google.firebase.iid.** { *; }
+-keep class io.flutter.plugins.firebase.messaging.** { *; }
+-keepclassmembers class * {
+  @com.google.firebase.messaging.RemoteMessage *;
+}
+
+# flutter_local_notifications
+-keep class com.dexterous.flutterlocalnotifications.** { *; }
+-keep class androidx.core.app.NotificationCompat** { *; }
+-keep class android.app.Notification** { *; }
+-keepnames class * extends android.app.Service
+-keepnames class * extends android.content.BroadcastReceiver
+
+# Gson / JSON reflection (plugins)
+-keepattributes Signature
+-keepattributes *Annotation*
+-keepattributes EnclosingMethod
+-keepattributes InnerClasses
+-dontwarn sun.misc.**
+-keep class com.google.gson.** { *; }
+
+# Google Places (native SDK used from MainActivity)
+-keep class com.google.android.libraries.places.** { *; }
+-dontwarn com.google.android.libraries.places.**

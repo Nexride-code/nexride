@@ -85,6 +85,40 @@ String canonicalRideChatParticipantPath(String rideId, String uid) {
   return 'ride_chats/$r/participants/$u';
 }
 
+const String rideChatSafetyBannerText =
+    'For your safety, keep communication respectful. Do not share private '
+    'contact or payment details. Harassment, threats, sexual content, or abuse '
+    'are prohibited. Report unsafe behavior immediately.';
+
+Map<String, dynamic> buildRideChatInitUpdates({
+  required String rideId,
+  required String riderId,
+  required String driverId,
+}) {
+  final normalizedRideId = rideId.trim();
+  final normalizedRiderId = riderId.trim();
+  final normalizedDriverId = driverId.trim();
+  if (normalizedRideId.isEmpty) {
+    return <String, dynamic>{};
+  }
+  final updates = <String, dynamic>{
+    'ride_chats/$normalizedRideId/meta/ride_id': normalizedRideId,
+    'ride_chats/$normalizedRideId/meta/status': 'active',
+    'ride_chats/$normalizedRideId/meta/updated_at': DateTime.now().millisecondsSinceEpoch,
+  };
+  if (normalizedRiderId.isNotEmpty) {
+    updates['ride_chats/$normalizedRideId/meta/rider_id'] = normalizedRiderId;
+    updates['ride_chats/$normalizedRideId/participants/$normalizedRiderId'] =
+        <String, dynamic>{'role': 'rider', 'joined_at': DateTime.now().millisecondsSinceEpoch};
+  }
+  if (normalizedDriverId.isNotEmpty) {
+    updates['ride_chats/$normalizedRideId/meta/driver_id'] = normalizedDriverId;
+    updates['ride_chats/$normalizedRideId/participants/$normalizedDriverId'] =
+        <String, dynamic>{'role': 'driver', 'joined_at': DateTime.now().millisecondsSinceEpoch};
+  }
+  return updates;
+}
+
 RideChatMessage? parseRideChatMessageEntry({
   required String rideId,
   required String messageId,

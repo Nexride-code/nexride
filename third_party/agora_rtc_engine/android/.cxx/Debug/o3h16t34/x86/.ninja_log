@@ -1,4 +1,7 @@
 # ninja log v5
-0	284	1776944153934494716	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	bc56c6b5ef0919d4
-285	329	1776944153981184761	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/x86/libiris_rendering_android.so	cd2c130ebaa6a75b
-1	61	1776944546613948480	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/x86/libiris_rendering_android.so	cd2c130ebaa6a75b
+0	289	1778997462916111703	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	bc56c6b5ef0919d4
+290	336	1778997462965762137	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/x86/libiris_rendering_android.so	cd2c130ebaa6a75b
+0	5	0	clean	8590d1a692ac5311
+0	4	0	clean	8590d1a692ac5311
+2	313	1779018846023154896	CMakeFiles/iris_rendering_android.dir/iris_rtc_rendering_android.cc.o	bc56c6b5ef0919d4
+313	371	1779018846085451981	/Users/lexemm/Projects/nexride/build/agora_rtc_engine/intermediates/cxx/Debug/o3h16t34/obj/x86/libiris_rendering_android.so	cd2c130ebaa6a75b

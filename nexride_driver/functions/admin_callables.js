@@ -9,7 +9,11 @@ const { getAuth } = require("firebase-admin/auth");
 const { normUid } = require("./admin_auth");
 const adminPerms = require("./admin_permissions");
 const withdrawFlow = require("./withdraw_flow");
-const { fanOutDriverOffersIfEligible, cancelRideRequest } = require("./ride_callables");
+const {
+  fanOutDriverOffersIfEligible,
+  cancelRideRequest,
+  canonicalAssignedDriverId,
+} = require("./ride_callables");
 const {
   fanOutDeliveryOffersIfEligible,
   clearDeliveryFanoutAndOffers,
@@ -240,12 +244,25 @@ function deliveryAssignedDriverId(row) {
 function rideOpsUiBucket(ride) {
   const ts = String(ride?.trip_state ?? "").trim().toLowerCase();
   const st = String(ride?.status ?? "").trim().toLowerCase();
+  const rs = String(ride?.request_status ?? ride?.requestStatus ?? "")
+    .trim()
+    .toLowerCase();
+  const assigned = canonicalAssignedDriverId(ride || {});
   if (st === "cancelled" || ts === "cancelled" || ts === "trip_cancelled") return "cancelled";
   if (ts === "completed" || st === "completed" || ts === "trip_completed") return "completed";
-  if (ts === "in_progress") return "in_progress";
-  if (ts === "arrived") return "arrived";
-  if (ts === "driver_arriving") return "driver_arriving";
-  if (ts === "driver_assigned" || ts === "accepted") return "accepted";
+  if (ts === "in_progress" || ts === "on_trip") return "in_progress";
+  if (ts === "arrived" || ts === "driver_arrived") return "arrived";
+  if (ts === "driver_arriving" || ts === "driver_on_the_way") return "driver_arriving";
+  if (
+    ts === "driver_assigned" ||
+    ts === "accepted" ||
+    ts === "driver_accepted" ||
+    st === "accepted" ||
+    rs === "accepted" ||
+    assigned
+  ) {
+    return "accepted";
+  }
   if (ts === "searching" || LEGACY_OPEN_TRIP_STATES_OPS.has(ts) || LEGACY_OPEN_STATUS_OPS.has(st)) {
     return "searching";
   }
@@ -329,7 +346,7 @@ async function filterAdminAuditForTrip(db, tripId) {
   return rows.slice(0, 80);
 }
 
-function summarizeLiveRideRow(rideId, v, offeredDriverIds = []) {
+function summarizeLiveRideRow(rideId, v, offeredDriverIds = [], matchDebug = null) {
   const bucket = rideOpsUiBucket(v);
   const created = Number(v.created_at ?? v.requested_at ?? 0) || 0;
   const updated = Number(v.updated_at ?? 0) || 0;
@@ -339,6 +356,19 @@ function summarizeLiveRideRow(rideId, v, offeredDriverIds = []) {
   const accepted = normUid(v.accepted_driver_id) || null;
   const matched = normUid(v.matched_driver_id) || null;
   const assigned = normUid(v.driver_id) || null;
+  const paymentTxRef =
+    String(v.payment_reference ?? v.customer_transaction_reference ?? "").trim() || null;
+  const md = matchDebug && typeof matchDebug === "object" ? matchDebug : null;
+  let offerDeliveryStatus = null;
+  if (md && md.offer_delivery_status) {
+    offerDeliveryStatus = String(md.offer_delivery_status).trim();
+  } else if (offeredDriverIds.length > 0) {
+    offerDeliveryStatus = "offers_sent";
+  } else if (md && md.reason === "no_eligible_drivers") {
+    offerDeliveryStatus = "no_eligible_drivers";
+  } else {
+    offerDeliveryStatus = "pending_fanout";
+  }
   return {
     trip_kind: "ride",
     trip_id: rideId,
@@ -358,6 +388,10 @@ function summarizeLiveRideRow(rideId, v, offeredDriverIds = []) {
     currency: String(v.currency ?? "NGN"),
     payment_status: String(v.payment_status ?? ""),
     payment_method: String(v.payment_method ?? ""),
+    payment_tx_ref: paymentTxRef,
+    offer_delivery_status: offerDeliveryStatus,
+    offers_written:
+      md && md.offers_written != null ? Number(md.offers_written) : offeredDriverIds.length,
     region: regionHintFromRow(v),
     pickup_area: pickupAreaHint(v),
     dropoff_area: dropoffAreaHint(v),
@@ -370,10 +404,11 @@ function summarizeLiveRideRow(rideId, v, offeredDriverIds = []) {
     service_type: String(v.service_type ?? "ride"),
     vehicle_type: String(v.vehicle_type ?? v.requested_vehicle_type ?? ""),
     offered_driver_ids: offeredDriverIds,
+    no_eligible_reason: md && md.reason ? String(md.reason).trim() : null,
   };
 }
 
-function summarizeLiveDeliveryRow(deliveryId, v) {
+function summarizeLiveDeliveryRow(deliveryId, v, offeredDriverIds = [], matchDebug = null) {
   const bucket = deliveryOpsUiBucket(v);
   const created = Number(v.created_at ?? 0) || 0;
   const updated = Number(v.updated_at ?? 0) || 0;
@@ -405,6 +440,21 @@ function summarizeLiveDeliveryRow(deliveryId, v) {
     currency: String(v.currency ?? "NGN"),
     payment_status: String(v.payment_status ?? ""),
     payment_method: String(v.payment_method ?? ""),
+    payment_tx_ref:
+      String(v.payment_reference ?? v.customer_transaction_reference ?? "").trim() || null,
+    offer_delivery_status:
+      matchDebug && matchDebug.offer_delivery_status
+        ? String(matchDebug.offer_delivery_status)
+        : offeredDriverIds.length > 0
+          ? "offers_sent"
+          : "pending_fanout",
+    offered_driver_ids: offeredDriverIds,
+    offers_written:
+      matchDebug && matchDebug.offers_written != null
+        ? Number(matchDebug.offers_written)
+        : offeredDriverIds.length,
+    no_eligible_reason:
+      matchDebug && matchDebug.reason ? String(matchDebug.reason).trim() : null,
     region: regionHintFromRow(v),
     pickup_area: pickupAreaHint(v),
     dropoff_area: dropoffAreaHint(v),
@@ -502,16 +552,28 @@ async function adminListLiveTrips(_data, context, db) {
       .map((k) => normUid(k))
       .filter(Boolean)
       .slice(0, 48);
-    trips.push(summarizeLiveRideRow(rideId, v, offeredDriverIds));
+    const matchDebug =
+      v.match_debug && typeof v.match_debug === "object" ? v.match_debug : null;
+    trips.push(summarizeLiveRideRow(rideId, v, offeredDriverIds, matchDebug));
   }
 
   for (const deliveryId of delIdUnion) {
-    const rSnap = await db.ref(`delivery_requests/${deliveryId}`).get();
+    const [rSnap, fanSnap] = await Promise.all([
+      db.ref(`delivery_requests/${deliveryId}`).get(),
+      db.ref(`delivery_offer_fanout/${deliveryId}`).get(),
+    ]);
     const v = rSnap.val();
     if (!v || typeof v !== "object") continue;
     if (seen.has(`del:${deliveryId}`)) continue;
     seen.add(`del:${deliveryId}`);
-    trips.push(summarizeLiveDeliveryRow(deliveryId, v));
+    const fan = fanSnap.val() && typeof fanSnap.val() === "object" ? fanSnap.val() : {};
+    const offeredDriverIds = Object.keys(fan)
+      .map((k) => normUid(k))
+      .filter(Boolean)
+      .slice(0, 48);
+    const matchDebug =
+      v.match_debug && typeof v.match_debug === "object" ? v.match_debug : null;
+    trips.push(summarizeLiveDeliveryRow(deliveryId, v, offeredDriverIds, matchDebug));
   }
 
   // Merchant orders from Firestore — include active ones not already surfaced via delivery_requests.
@@ -630,6 +692,84 @@ async function adminGetTripDetail(data, context, db) {
     const payments = await loadPaymentRowsForRefs(db, ride);
     const audit_timeline = await filterAdminAuditForTrip(db, tripId);
     const trackToken = String(ride.track_token ?? "").trim() || null;
+    const md =
+      ride?.match_debug && typeof ride.match_debug === "object" ? ride.match_debug : {};
+    const [activeTripSnap, darSnap, fanSnap] = await Promise.all([
+      db.ref(`active_trips/${tripId}`).get(),
+      db.ref(`driver_active_ride/${canonicalAssignedDriverId(ride)}`).get(),
+      db.ref(`ride_offer_fanout/${tripId}`).get(),
+    ]);
+    let queueRowsRemaining = 0;
+    const fan = fanSnap.val() && typeof fanSnap.val() === "object" ? fanSnap.val() : {};
+    for (const driverId of Object.keys(fan)) {
+      const d = normUid(driverId);
+      if (!d) continue;
+      const qSnap = await db.ref(`driver_offer_queue/${d}/${tripId}`).get();
+      if (qSnap.exists()) queueRowsRemaining += 1;
+    }
+    const assignedDriverId = canonicalAssignedDriverId(ride) || null;
+    const pickup =
+      ride.pickup_address ??
+      (ride.pickup && typeof ride.pickup === "object"
+        ? ride.pickup.address ?? ride.pickup.label
+        : ride.pickup) ??
+      null;
+    const dropoff =
+      ride.dropoff_address ??
+      ride.destination_address ??
+      (ride.dropoff && typeof ride.dropoff === "object"
+        ? ride.dropoff.address ?? ride.dropoff.label
+        : ride.dropoff) ??
+      ride.destination ??
+      null;
+    let chatMessageCount = 0;
+    let latestChatTimestampMs = 0;
+    try {
+      const chatSnap = await db.ref(`ride_chats/${tripId}/messages`).limitToLast(50).get();
+      const chatVal =
+        chatSnap.val() && typeof chatSnap.val() === "object" ? chatSnap.val() : {};
+      chatMessageCount = Object.keys(chatVal).length;
+      for (const msg of Object.values(chatVal)) {
+        const ms = Number(msg?.created_at_ms ?? msg?.created_at ?? 0) || 0;
+        if (ms > latestChatTimestampMs) {
+          latestChatTimestampMs = ms;
+        }
+      }
+    } catch (_) {
+      /* optional */
+    }
+    let reportCount = 0;
+    let supportTicketCount = 0;
+    try {
+      const reportsSnap = await db
+        .ref("support_reports/trips")
+        .orderByChild("tripId")
+        .equalTo(tripId)
+        .limitToFirst(30)
+        .get();
+      const repVal =
+        reportsSnap.val() && typeof reportsSnap.val() === "object"
+          ? reportsSnap.val()
+          : {};
+      reportCount = Object.keys(repVal).length;
+    } catch (_) {
+      /* optional */
+    }
+    try {
+      const ticketsSnap = await db
+        .ref("support_tickets")
+        .orderByChild("ride_id")
+        .equalTo(tripId)
+        .limitToFirst(30)
+        .get();
+      const tVal =
+        ticketsSnap.val() && typeof ticketsSnap.val() === "object"
+          ? ticketsSnap.val()
+          : {};
+      supportTicketCount = Object.keys(tVal).length;
+    } catch (_) {
+      /* optional */
+    }
     return {
       success: true,
       trip_kind: "ride",
@@ -638,6 +778,29 @@ async function adminGetTripDetail(data, context, db) {
       payments,
       audit_timeline,
       track_token: trackToken,
+      lifecycle_ops: {
+        ride_id: tripId,
+        rider_id: normUid(ride.rider_id),
+        driver_id: assignedDriverId,
+        trip_state: ride.trip_state ?? null,
+        status: ride.status ?? null,
+        request_status: ride.request_status ?? null,
+        payment_status: ride.payment_status ?? null,
+        payment_method: ride.payment_method ?? null,
+        pickup,
+        dropoff,
+        offer_authority_source: md.offer_authority_source ?? null,
+        last_accept_attempt_at: md.last_accept_attempt_at ?? null,
+        last_accept_driver_id: md.last_accept_driver_id ?? null,
+        last_accept_failure_reason: md.last_accept_failure_reason ?? null,
+        active_trip_exists: activeTripSnap.exists(),
+        driver_active_ride_exists: darSnap.exists(),
+        queue_rows_remaining: queueRowsRemaining,
+        chat_message_count: chatMessageCount,
+        latest_chat_timestamp_ms: latestChatTimestampMs || null,
+        report_count: reportCount,
+        support_ticket_count: supportTicketCount,
+      },
     };
   }
   const dSnap = await db.ref(`delivery_requests/${tripId}`).get();
@@ -3350,38 +3513,93 @@ async function adminListPaymentIntents(data, context, db) {
   const fs = admin.firestore();
   const status = String(data?.status ?? "").trim().toLowerCase();
   const limit = Math.min(100, Math.max(1, Number(data?.limit ?? 40) || 40));
+
+  function intentCreatedMillis(d, x) {
+    const createdTs = x.created_at;
+    const fromField =
+      createdTs && typeof createdTs.toMillis === "function"
+        ? createdTs.toMillis()
+        : typeof createdTs === "number" && Number.isFinite(createdTs)
+          ? createdTs
+          : null;
+    if (fromField != null) return fromField;
+    if (typeof d.createTime?.toMillis === "function") {
+      return d.createTime.toMillis();
+    }
+    return null;
+  }
+
+  let docs = [];
   try {
-    let q = fs.collection(INTENT_COLLECTION);
+    let q = fs.collection(INTENT_COLLECTION).orderBy("created_at", "desc");
     if (status && status !== "all") {
       q = q.where("status", "==", status);
     }
     const snap = await q.limit(limit).get();
+    docs = snap.docs;
+  } catch (e) {
+    logger.warn("adminListPaymentIntents_query_fallback", { err: String(e?.message || e) });
+    try {
+      const snap = await fs.collection(INTENT_COLLECTION).limit(400).get();
+      let cand = [...snap.docs];
+      if (status && status !== "all") {
+        cand = cand.filter((doc) => {
+          const row = doc.data() || {};
+          return String(row.status ?? "")
+            .trim()
+            .toLowerCase() === status;
+        });
+      }
+      cand.sort(
+        (a, b) =>
+          (intentCreatedMillis(b, b.data() || {}) || 0) -
+          (intentCreatedMillis(a, a.data() || {}) || 0),
+      );
+      docs = cand.slice(0, limit);
+    } catch (e2) {
+      logger.warn("adminListPaymentIntents failed", { err: String(e2?.message || e2) });
+      return { success: false, reason: "query_failed" };
+    }
+  }
+
+  try {
     const intents = [];
-    for (const d of snap.docs) {
+    for (const d of docs) {
       const x = d.data() || {};
-      const createdTs = x.created_at;
-      const createdMillis =
-        createdTs && typeof createdTs.toMillis === "function"
-          ? createdTs.toMillis()
-          : typeof d.createTime?.toMillis === "function"
-            ? d.createTime.toMillis()
-            : null;
+      const createdMillis = intentCreatedMillis(d, x);
       intents.push({
         tx_ref: d.id,
         owner_uid: x.owner_uid ?? null,
+        user_id: x.owner_uid ?? null,
+        rider_id: x.rider_id ?? null,
+        provider: x.provider ?? null,
         app_context: x.app_context ?? null,
         flow: x.flow ?? null,
+        purpose: x.purpose ?? null,
         status: x.status ?? null,
         settlement_state: x.settlement_state ?? null,
+        webhook_status: x.webhook_status ?? null,
+        webhook_result: x.webhook_result ?? null,
+        webhook_applied_at_ms: x.webhook_applied_at_ms ?? null,
+        payment_failure_reason: x.payment_failure_reason ?? null,
+        reason_code: x.reason_code ?? x.payment_failure_reason ?? null,
+        flutterwave_http_status: x.flutterwave_http_status ?? null,
+        flutterwave_transaction_id: x.flutterwave_transaction_id ?? null,
         amount_ngn: Number(x.amount_ngn ?? 0) || 0,
         total_ngn: Number(x.total_ngn ?? 0) || 0,
         currency: x.currency != null ? String(x.currency) : null,
         ride_id: x.ride_id ?? null,
         delivery_id: x.delivery_id ?? null,
         merchant_id: x.merchant_id ?? null,
+        driver_id: x.driver_id ?? null,
+        subscription_plan_type: x.subscription_plan_type ?? null,
         merchant_bank_topup_id: x.merchant_bank_topup_id ?? null,
         expires_at_ms: Number(x.expires_at_ms ?? 0) || null,
         created_at_ms: createdMillis,
+        created_at:
+          createdMillis != null && Number.isFinite(createdMillis)
+            ? new Date(createdMillis).toISOString()
+            : null,
         account_number: x.account_number ?? null,
         bank_name: x.bank_name ?? null,
         account_name: x.account_name ?? null,
@@ -3392,9 +3610,47 @@ async function adminListPaymentIntents(data, context, db) {
     }
     return { success: true, intents };
   } catch (e) {
-    logger.warn("adminListPaymentIntents failed", { err: String(e?.message || e) });
+    logger.warn("adminListPaymentIntents map_failed", { err: String(e?.message || e) });
     return { success: false, reason: "query_failed" };
   }
+}
+
+async function adminGetPaymentDiagnostics(_data, context, db) {
+  const deny = await adminPerms.enforceCallable(db, context, "adminGetPaymentDiagnostics");
+  if (deny) {
+    return deny;
+  }
+  const {
+    flutterwaveSecretForVerify,
+    flutterwavePublicKeyForClient,
+    flutterwaveKeysReady,
+  } = require("./params");
+  const payDiag = require("./payment_diagnostics_store");
+  const projectId = String(process.env.GCLOUD_PROJECT || "").trim();
+  const webhook_url = projectId
+    ? `https://us-central1-${projectId}.cloudfunctions.net/flutterwaveWebhook`
+    : null;
+  const secret = String(flutterwaveSecretForVerify() || "").trim();
+  const publicKey = String(flutterwavePublicKeyForClient() || "").trim();
+  const snap = payDiag.getDiagnosticsSnapshot();
+  return {
+    success: true,
+    flutterwave_secret_ready: secret.length > 0,
+    flutterwave_public_ready: publicKey.length > 0,
+    flutterwave_keys_ready: flutterwaveKeysReady(),
+    webhook_url,
+    last_webhook_received_at_ms: snap.last_webhook_received_at_ms,
+    last_webhook_received_at:
+      snap.last_webhook_received_at_ms != null
+        ? new Date(snap.last_webhook_received_at_ms).toISOString()
+        : null,
+    last_va_create_error: snap.last_va_create_errors[0] ?? null,
+    last_card_init_error: snap.last_card_init_errors[0] ?? null,
+    last_verify_error: snap.last_verify_errors[0] ?? null,
+    recent_va_create_errors: snap.last_va_create_errors,
+    recent_card_init_errors: snap.last_card_init_errors,
+    recent_verify_errors: snap.last_verify_errors,
+  };
 }
 
 async function adminExpireStaleVaPaymentIntents(_data, context, db) {
@@ -3462,5 +3718,6 @@ module.exports = {
   adminReviewRiderFirestoreIdentity,
   adminApproveDriverVerification,
   adminListPaymentIntents,
+  adminGetPaymentDiagnostics,
   adminExpireStaleVaPaymentIntents,
 };

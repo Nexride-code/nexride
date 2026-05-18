@@ -256,6 +256,115 @@ async function validateRolloutSelection(fs, regionId, cityId, opts = {}) {
 }
 
 /**
+ * Closest enabled city bubble across all rollout regions (coords win over rider profile hints).
+ * @param {Array<{ region_id: string, dispatch_market_id: string, data: object, enabled?: boolean, cities: Array<object> }>} regionEntries
+ */
+function resolvePickupFromCatalogEntries(regionEntries, lat, lng, service) {
+  const sk = serviceKey(service);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { ok: false, reason: "location_required_for_service_area" };
+  }
+  let best = null;
+  let bestDistKm = Infinity;
+  for (const entry of regionEntries) {
+    if (entry.enabled === false) {
+      continue;
+    }
+    if (sk && !parentSupports(entry.data || {}, sk)) {
+      continue;
+    }
+    const dm = String(entry.dispatch_market_id || "").trim();
+    for (const c of entry.cities || []) {
+      if (c.enabled === false) {
+        continue;
+      }
+      if (sk && !citySupports(c, sk)) {
+        continue;
+      }
+      const cityId = String(c.city_id || c.cityId || "").trim();
+      const clat = Number(c.center_lat ?? c.centerLat);
+      const clng = Number(c.center_lng ?? c.centerLng);
+      const rad = Number(c.service_radius_km ?? c.serviceRadiusKm ?? 25);
+      if (!cityId || !Number.isFinite(clat) || !Number.isFinite(clng) || !Number.isFinite(rad) || rad <= 0) {
+        continue;
+      }
+      const d = haversineKm(lat, lng, clat, clng);
+      if (d <= rad && d < bestDistKm) {
+        bestDistKm = d;
+        best = {
+          ok: true,
+          region_id: entry.region_id,
+          city_id: cityId,
+          dispatch_market_id: dm,
+          distance_km: d,
+          matched_by: "coordinates",
+          pickup_resolution_source: "coordinates",
+          pickup_resolution_override_applied: false,
+        };
+      }
+    }
+  }
+  if (!best) {
+    return { ok: false, reason: "pickup_outside_enabled_city" };
+  }
+  return best;
+}
+
+/** Build catalog entries from embedded seed (tests / Firestore-empty fallback). */
+function rolloutSeedCatalogEntries() {
+  return ROLLOUT_SEED.map((seed) => ({
+    region_id: seed.region_id,
+    dispatch_market_id: seed.dispatch_market_id,
+    data: {
+      enabled: true,
+      supports_rides: true,
+      supports_food: true,
+      supports_package: true,
+      supports_delivery: true,
+    },
+    enabled: true,
+    cities: seed.cities.map((c) => ({
+      city_id: c.city_id,
+      display_name: c.display_name,
+      center_lat: c.center_lat,
+      center_lng: c.center_lng,
+      service_radius_km: c.service_radius_km,
+      enabled: true,
+      supports_rides: true,
+    })),
+  }));
+}
+
+/**
+ * Resolve pickup service area from GPS across every rollout market (not rider profile market).
+ */
+async function resolvePickupRolloutFromCoordinates(fs, lat, lng, service) {
+  const entries = [];
+  for (const rid of ROLLOUT_REGION_IDS) {
+    const reg = await loadRegionDoc(fs, rid);
+    if (!reg || reg.data.enabled === false) {
+      continue;
+    }
+    const citiesSnap = await fs.collection("delivery_regions").doc(rid).collection("cities").get();
+    const cities = citiesSnap.docs.map((doc) => ({
+      city_id: doc.id,
+      ...(doc.data() || {}),
+    }));
+    entries.push({
+      region_id: rid,
+      dispatch_market_id: String(reg.data.dispatch_market_id || "").trim(),
+      data: reg.data,
+      enabled: reg.data.enabled,
+      cities,
+    });
+  }
+  const catalog = entries.some((e) => (e.cities || []).length > 0)
+    ? entries
+    : rolloutSeedCatalogEntries();
+  return resolvePickupFromCatalogEntries(catalog, lat, lng, service);
+}
+
+/**
  * Pickup / driver position: must fall inside an enabled city service bubble for the service.
  */
 async function assertRolloutGeoForDispatch(fs, dispatchMarketId, lat, lng, service) {
@@ -328,6 +437,43 @@ async function assertRolloutWithHints(fs, dispatchMarketId, lat, lng, service, h
   const strictRideRequestHints = opts.strict_ride_request_hints === true;
   const regionHint = trim(hints.region_id ?? hints.rollout_region_id, 80);
   const cityHint = trim(hints.city_id ?? hints.service_city_id ?? hints.rollout_city_id, 80);
+
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    const global = await resolvePickupRolloutFromCoordinates(fs, lat, lng, service);
+    if (global.ok) {
+      if (
+        regionHint &&
+        cityHint &&
+        (regionHint !== global.region_id || cityHint !== global.city_id)
+      ) {
+        logger.warn("ROLLOUT_PICKUP_COORDS_OVERRIDE_HINTS", {
+          lat,
+          lng,
+          hint_region_id: regionHint,
+          hint_city_id: cityHint,
+          resolved_region_id: global.region_id,
+          resolved_city_id: global.city_id,
+          resolved_dispatch_market_id: global.dispatch_market_id,
+          distance_km: global.distance_km,
+        });
+        global.pickup_resolution_warning = "coords_override_rider_profile_hints";
+        global.pickup_resolution_override_applied = true;
+        global.rider_hint_region_id = regionHint;
+        global.rider_hint_city_id = cityHint;
+      }
+      global.pickup_resolution_source =
+        global.pickup_resolution_source || global.matched_by || "coordinates";
+      return global;
+    }
+    if (strictRideRequestHints) {
+      return {
+        ok: false,
+        reason: "no_service_area_for_pickup",
+        message: "NexRide is not available in this pickup area yet.",
+      };
+    }
+  }
+
   if (regionHint && cityHint) {
     const v = await validateRolloutSelection(fs, regionHint, cityHint, { service });
     if (!v.ok) {
@@ -585,11 +731,13 @@ async function adminUpsertDeliveryCity(data, context, db) {
   return { success: true, region_id: regionId, city_id: cityId };
 }
 
-async function adminSeedRolloutDeliveryRegions(_data, context, db) {
-  const denySeed = await adminPerms.enforceCallable(db, context, "adminSeedRolloutDeliveryRegions");
-  if (denySeed) return denySeed;
-  const fs = admin.firestore();
-  const adminUid = normUid(context.auth?.uid);
+/**
+ * Writes canonical rollout regions + cities to Firestore (idempotent merge).
+ * @param {FirebaseFirestore.Firestore} fs
+ * @param {{ seeded_by: string }} meta
+ */
+async function writeRolloutSeedToFirestore(fs, meta) {
+  const adminUid = trim(meta?.seeded_by, 120) || "system";
   for (const row of ROLLOUT_SEED) {
     const { cities } = row;
     const regionId = row.region_id;
@@ -642,6 +790,15 @@ async function adminSeedRolloutDeliveryRegions(_data, context, db) {
         );
     }
   }
+  logger.info("DELIVERY_REGION_WRITE_SEED", { regions: ROLLOUT_SEED.length, seeded_by: adminUid });
+}
+
+async function adminSeedRolloutDeliveryRegions(_data, context, db) {
+  const denySeed = await adminPerms.enforceCallable(db, context, "adminSeedRolloutDeliveryRegions");
+  if (denySeed) return denySeed;
+  const fs = admin.firestore();
+  const adminUid = normUid(context.auth?.uid);
+  await writeRolloutSeedToFirestore(fs, { seeded_by: adminUid });
   logger.info("DELIVERY_REGION_SEED_ROLLOUT", { regions: ROLLOUT_SEED.length });
   return { success: true, regions: ROLLOUT_SEED.length };
 }
@@ -652,13 +809,59 @@ async function adminSeedDefaultNigeriaDeliveryRegions(data, context, db) {
 }
 
 /**
+ * Build the canonical region list from ROLLOUT_SEED (used when Firestore is empty).
+ */
+function _regionsFromSeed() {
+  return ROLLOUT_SEED.map((row) => ({
+    region_id: row.region_id,
+    country: "Nigeria",
+    state: row.state,
+    enabled: true,
+    supports_rides: true,
+    supports_food: true,
+    supports_package: true,
+    supports_merchant: true,
+    supports_delivery: true,
+    dispatch_market_id: row.dispatch_market_id,
+    currency: "NGN",
+    timezone: "Africa/Lagos",
+    cities: row.cities.map((c) => ({
+      city_id: c.city_id,
+      display_name: c.display_name,
+      enabled: true,
+      supports_rides: true,
+      supports_food: true,
+      supports_package: true,
+      supports_merchant: true,
+      supports_delivery: true,
+      center_lat: c.center_lat,
+      center_lng: c.center_lng,
+      service_radius_km: c.service_radius_km,
+    })),
+  }));
+}
+
+/**
  * Authenticated clients: nested regions with enabled cities only.
+ * When Firestore has no `delivery_regions` docs, seeds canonical rollout rows once.
+ * Falls back to in-memory ROLLOUT_SEED when enabled regions have no cities.
  */
 async function listDeliveryRegions(data, context) {
   if (!context?.auth?.uid) {
     return { success: false, reason: "unauthorized" };
   }
   const fs = admin.firestore();
+
+  const probe = await fs.collection("delivery_regions").limit(1).get();
+  if (probe.empty) {
+    try {
+      await writeRolloutSeedToFirestore(fs, { seeded_by: "auto_listDeliveryRegions" });
+      logger.info("DELIVERY_REGIONS_AUTO_SEEDED", { uid: context.auth.uid });
+    } catch (e) {
+      logger.warn("DELIVERY_REGIONS_AUTO_SEED_FAILED", { error: String(e) });
+    }
+  }
+
   const snap = await fs.collection("delivery_regions").where("enabled", "==", true).get();
   const regions = [];
   for (const doc of snap.docs) {
@@ -681,6 +884,9 @@ async function listDeliveryRegions(data, context) {
         service_radius_km: c.service_radius_km ?? c.serviceRadiusKm ?? null,
       });
     });
+    if (!cities.length) {
+      continue;
+    }
     regions.push({
       region_id: doc.id,
       country: m.country ?? "Nigeria",
@@ -697,8 +903,44 @@ async function listDeliveryRegions(data, context) {
       cities,
     });
   }
+
+  if (!regions.length) {
+    logger.info("LIST_DELIVERY_REGIONS_FALLBACK_SEED", { uid: context.auth.uid });
+    const seeded = _regionsFromSeed();
+    const totalCities = seeded.reduce((n, r) => n + (Array.isArray(r.cities) ? r.cities.length : 0), 0);
+    logger.info("LIST_DELIVERY_REGIONS_RESULT", {
+      uid: context.auth.uid,
+      source: "seed_fallback",
+      enabled_region_count: seeded.length,
+      total_city_count: totalCities,
+      debug_client:
+        data && typeof data === "object"
+          ? {
+              rider_selected_region_id: data.rider_selected_region_id ?? data.riderSelectedRegionId ?? null,
+              rider_selected_city_id: data.rider_selected_city_id ?? data.riderSelectedCityId ?? null,
+            }
+          : null,
+    });
+    return { success: true, regions: seeded, items: seeded, source: "seed_fallback" };
+  }
+
   regions.sort((a, b) => String(a.state).localeCompare(String(b.state)));
-  return { success: true, regions, items: regions };
+  const totalCities2 = regions.reduce((n, r) => n + (Array.isArray(r.cities) ? r.cities.length : 0), 0);
+  logger.info("LIST_DELIVERY_REGIONS_RESULT", {
+    uid: context.auth.uid,
+    source: "firestore",
+    firestore_enabled_region_docs: snap.docs.length,
+    enabled_region_count: regions.length,
+    total_city_count: totalCities2,
+    debug_client:
+      data && typeof data === "object"
+        ? {
+            rider_selected_region_id: data.rider_selected_region_id ?? data.riderSelectedRegionId ?? null,
+            rider_selected_city_id: data.rider_selected_city_id ?? data.riderSelectedCityId ?? null,
+          }
+        : null,
+  });
+  return { success: true, regions, items: regions, source: "firestore" };
 }
 
 async function adminListDeliveryRollout(data, context, db) {
@@ -950,6 +1192,9 @@ module.exports = {
   validateRolloutSelection,
   assertRolloutGeoForDispatch,
   assertRolloutWithHints,
+  resolvePickupFromCatalogEntries,
+  resolvePickupRolloutFromCoordinates,
+  rolloutSeedCatalogEntries,
   adminUpsertDeliveryRegion,
   adminUpsertDeliveryCity,
   adminSeedRolloutDeliveryRegions,

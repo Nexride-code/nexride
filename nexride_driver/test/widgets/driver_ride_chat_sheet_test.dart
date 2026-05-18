@@ -84,6 +84,7 @@ void main() {
     completer.complete(null);
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.send), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 900));
   });
 
   testWidgets(
@@ -116,7 +117,7 @@ void main() {
       await tester.enterText(find.byType(TextField), 'Checking in');
       await tester.tap(find.byType(ElevatedButton));
       await tester.pump();
-      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
 
       completer.complete(
         'Sending this message took too long. Please try again.',
@@ -130,4 +131,43 @@ void main() {
       expect(find.byIcon(Icons.send), findsOneWidget);
     },
   );
+
+  testWidgets('driver ride chat sheet shows safety banner', (
+    WidgetTester tester,
+  ) async {
+    final messages = ValueNotifier<List<RideChatMessage>>(
+      const <RideChatMessage>[],
+    );
+    addTearDown(messages.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: DriverRideChatSheet(
+            rideId: 'ride-safe',
+            peerName: 'Alex Rider',
+            currentUserId: 'driver-1',
+            messagesListenable: messages,
+            onSendMessage: (String rideId, String text) async => null,
+            onRetryMessage: (
+              String rideId,
+              RideChatMessage message,
+            ) async =>
+                null,
+            onSendImage: (
+              String rideId,
+              DriverRideChatImageSource source,
+            ) async =>
+                null,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Alex Rider'), findsOneWidget);
+    expect(find.textContaining('sexual content'), findsOneWidget);
+    expect(find.text('No messages yet'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 900));
+  });
 }

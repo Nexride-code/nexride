@@ -12,13 +12,23 @@ const adminPerms = require("./admin_permissions");
 const liveOps = require("./live_operations_dashboard_callable");
 const { normalizeServiceAreaRow } = require("./ecosystem/delivery_regions");
 const { loadNexrideOfficialBankAccountFromRtdb } = require("./nexride_official_bank_config");
+const {
+  flutterwaveSecretForVerify,
+  flutterwavePublicKeyForClient,
+  flutterwaveKeysReady,
+} = require("./params");
+const {
+  isActiveFlutterwaveVaAwaiting,
+  isOpenMatchingTripRow,
+  scanMatchingPipelineHealth,
+} = require("./matching_health");
 
 const firestore = () => admin.firestore();
 
 const DRIVERS_SCAN_CAP = 800;
 const MERCHANTS_SCAN_CAP = 200;
 const WITHDRAWALS_CAP = 200;
-const STALE_DRIVER_HEARTBEAT_MS = 180_000;
+const STALE_DRIVER_HEARTBEAT_MS = 90_000;
 const STALE_MERCHANT_PORTAL_MS = 600_000;
 const PORTAL_ONLINE_MS = 120_000;
 const SAMPLE_LIMIT = 12;
@@ -272,8 +282,26 @@ async function scanServiceAreaWarnings(db) {
   let missing_geo = 0;
   let disabled_active_area = 0;
   let missing_dispatch_market_id = 0;
+  let regions_seeded = false;
   try {
     const fs = firestore();
+    const probe = await fs.collection("delivery_regions").limit(1).get();
+    if (probe.empty) {
+      try {
+        const { writeRolloutSeedToFirestore } = require("./ecosystem/delivery_regions");
+        await writeRolloutSeedToFirestore(fs, { seeded_by: "auto_production_health" });
+        regions_seeded = true;
+        logger.info("production_health delivery_regions auto-seeded");
+      } catch (seedErr) {
+        logger.warn("production_health delivery_regions auto-seed failed", {
+          err: String(seedErr?.message || seedErr),
+        });
+        warnings.push({
+          type: "delivery_regions_empty",
+          note: "No delivery_regions in Firestore; auto-seed failed",
+        });
+      }
+    }
     const regionsSnap = await fs.collection("delivery_regions").limit(80).get();
     for (const regDoc of regionsSnap.docs) {
       const regionId = regDoc.id;
@@ -302,6 +330,7 @@ async function scanServiceAreaWarnings(db) {
     missing_geo,
     disabled_active_area,
     missing_dispatch_market_id,
+    regions_seeded,
     warnings: takeSample(warnings, 20),
   };
 }
@@ -393,6 +422,8 @@ async function countRiderPaymentIssues(db) {
 async function _countRiderPaymentIssuesImpl(db, asOfMs) {
   let failed_card_payments = 0;
   let pending_bank_transfer_confirmations = 0;
+  let pending_va_awaiting_transfer = 0;
+  let expired_va_pending_transfer = 0;
   let unpaid_rider_trips_orders = 0;
   let active_payment_intents = 0;
   let payment_verification_mismatches = 0;
@@ -411,6 +442,21 @@ async function _countRiderPaymentIssuesImpl(db, asOfMs) {
         failed_card_payments += 1;
         if (isPaymentVerificationMismatchSignal(row)) payment_verification_mismatches += 1;
       } else if (bucket === "bank") {
+        if (ps === "pending_transfer") {
+          if (isActiveFlutterwaveVaAwaiting(row, asOfMs)) {
+            pending_va_awaiting_transfer += 1;
+            continue;
+          }
+          const exp = Number(row.va_expires_at_ms ?? row.expires_at_ms ?? 0) || 0;
+          if (exp > 0 && exp <= asOfMs) {
+            expired_va_pending_transfer += 1;
+            continue;
+          }
+          if (isOpenMatchingTripRow(row)) {
+            pending_va_awaiting_transfer += 1;
+            continue;
+          }
+        }
         pending_bank_transfer_confirmations += 1;
       } else if (bucket === "unpaid") {
         unpaid_rider_trips_orders += 1;
@@ -575,18 +621,24 @@ async function _countRiderPaymentIssuesImpl(db, asOfMs) {
     logger.warn("production_health merchant_orders scan failed", { err: String(e?.message || e) });
   }
 
-  const total =
+  const red_total =
     failed_card_payments +
-    pending_bank_transfer_confirmations +
     unpaid_rider_trips_orders +
-    active_payment_intents;
+    active_payment_intents +
+    expired_va_pending_transfer;
+  const yellow_total = pending_bank_transfer_confirmations + pending_va_awaiting_transfer;
+  const total = red_total;
 
   return {
     failed_card_payments,
     pending_bank_transfer_confirmations,
+    pending_va_awaiting_transfer,
+    expired_va_pending_transfer,
     unpaid_rider_trips_orders,
     active_payment_intents,
     payment_verification_mismatches,
+    red_total,
+    yellow_total,
     total,
     actionable_window_failed_unpaid_ms: RIDER_PAYMENT_ACTIONABLE_MAX_AGE_MS,
     actionable_window_bank_review_ms: RIDER_PAYMENT_BANK_REVIEW_MAX_AGE_MS,
@@ -816,6 +868,10 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
   const drivers = liveDash.drivers || {};
   const merchants = liveDash.merchants || {};
   const rides = liveDash.rides || {};
+  const matchingHealth = await scanMatchingPipelineHealth(
+    db,
+    Number(drivers.online ?? 0) || 0,
+  );
 
   let latest_driver_heartbeat_ms = null;
   let latest_driver_heartbeat_id = null;
@@ -849,7 +905,15 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
   const infraStatus = infrastructure.status;
   const infraOk = infraStatus === "ok";
 
-  const paymentIssueTotal = riderPayments.total || 0;
+  const paymentIssueTotal = riderPayments.red_total ?? riderPayments.total ?? 0;
+  const paymentYellowTotal = riderPayments.yellow_total ?? 0;
+  const riderPaymentsCardStatus =
+    paymentIssueTotal > 0
+      ? statusLevel(paymentIssueTotal, 1, 10)
+      : paymentYellowTotal > 0
+        ? "yellow"
+        : "green";
+  const matchingCardStatus = matchingHealth.overall_matching_status || "green";
   const payoutWarnings =
     withdrawals.driver_missing_destination + withdrawals.merchant_missing_destination;
   const serviceAreaWarningTotal =
@@ -857,17 +921,22 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
     serviceAreas.missing_dispatch_market_id +
     serviceAreas.disabled_active_area;
   const officialBankWarningTotal = officialBank.configured ? 0 : 1;
-  const configurationWarningTotal = serviceAreaWarningTotal + officialBankWarningTotal;
+  const serviceAreasConfigWarningTotal = serviceAreaWarningTotal + officialBankWarningTotal;
+  const fwSecretOk = Boolean(String(flutterwaveSecretForVerify() || "").trim());
+  const fwPublicOk = Boolean(String(flutterwavePublicKeyForClient() || "").trim());
+  const fwKeysReady = flutterwaveKeysReady();
 
   const overall_status = worstStatus(
     infraStatus === "ok" ? "green" : infraStatus === "degraded" ? "yellow" : "red",
     statusLevel(drivers.stale_heartbeat || 0, 3, 15),
     statusLevel(merchants.stale_portal || 0, 2, 8),
-    statusLevel(paymentIssueTotal, 1, 10),
+    riderPaymentsCardStatus,
+    matchingCardStatus,
     statusLevel(withdrawals.pending_total || 0, 5, 30),
     statusLevel(payoutWarnings, 1, 5),
     statusLevel(support_open, 10, 50),
-    statusLevel(configurationWarningTotal, 1, 5),
+    statusLevel(serviceAreasConfigWarningTotal, 1, 5),
+    fwKeysReady ? "green" : "red",
   );
 
   const cards = [
@@ -898,13 +967,30 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
       id: "rides",
       title: "Active operations",
       status: statusLevel(rides.active || 0, 50, 200),
-      summary: `${rides.active ?? 0} live trips · ${activeTrips} active_trips · ${activeDeliveries} deliveries`,
+      summary: `${rides.active ?? 0} live trips · ${activeTrips} active_trips`,
+    },
+    {
+      id: "deliveries",
+      title: "Deliveries",
+      status: statusLevel(activeDeliveries, 15, 80),
+      summary: `${activeDeliveries} active deliveries · ${matchingHealth.open_requests_without_offers ?? 0} open w/o offers`,
     },
     {
       id: "rider_payments",
       title: "Rider payments",
-      status: statusLevel(paymentIssueTotal, 1, 10),
-      summary: `${paymentIssueTotal} actionable issues (recent card/bank/unpaid intents · excludes stale/historical)`,
+      status: riderPaymentsCardStatus,
+      summary:
+        paymentIssueTotal > 0
+          ? `${paymentIssueTotal} red issues (failed/unpaid/expired VA · excludes active VA awaiting transfer)`
+          : paymentYellowTotal > 0
+            ? `${paymentYellowTotal} awaiting transfer/review (active VA or manual bank · not counted as failures)`
+            : "No actionable rider payment issues",
+    },
+    {
+      id: "matching",
+      title: "Matching",
+      status: matchingCardStatus,
+      summary: `Ride ${matchingHealth.ride_matching_status} · Dispatch ${matchingHealth.dispatch_matching_status} · Merchant ${matchingHealth.merchant_delivery_matching_status} · ${matchingHealth.open_requests_without_offers} open w/o offers`,
     },
     {
       id: "withdrawals",
@@ -933,8 +1019,20 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
     {
       id: "service_areas",
       title: "Service areas",
-      status: statusLevel(configurationWarningTotal, 1, 5),
-      summary: `${configurationWarningTotal} configuration warnings (areas + official bank)`,
+      status: statusLevel(serviceAreasConfigWarningTotal, 1, 5),
+      summary: `${serviceAreasConfigWarningTotal} configuration warnings (geo / dispatch market / official bank)`,
+    },
+    {
+      id: "payment_providers",
+      title: "Payment providers",
+      status: fwKeysReady ? "green" : "red",
+      summary: fwKeysReady
+        ? "Flutterwave public + secret keys are available in this runtime."
+        : !fwSecretOk && !fwPublicOk
+          ? "Flutterwave public and secret keys missing — VA, card checkout, and verify will fail."
+          : !fwSecretOk
+            ? "Flutterwave secret key missing — VA creation and payment verify will fail."
+            : "Flutterwave public key missing — hosted card checkout metadata unavailable.",
     },
   ];
 
@@ -972,8 +1070,15 @@ async function adminGetProductionHealthSnapshot(data, context, db) {
     verifications: { pending: pendingVerifications },
     support: { open: support_open },
     rider_payment_issues: riderPayments,
+    matching_pipeline: matchingHealth,
     service_area_warnings: serviceAreas,
     official_bank: officialBank,
+    payment_providers: {
+      flutterwave_secret_configured: fwSecretOk,
+      flutterwave_public_configured: fwPublicOk,
+      flutterwave_keys_ready: fwKeysReady,
+      registerBankTransferPayment_secret_ready: fwKeysReady,
+    },
     payout_warnings: {
       driver_withdrawal_missing_destination: withdrawals.driver_missing_destination,
       merchant_withdrawal_missing_destination: withdrawals.merchant_missing_destination,

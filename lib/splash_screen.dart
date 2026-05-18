@@ -12,6 +12,7 @@ import 'rider_login.dart';
 import 'services/rider_trip_deep_link_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
+import 'support/app_crash_guard.dart';
 import 'support/app_startup_state.dart';
 import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
@@ -147,6 +148,9 @@ class _SplashScreenState extends State<SplashScreen> {
       authenticatedUser = authResult.value;
       _lastKnownUser = authenticatedUser;
       _logStartup('AUTH_CHECK_OK hasUser=${authenticatedUser != null}');
+      if (authenticatedUser != null) {
+        startupStep('auth_restored', fields: {'uid': authenticatedUser.uid});
+      }
       nextScreen = _fallbackScreenFor(authenticatedUser);
 
       if (authenticatedUser == null) {

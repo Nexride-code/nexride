@@ -46,4 +46,15 @@ void main() {
       77,
     );
   });
+
+  test('buildRideChatInitUpdates writes meta and participants paths', () {
+    final updates = buildRideChatInitUpdates(
+      rideId: 'ride-789',
+      riderId: 'rider-1',
+      driverId: 'driver-9',
+    );
+
+    expect(updates['ride_chats/ride-789/meta/status'], 'active');
+    expect(updates['ride_chats/ride-789/meta/driver_id'], 'driver-9');
+  });
 }

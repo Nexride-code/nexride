@@ -158,27 +158,34 @@ async function getRideCallRtcToken(data, context, db) {
   const force = data?.force === true;
   const forceClearStale = data?.force_clear_stale !== false;
 
-  const rs = await db.ref(`ride_requests/${rideId}`).get();
-  const ride = rs.val();
+  let rs = await db.ref(`ride_requests/${rideId}`).get();
+  let ride = rs.val();
+  let isDelivery = false;
   if (!ride || typeof ride !== "object") {
-    console.log("CALL_TOKEN_DENIED", rideId, "ride_missing");
-    return { success: false, reason: "ride_missing" };
+    const ds = await db.ref(`delivery_requests/${rideId}`).get();
+    ride = ds.val();
+    isDelivery = Boolean(ride && typeof ride === "object");
+    if (!isDelivery) {
+      console.log("CALL_TOKEN_DENIED", rideId, "ride_missing");
+      return { success: false, reason: "ride_missing" };
+    }
   }
 
-  const rider = normUid(ride.rider_id);
+  const rider = normUid(ride.rider_id ?? ride.customer_id);
   const rawDriverId = String(ride.driver_id ?? "").trim();
   let driver = normUid(ride.driver_id);
   const waiting = ["waiting", "pending", "", "null"];
   const dLower = rawDriverId.toLowerCase();
   if (!driver || waiting.includes(dLower)) {
-    driver = normUid(ride.matched_driver_id);
+    driver = normUid(ride.matched_driver_id ?? ride.accepted_driver_id);
   }
   if (!driver || waiting.includes(driver.toLowerCase())) {
     console.log("CALL_TOKEN_DENIED", rideId, "no_driver_assigned");
     return { success: false, reason: "no_driver_assigned" };
   }
 
-  if (caller !== rider && caller !== driver) {
+  const merchantId = normUid(ride.merchant_id ?? ride.merchantId);
+  if (caller !== rider && caller !== driver && (!isDelivery || caller !== merchantId)) {
     console.log("CALL_TOKEN_DENIED", rideId, caller);
     return { success: false, reason: "forbidden" };
   }
@@ -206,7 +213,7 @@ async function getRideCallRtcToken(data, context, db) {
     `certLength=${certificate.length}`,
   );
 
-  console.log("CALL_TOKEN_REQUESTED", rideId, caller);
+  console.log("RIDE_CALL_TOKEN_REQUEST", rideId, caller);
 
   if (!appId || !certificate) {
     console.log(

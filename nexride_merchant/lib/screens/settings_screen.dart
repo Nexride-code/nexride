@@ -3,7 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../domain/merchant_portal_access.dart';
+import '../services/merchant_session_service.dart';
 import '../state/merchant_app_state.dart';
+import 'login_screen.dart';
 import 'merchant_staff_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -31,8 +33,18 @@ class SettingsScreen extends StatelessWidget {
               ),
             ),
           ListTile(
+            leading: const Icon(Icons.logout_rounded),
             title: const Text('Sign out'),
-            onTap: () => FirebaseAuth.instance.signOut(),
+            onTap: () async {
+              await MerchantSessionService.instance.signOut(context: context);
+              if (!context.mounted) {
+                return;
+              }
+              await Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+                (_) => false,
+              );
+            },
           ),
           const ListTile(
             title: Text('Legal'),

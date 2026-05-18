@@ -1,7 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nexride/config/rollout_copy.dart';
 import 'package:nexride/models/rollout_delivery_region_model.dart';
-import 'package:nexride/services/rider_ride_cloud_functions_service.dart';
+import 'package:nexride/services/rider_ride_cloud_functions_service.dart'
+    show riderRideCallableUserMessage;
 
 void main() {
   test('RolloutCopy.notAvailableInArea is exact backend-facing string', () {
@@ -62,7 +63,7 @@ void main() {
     expect(regions.first.cities.first.serviceRadiusKm, 22);
   });
 
-  test('matchRideAreaForPickupCoordinates prefers smallest overlapping bubble', () {
+  test('matchRideAreaForPickupCoordinates prefers closest city center', () {
     const regions = <RolloutDeliveryRegionModel>[
       RolloutDeliveryRegionModel(
         regionId: 'lagos',
@@ -88,8 +89,8 @@ void main() {
             supportsRides: true,
             supportsFood: true,
             supportsPackage: true,
-            centerLat: 10,
-            centerLng: 10,
+            centerLat: 10.04,
+            centerLng: 10.04,
             serviceRadiusKm: 12,
           ),
         ],
@@ -102,5 +103,42 @@ void main() {
     );
     expect(m, isNotNull);
     expect(m!.cityId, 'narrow');
+  });
+
+  test('rolloutCatalogSourceFromResponse reads listDeliveryRegions source', () {
+    expect(
+      rolloutCatalogSourceFromResponse(<String, dynamic>{
+        'success': true,
+        'source': 'firestore',
+        'regions': <dynamic>[],
+      }),
+      'firestore',
+    );
+    expect(
+      rolloutCatalogSourceFromResponse(<String, dynamic>{
+        'success': true,
+        'source': 'seed_fallback',
+      }),
+      'seed_fallback',
+    );
+    expect(rolloutCatalogSourceFromResponse(<String, dynamic>{'success': false}), null);
+  });
+
+  test('riderRideCallableUserMessage prefers server message and hides secret errors', () {
+    expect(
+      riderRideCallableUserMessage(<String, dynamic>{
+        'success': false,
+        'message': 'Custom friendly',
+      }),
+      'Custom friendly',
+    );
+    expect(
+      riderRideCallableUserMessage(<String, dynamic>{
+        'success': false,
+        'reason': 'flutterwave_secret_missing',
+        'reason_code': 'flutterwave_secret_not_in_runtime',
+      }),
+      contains('Payment provider'),
+    );
   });
 }

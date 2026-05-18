@@ -26,7 +26,7 @@ class _AdminPaymentIntentsScreenState extends State<AdminPaymentIntentsScreen> {
   bool _loading = true;
   bool _expiring = false;
   String? _fatal;
-  String _statusFilter = 'pending_transfer';
+  String _statusFilter = 'all';
   final List<Map<String, dynamic>> _rows = <Map<String, dynamic>>[];
 
   @override
@@ -148,6 +148,11 @@ class _AdminPaymentIntentsScreenState extends State<AdminPaymentIntentsScreen> {
                     ),
                     items: const <DropdownMenuItem<String>>[
                       DropdownMenuItem(value: 'all', child: Text('all')),
+                      DropdownMenuItem(value: 'pending', child: Text('pending')),
+                      DropdownMenuItem(
+                        value: 'pending_gateway',
+                        child: Text('pending_gateway'),
+                      ),
                       DropdownMenuItem(
                         value: 'pending_transfer',
                         child: Text('pending_transfer'),
@@ -238,10 +243,10 @@ class _AdminPaymentIntentsScreenState extends State<AdminPaymentIntentsScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
                         Text(
-                          '${r['status'] ?? '—'} • settlement: ${r['settlement_state'] ?? '—'}',
+                          '${r['status'] ?? '—'} • settlement: ${r['settlement_state'] ?? '—'} • provider: ${r['provider'] ?? '—'}',
                         ),
                         Text(
-                          'owner: ${r['owner_uid'] ?? '—'} • context: ${r['app_context'] ?? '—'} • flow: ${r['flow'] ?? '—'}',
+                          'owner: ${r['owner_uid'] ?? '—'} • driver: ${r['driver_id'] ?? '—'} • context: ${r['app_context'] ?? '—'} • flow: ${r['flow'] ?? '—'}',
                         ),
                         Text(
                           'amount: ${r['amount_ngn'] ?? r['total_ngn'] ?? '—'} ${r['currency'] ?? 'NGN'}',

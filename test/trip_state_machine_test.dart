@@ -30,6 +30,30 @@ void main() {
     );
   });
 
+  test('matched_driver_id lifts searching trip_state to driverAssigned', () {
+    expect(
+      TripStateMachine.canonicalStateFromSnapshot(<String, dynamic>{
+        'trip_state': 'searching',
+        'status': 'accepted',
+        'driver_id': 'waiting',
+        'matched_driver_id': 'drv_99',
+      }),
+      TripLifecycleState.driverAssigned,
+    );
+  });
+
+  test('request_status accepted with valid driver_id leaves searching UI', () {
+    expect(
+      TripStateMachine.canonicalStateFromSnapshot(<String, dynamic>{
+        'trip_state': 'searching',
+        'status': 'searching',
+        'request_status': 'accepted',
+        'matched_driver_id': 'drv_99',
+      }),
+      TripLifecycleState.driverAssigned,
+    );
+  });
+
   test(
     'driver_assigned reconciles legacy status tokens; no client offer-reserve state',
     () {

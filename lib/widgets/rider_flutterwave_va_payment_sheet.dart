@@ -4,6 +4,8 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/rider_ride_cloud_functions_service.dart';
+
 /// Bottom sheet for Flutterwave dynamic virtual-account (VA) transfers on ride/dispatch flows.
 ///
 /// Rider can copy bank details/reference, monitor expiry, regenerate after expiry,
@@ -39,6 +41,7 @@ class _RiderFlutterwaveVaPaymentSheetState
   Timer? _tick;
   int _nowMs = DateTime.now().millisecondsSinceEpoch;
   bool _regenerateBusy = false;
+  bool _paymentCountdownActive = false;
 
   @override
   void initState() {
@@ -70,6 +73,26 @@ class _RiderFlutterwaveVaPaymentSheetState
     final row = raw.map((k, v) => MapEntry(k.toString(), v));
     final ps = (row['payment_status']?.toString() ?? '').trim().toLowerCase();
     final tid = (row['payment_transaction_id']?.toString() ?? '').trim();
+    final tripState = (row['trip_state'] ?? row['status'] ?? '')
+        .toString()
+        .trim()
+        .toLowerCase();
+    final countdownFlag = row['va_payment_countdown_active'];
+    final countdownActive =
+        countdownFlag == true ||
+        countdownFlag == 'true' ||
+        countdownFlag == 1 ||
+        tripState == 'in_progress' ||
+        tripState == 'trip_started' ||
+        tripState == 'on_trip';
+    if (mounted) {
+      setState(() {
+        _paymentCountdownActive = countdownActive;
+        if (row['expires_at_ms'] != null) {
+          _reg['expires_at_ms'] = row['expires_at_ms'];
+        }
+      });
+    }
     if ((ps == 'verified' || ps == 'paid') && tid.isNotEmpty) {
       if (mounted) {
         Navigator.of(context).pop(true);
@@ -166,10 +189,9 @@ class _RiderFlutterwaveVaPaymentSheetState
           ),
         );
       } else {
-        final reason =
-            (res['reason']?.toString() ?? 'unknown').replaceAll('_', ' ');
+        final msg = riderRideCallableUserMessage(Map<String, dynamic>.from(res));
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not renew bank details ($reason)')),
+          SnackBar(content: Text('Could not renew bank details. $msg')),
         );
       }
     } finally {
@@ -237,7 +259,11 @@ class _RiderFlutterwaveVaPaymentSheetState
             ),
             const SizedBox(height: 8),
             Text(
-              'Status: ${_intentExpired ? 'Expired — generate a fresh account below' : 'Waiting for transfer'}',
+              _paymentCountdownActive
+                  ? (_intentExpired
+                      ? 'Expired — generate a fresh account below'
+                      : 'Waiting for transfer')
+                  : 'Payment account reserved',
               style: TextStyle(
                 color:
                     _intentExpired
@@ -245,7 +271,18 @@ class _RiderFlutterwaveVaPaymentSheetState
                         : Theme.of(context).colorScheme.primary,
               ),
             ),
-            if (countdownLabel.isNotEmpty) ...<Widget>[
+            if (!_paymentCountdownActive && !_intentExpired) ...<Widget>[
+              const SizedBox(height: 4),
+              Text(
+                'Transfer after your driver starts the trip. Matching can continue while you prepare payment.',
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.35,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+            if (_paymentCountdownActive && countdownLabel.isNotEmpty) ...<Widget>[
               const SizedBox(height: 4),
               Text('Time left on this payment link: $countdownLabel'),
             ],
@@ -293,7 +330,7 @@ class _RiderFlutterwaveVaPaymentSheetState
               )
             else
               FilledButton(
-                onPressed: () => Navigator.of(context).pop(false),
+                onPressed: () => Navigator.of(context).pop('continue_matching'),
                 child: const Text('Continue — find a driver'),
               ),
             const SizedBox(height: 8),

@@ -11,8 +11,11 @@ import 'payment_methods_screen.dart';
 import 'rider_verification_screen.dart';
 import 'services/payment_methods_service.dart';
 import 'services/rider_compliance_service.dart';
+import 'models/rollout_delivery_region_model.dart';
+import 'services/rollout_catalog_hydration.dart';
 import 'services/rider_rollout_profile_store.dart';
 import 'services/rider_ride_cloud_functions_service.dart';
+import 'widgets/rider_rollout_area_sheet.dart';
 import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/user_support_ticket_service.dart';
@@ -330,6 +333,60 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
     );
   }
 
+  Future<void> _openRiderServiceAreaSheet() async {
+    try {
+      final raw = await _rideCloud.listDeliveryRegions().timeout(
+            const Duration(seconds: 25),
+          );
+      if (!mounted) {
+        return;
+      }
+      if (raw['success'] != true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not load service areas. Check your connection and try again.'),
+          ),
+        );
+        return;
+      }
+      final regions = parseRolloutRegionsWithEmergencyFallback(
+        Map<String, dynamic>.from(raw),
+      );
+      final saved = await RiderRolloutProfileStore.instance.fetchSelection(
+        widget.riderId.trim(),
+      );
+      if (!mounted) {
+        return;
+      }
+      await RiderRolloutAreaSheet.show(
+        context,
+        regions: regions,
+        initialRegionId: saved?[RiderRolloutProfileStore.kRegionId],
+        initialCityId: saved?[RiderRolloutProfileStore.kCityId],
+        catalogSource: rolloutCatalogSourceFromResponse(Map<String, dynamic>.from(raw)),
+        onReloadCatalog: () async {
+          final reload = await _rideCloud.listDeliveryRegions().timeout(
+                const Duration(seconds: 25),
+              );
+          if (reload['success'] != true) {
+            throw StateError('listDeliveryRegions_failed');
+          }
+          return parseRolloutRegionsWithEmergencyFallback(
+            Map<String, dynamic>.from(reload),
+          );
+        },
+      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not open service area picker. Try again.'),
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _openMerchantFoodHub() async {
     final sel = await RiderRolloutProfileStore.instance.fetchSelection(
       widget.riderId.trim(),
@@ -341,7 +398,7 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Choose your service area on the map first so we can show stores near you.',
+            'Choose your service area in Profile or on the map so we can show stores near you.',
           ),
         ),
       );
@@ -353,7 +410,9 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
     if ((region ?? '').trim().isEmpty || (dm ?? '').trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Service area is incomplete. Open the map and pick your region.'),
+          content: Text(
+            'Service area is incomplete. Open Profile → Your service area to finish setup.',
+          ),
         ),
       );
       return;
@@ -907,6 +966,14 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
                               color: const Color(0xFF1E3A5F),
                             ),
                       onTap: _openPaymentMethods,
+                    ),
+                    const SizedBox(height: 14),
+                    _ProfileActionTile(
+                      icon: Icons.map_outlined,
+                      title: 'Service area',
+                      subtitle:
+                          'Set on the map (top-right) for rides, delivery, food, and mart.',
+                      onTap: () => unawaited(_openRiderServiceAreaSheet()),
                     ),
                     const SizedBox(height: 14),
                     _ProfileActionTile(

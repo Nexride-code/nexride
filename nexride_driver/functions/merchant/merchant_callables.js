@@ -107,13 +107,38 @@ function buildMerchantOwnerProfileUpdate(data) {
   if (contactEmail.length > 0) {
     patch.contact_email = contactEmail;
   }
-  const regionId = trimStr(data?.region_id ?? data?.regionId, 80);
+  const regionId = trimStr(
+    data?.service_area_region_id ??
+      data?.serviceAreaRegionId ??
+      data?.region_id ??
+      data?.regionId ??
+      data?.rollout_region_id,
+    80,
+  );
   if (regionId) {
+    patch.service_area_region_id = regionId;
     patch.region_id = regionId;
   }
-  const cityId = trimStr(data?.city_id ?? data?.cityId, 120);
+  const cityId = trimStr(
+    data?.service_area_city_id ??
+      data?.serviceAreaCityId ??
+      data?.city_id ??
+      data?.cityId ??
+      data?.rollout_city_id,
+    120,
+  );
   if (cityId) {
+    patch.service_area_city_id = cityId;
     patch.city_id = cityId;
+  }
+  const dispatchMarket = trimStr(
+    data?.dispatch_market_id ?? data?.dispatchMarketId ?? data?.market,
+    80,
+  );
+  if (dispatchMarket.length > 0) {
+    const ride = require("../ride_callables");
+    const canon = ride.canonicalDispatchMarket(dispatchMarket);
+    patch.dispatch_market_id = canon || dispatchMarket;
   }
   const phone = trimStr(data?.phone ?? data?.phoneNumber, 40);
   if (phone) {
@@ -148,11 +173,17 @@ function buildMerchantOwnerProfileUpdate(data) {
   if (regNo.length > 0) {
     patch.business_registration_number = regNo;
   }
-  const plat = Number(data?.pickup_lat ?? data?.pickupLat);
-  const plng = Number(data?.pickup_lng ?? data?.pickupLng);
+  const plat = Number(
+    data?.pickup_lat ?? data?.pickupLat ?? data?.store_lat ?? data?.storeLat,
+  );
+  const plng = Number(
+    data?.pickup_lng ?? data?.pickupLng ?? data?.store_lng ?? data?.storeLng,
+  );
   if (Number.isFinite(plat) && Number.isFinite(plng)) {
     patch.pickup_lat = plat;
     patch.pickup_lng = plng;
+    patch.store_lat = plat;
+    patch.store_lng = plng;
   }
   const storeDescription = trimStr(
     data?.store_description ??

@@ -116,7 +116,9 @@ test("buildMerchantOwnerProfileUpdate only allows safe profile fields", () => {
   assert.deepEqual(patch, {
     business_name: "ACME Foods",
     contact_email: "owner@example.com",
+    service_area_region_id: "lagos",
     region_id: "lagos",
+    service_area_city_id: "ikeja",
     city_id: "ikeja",
     phone: "+2348000000000",
     owner_name: "Jane Owner",

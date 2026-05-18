@@ -38,7 +38,14 @@
     "ignore": [
       "firebase.json",
       "**/node_modules/**",
-      "**/.DS_Store"
+      "**/.DS_Store",
+      "admin/dist/**",
+      "admin/src/**",
+      "admin/package.json",
+      "admin/package-lock.json",
+      "admin/tsconfig.json",
+      "admin/.env.example",
+      "admin/.gitignore"
     ],
     "redirects": [
       {
@@ -55,6 +62,16 @@
         "source": "/ride/",
         "destination": "/ride",
         "type": 301
+      },
+      {
+        "source": "/dashboard",
+        "destination": "/admin/dashboard",
+        "type": 302
+      },
+      {
+        "source": "/dashboard/**",
+        "destination": "/admin/:splat",
+        "type": 302
       }
     ],
     "rewrites": [
@@ -132,6 +149,10 @@
       },
       {
         "source": "/ride",
+        "destination": "/index.html"
+      },
+      {
+        "source": "**",
         "destination": "/index.html"
       }
     ],

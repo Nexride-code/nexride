@@ -89,4 +89,27 @@ test("registerBankTransferPayment rejects when neither rideId nor deliveryId", a
   assert.equal(r.reason, "invalid_input");
 });
 
+test("registerBankTransferPayment rejects when Flutterwave secret not in runtime", async () => {
+  const prev = process.env.FLUTTERWAVE_SECRET_KEY;
+  delete process.env.FLUTTERWAVE_SECRET_KEY;
+  delete require.cache[require.resolve("../params")];
+  delete require.cache[require.resolve("../payment_flow")];
+  const { registerBankTransferPayment } = require("../payment_flow");
+  const r = await registerBankTransferPayment(
+    { rideId: "ride1" },
+    { auth: { uid: "rider1", token: { email: "a@b.c" } } },
+    makeDb({ bankVal: null, rideVal: null }),
+  );
+  assert.equal(r.success, false);
+  assert.equal(r.reason, "payment_provider_unavailable");
+  assert.equal(r.reason_code, "flutterwave_secret_not_in_runtime");
+  if (prev !== undefined) {
+    process.env.FLUTTERWAVE_SECRET_KEY = prev;
+  } else {
+    process.env.FLUTTERWAVE_SECRET_KEY = "sk_test";
+  }
+  delete require.cache[require.resolve("../params")];
+  delete require.cache[require.resolve("../payment_flow")];
+});
+
 /** Full VA issuance is covered in integration/deploy smoke (requires Flutterwave + Firestore writes). */

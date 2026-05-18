@@ -38,7 +38,9 @@ Pre–App Store / Play Store gate. Mark **PASS** / **FAIL** / **N/A** with evide
 | Merchant orders screen (`merchantListMyOrders`) | **CODE COMPLETE** | Device smoke M1–M2 pending |
 | Merchant bank transfer + Flutterwave return routing | **CODE COMPLETE** | **Functions + hosting DEPLOYED 2026-05-15** — M3–M7 device smoke pending |
 | Payment ownership (`payment_owner_mismatch`) | **CODE COMPLETE** | Backend + unit tests |
-| Webhook idempotency (duplicate events) | | |
+| **PR 2:** Driver subscription (wallet debit + Flutterwave card + VA; `getDriverSubscriptionPricing`; defaults ₦7k/₦25k; webhook / verify activate; `adminListPaymentIntents` includes `provider`) | **PASS (deploy + tests)** / **PENDING (analyze+APK+device)** | `nexride_dispatch` + indexes **2026-05-15** — `getDriverSubscriptionPricing` **created**; subscription callables **updated**; `npm test` **149/149**; **`flutter analyze` + release APK NOT RUN in agent env**; operator device smoke **DV-0–DV-10**, AD-3 in `production_smoke_test.md` |
+| **PR 2:** Driver wallet top-up (Flutterwave card + VA, ledger + idempotent credit) | **PASS (deploy)** / **PENDING (device)** | Same deploy batch 2; wallet smoke still DV-* / prior D-W* where applicable |
+| Webhook idempotency (duplicate events) | **PASS (module)** / **PENDING (prod device)** | Merchant + driver wallet paths use `webhook_applied/flutterwave/{payTid}` + strict verify; operator re-verify D-W4 on device |
 | Duplicate order creation protection | | |
 | Duplicate payout / withdrawal protection | | |
 
@@ -53,7 +55,7 @@ Pre–App Store / Play Store gate. Mark **PASS** / **FAIL** / **N/A** with evide
 | Production verify script (`tools/production_backend_verify.mjs`) | **N/A** | Optional; not blocking — production health confirmed in admin UI |
 | Rider app shows backend `fee_breakdown` + `total_ngn` (no client authoritative total) | **NOT RUN** | Code-complete; device smoke R1–R10 not executed by agent |
 | Rider device smoke (ride / dispatch / food / mismatch / no wallet) | **NOT RUN** | R11 **PASS** (static: no rider wallet UI); R1–R10 need device |
-| App Store / Play Store upload | **BLOCKED** | Until rider **R1–R10** and merchant **M1–M7** device **PASS** in `production_smoke_test.md` (R11 done) |
+| App Store / Play Store upload | **BLOCKED** | Until rider **R1–R10** and merchant **M1–M7** device **PASS** in `production_smoke_test.md` (R11 done). **Also:** driver subscription + wallet **DV-1–DV-10**, **AD-3** must **PASS** (release APK on device; `flutter analyze` clean on operator Mac). |
 | Driver supply segmentation (car/bike/fleet) | **NOT STARTED** | After QA gate clears |
 | `/admin/dashboard`, `/live-ops`, `/audit-logs` | | |
 | `/admin/service-areas`, `/admin/merchants` | | |

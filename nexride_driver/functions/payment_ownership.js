@@ -19,6 +19,9 @@ function inferAppContextFromPaymentRow(pt) {
   if (purpose === "merchant_wallet_topup") {
     return "merchant";
   }
+  if (purpose === "driver_subscription_payment" || purpose === "driver_wallet_topup") {
+    return "driver";
+  }
   if (pt?.merchant_id) {
     return "merchant";
   }

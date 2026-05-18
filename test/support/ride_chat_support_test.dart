@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nexride/support/ride_chat_moderation.dart';
 import 'package:nexride/support/ride_chat_support.dart';
 
 void main() {
@@ -52,5 +53,38 @@ void main() {
     expect(snapshot.invalidRecordCount, 0);
     expect(snapshot.messages.single.createdAt, 42);
     expect(snapshot.messages.single.senderId, isEmpty);
+  });
+
+  test('buildRideChatInitUpdates writes meta and participants paths', () {
+    final updates = buildRideChatInitUpdates(
+      rideId: 'ride-789',
+      riderId: 'rider-1',
+      driverId: 'driver-9',
+    );
+
+    expect(updates['ride_chats/ride-789/meta/ride_id'], 'ride-789');
+    expect(updates['ride_chats/ride-789/meta/rider_id'], 'rider-1');
+    expect(updates['ride_chats/ride-789/meta/driver_id'], 'driver-9');
+    expect(updates['ride_chats/ride-789/meta/status'], 'active');
+    expect(
+      updates['ride_chats/ride-789/participants/rider-1'],
+      isA<Map<String, dynamic>>(),
+    );
+    expect(
+      updates['ride_chats/ride-789/participants/driver-9'],
+      isA<Map<String, dynamic>>(),
+    );
+  });
+
+  test('scanRideChatMessage warns on phone and whatsapp', () {
+    expect(
+      scanRideChatMessage('call me on 08031234567'),
+      isNotNull,
+    );
+    expect(
+      scanRideChatMessage('chat on whatsapp'),
+      isNotNull,
+    );
+    expect(scanRideChatMessage('see you at the gate'), isNull);
   });
 }

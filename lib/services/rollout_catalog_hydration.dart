@@ -1,8 +1,10 @@
 import '../models/rollout_delivery_region_model.dart';
 
 /// Timeouts so service-area UI never blocks on Firestore/callables indefinitely.
-const Duration kRolloutCatalogCallableTimeout = Duration(seconds: 22);
-const Duration kRolloutProfileFetchTimeout = Duration(seconds: 12);
+const Duration kRolloutCatalogCallableTimeout = Duration(seconds: 12);
+const Duration kRolloutProfileFetchTimeout = Duration(seconds: 10);
+/// Hard cap for the entire catalog+profile merge step (rider map + dispatch).
+const Duration kRolloutCatalogLoadBudget = Duration(seconds: 14);
 
 /// Merged rollout selection after catalog + saved profile.
 class RolloutCatalogSelection {
@@ -79,7 +81,7 @@ bool shouldShowRiderRolloutBanner({
     return false;
   }
   if (catalogLoading) {
-    return true;
+    return false;
   }
   if (catalogError != null) {
     return true;

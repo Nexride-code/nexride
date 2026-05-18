@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -17,20 +16,16 @@ import 'screens/driver_map_screen.dart';
 import 'support/app_role.dart';
 import 'support/driver_profile_bootstrap_support.dart';
 import 'support/driver_profile_support.dart';
+import 'support/driver_crash_guard.dart';
+import 'support/driver_root_navigator.dart';
+import 'support/driver_startup_coordinator.dart';
+import 'support/driver_startup_logs.dart';
+import 'support/driver_startup_platform.dart';
 import 'services/driver_push_notification_service.dart';
 import 'support/production_user_messages.dart';
 
 Future<void> main() async {
-  runZonedGuarded(
-    () {
-      unawaited(_runDriverApp());
-    },
-    (Object error, StackTrace stack) {
-      debugPrint('[NEXRIDE_DIAG] zone_uncaught ${DateTime.now().toIso8601String()}');
-      debugPrint('[ZONE_ERROR] $error');
-      debugPrint('[ZONE_STACK] $stack');
-    },
-  );
+  runDriverAppGuarded(_runDriverApp);
 }
 
 Future<void> _runDriverApp() async {
@@ -41,6 +36,8 @@ Future<void> _runDriverApp() async {
   }());
 
   WidgetsFlutterBinding.ensureInitialized();
+  configureDriverCrashGuard();
+  driverStartupStep('main_bindings_ready');
 
   final startupRoute =
       WidgetsBinding.instance.platformDispatcher.defaultRouteName;
@@ -73,6 +70,7 @@ Future<void> _runDriverApp() async {
 Future<void> _initializeFirebase({
   required String startupRoute,
 }) async {
+  driverStartupLog('firebase_init_start');
   if (kIsWeb && DefaultFirebaseOptions.webAppIdLooksLikeMobileConfig) {
     _logStartup(
       'Web Firebase appId looks like a mobile config: ${DefaultFirebaseOptions.webAppId}',
@@ -81,6 +79,49 @@ Future<void> _initializeFirebase({
   _logStartup(
     'Initializing Firebase for route=$startupRoute authDomain=${DefaultFirebaseOptions.webAuthDomain} databaseUrl=${DefaultFirebaseOptions.webDatabaseUrl}',
   );
+
+  if (driverStartupIsIosSimulator) {
+    try {
+      if (Firebase.apps.isEmpty) {
+        await Firebase.initializeApp(
+          options: DefaultFirebaseOptions.currentPlatform,
+        ).timeout(const Duration(seconds: 8));
+      }
+      print('FIREBASE_INIT_DONE');
+      print("RUNTIME_PROJECT_ID: ${Firebase.app().options.projectId}");
+      print("RUNTIME_DB_URL: ${FirebaseDatabase.instance.databaseURL}");
+      print("RUNTIME_UID: ${FirebaseAuth.instance.currentUser?.uid}");
+      _logStartup('Firebase initializeApp succeeded (ios simulator fast path).');
+      driverStartupLog('firebase_init_done');
+
+      if (!kIsWeb) {
+        driverStartupLog('rtdb_session_start');
+        try {
+          FirebaseDatabase.instance.setPersistenceEnabled(true);
+          FirebaseDatabase.instance.setPersistenceCacheSizeBytes(10000000);
+          _logStartup('Realtime Database persistence enabled.');
+        } catch (e, st) {
+          debugPrint('[Startup] RTDB persistence non-fatal: $e\n$st');
+        }
+        driverStartupLog('rtdb_session_done');
+      } else {
+        driverStartupLog('rtdb_session_start');
+        _logStartup('Web detected, skipping RTDB persistence setup.');
+        driverStartupLog('rtdb_session_done');
+      }
+
+      driverStartupLog('fcm_token_skipped_ios_simulator');
+      return;
+    } catch (error, stackTrace) {
+      driverStartupLog('firebase_init_fail');
+      _logStartup('Firebase init failed (ios simulator fast path): $error');
+      debugPrintStack(
+        label: '[Startup] Firebase init stack',
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
 
   Object? lastError;
   StackTrace? lastStack;
@@ -102,14 +143,10 @@ Future<void> _initializeFirebase({
       _logStartup(
         'Firebase initializeApp succeeded (attempt=$attempt/$attempts).',
       );
-
-      try {
-        await DriverPushNotificationService.instance.initialize();
-      } catch (e, st) {
-        debugPrint('[Startup] FCM init non-fatal: $e\n$st');
-      }
+      driverStartupLog('firebase_init_done');
 
       if (!kIsWeb) {
+        driverStartupLog('rtdb_session_start');
         try {
           FirebaseDatabase.instance.setPersistenceEnabled(true);
           FirebaseDatabase.instance.setPersistenceCacheSizeBytes(10000000);
@@ -117,13 +154,17 @@ Future<void> _initializeFirebase({
         } catch (e, st) {
           debugPrint('[Startup] RTDB persistence non-fatal: $e\n$st');
         }
+        driverStartupLog('rtdb_session_done');
       } else {
+        driverStartupLog('rtdb_session_start');
         _logStartup('Web detected, skipping RTDB persistence setup.');
+        driverStartupLog('rtdb_session_done');
       }
       return;
     } catch (error, stackTrace) {
       lastError = error;
       lastStack = stackTrace;
+      driverStartupLog('firebase_init_fail');
       _logStartup(
         'Firebase init attempt $attempt/$attempts failed: $error',
       );
@@ -148,41 +189,6 @@ void _configureGlobalErrorHandling({
   required String startupRoute,
   required Uri startupUri,
 }) {
-  FlutterError.onError = (FlutterErrorDetails details) {
-    debugPrint('[CRASH] ${details.exception}');
-    debugPrint('[CRASH_STACK] ${details.stack}');
-    debugPrint('[FLUTTER_ERROR] ${details.exception}\n${details.stack}');
-    final lib = details.library ?? '';
-    if (lib.isNotEmpty) {
-      debugPrint('[FLUTTER_ERROR_LIBRARY] $lib');
-    }
-    final ctx = details.context?.toString();
-    if (ctx != null && ctx.isNotEmpty) {
-      debugPrint('[FLUTTER_ERROR_CONTEXT] $ctx');
-    }
-    FlutterError.presentError(details);
-    _logStartup('FlutterError caught: ${details.exception}');
-    if (details.stack != null) {
-      debugPrintStack(
-        label: '[Startup] FlutterError stack',
-        stackTrace: details.stack,
-      );
-    }
-    // Log only — avoid swapping the entire app UI on transient framework errors.
-  };
-
-  PlatformDispatcher.instance.onError = (Object error, StackTrace stackTrace) {
-    debugPrint('[PLATFORM_ERROR] $error\n$stackTrace');
-    _logStartup('PlatformDispatcher caught: $error');
-    debugPrintStack(
-      label: '[Startup] PlatformDispatcher stack',
-      stackTrace: stackTrace,
-    );
-    // Returning true marks the error as handled for the engine (avoids duplicate
-    // reporting) while still logging above — do not swallow without logs.
-    return true;
-  };
-
   ErrorWidget.builder = (FlutterErrorDetails details) {
     final adminRoute = _isAdminRoute(startupUri.path) ||
         _isAdminRoute(startupRoute) ||
@@ -271,6 +277,7 @@ class _NexRideDriverState extends State<NexRideDriver> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: driverRootNavigatorKey,
       debugShowCheckedModeBanner: false,
       title: 'NexRide Driver',
       theme: ThemeData(
@@ -428,12 +435,32 @@ class _AppBootstrapRouteState extends State<_AppBootstrapRoute> {
   @override
   void initState() {
     super.initState();
-    _bootstrapFuture = widget.initializationFactory();
+    _bootstrapFuture = _runBootstrapShell();
+  }
+
+  Future<void> _runBootstrapShell() async {
+    final Future<void> init = widget.initializationFactory();
+    if (!driverStartupIsIosSimulator) {
+      await init;
+      return;
+    }
+    await init.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        driverStartupLog('bootstrap_shell_timeout');
+        if (Firebase.apps.isEmpty) {
+          throw TimeoutException('firebase_init_not_complete_sim_bootstrap');
+        }
+        DriverStartupCoordinator.instance.markDegradedSessionData(
+          reason: 'bootstrap_shell_timeout',
+        );
+      },
+    );
   }
 
   void _retryBootstrap() {
     setState(() {
-      _bootstrapFuture = widget.initializationFactory();
+      _bootstrapFuture = _runBootstrapShell();
     });
   }
 
@@ -720,6 +747,8 @@ class _AuthGateState extends State<AuthGate> {
   final DatabaseReference _rootRef = FirebaseDatabase.instance.ref();
 
   StreamSubscription<User?>? _authSubscription;
+  Timer? _authStuckGuardTimer;
+  bool _authStateDoneLogged = false;
   DriverProfileData? _profile;
   _AuthGateStage _stage = _AuthGateStage.checkingSession;
   String? _statusMessage;
@@ -743,9 +772,52 @@ class _AuthGateState extends State<AuthGate> {
     _debugStep = step;
   }
 
+  void _logAuthStateDoneOnce(String via) {
+    if (_authStateDoneLogged) {
+      return;
+    }
+    _authStateDoneLogged = true;
+    driverStartupLog('auth_state_done via=$via');
+    driverStartupStep('auth_restored', fields: {'via': via});
+  }
+
   @override
   void initState() {
     super.initState();
+    driverStartupLog('auth_state_start');
+    if (driverStartupIsIosSimulator) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        final User? user = FirebaseAuth.instance.currentUser;
+        driverStartupLog('auth_state_fast_path uid=${user?.uid ?? 'none'}');
+        unawaited(_handleAuthStateChanged(user));
+      });
+      _authStuckGuardTimer = Timer(const Duration(seconds: 8), () {
+        if (!mounted) {
+          return;
+        }
+        if (_stage != _AuthGateStage.checkingSession) {
+          return;
+        }
+        final User? user = FirebaseAuth.instance.currentUser;
+        driverStartupLog('auth_state_stuck_guard uid=${user?.uid ?? 'none'}');
+        if (user == null) {
+          setState(() {
+            _stage = _AuthGateStage.signInRequired;
+            _statusMessage = null;
+            _profileSyncIssueMessage = null;
+            _profile = null;
+          });
+          _setDebugStep('sign in required (stuck guard)');
+          _logAuthStateDoneOnce('stuck_guard_signed_out');
+          return;
+        }
+        unawaited(_handleAuthStateChanged(user));
+        _logAuthStateDoneOnce('stuck_guard_signed_in');
+      });
+    }
     _authSubscription = _auth.authStateChanges().listen(
       (User? user) {
         unawaited(_handleAuthStateChanged(user));
@@ -789,6 +861,7 @@ class _AuthGateState extends State<AuthGate> {
         _profile = null;
       });
       _setDebugStep('sign in required');
+      _logAuthStateDoneOnce('signed_out');
       return;
     }
 
@@ -805,6 +878,7 @@ class _AuthGateState extends State<AuthGate> {
     if (!mounted || gate != _authGateGeneration) {
       return;
     }
+    _logAuthStateDoneOnce('session_resolved');
     setState(() {
       _stage = _AuthGateStage.bootstrapping;
       _statusMessage =
@@ -813,7 +887,6 @@ class _AuthGateState extends State<AuthGate> {
     });
     _setDebugStep('driver bootstrap queued');
 
-    unawaited(DriverPushNotificationService.instance.registerCurrentUserToken());
     try {
       await _bootstrapDriverSession(user, gate: gate);
     } catch (error, stackTrace) {
@@ -837,6 +910,8 @@ class _AuthGateState extends State<AuthGate> {
   }
 
   Future<void> _bootstrapDriverSession(User user, {required int gate}) async {
+    driverStartupLog('driver_profile_start');
+    driverStartupLog('rtdb_session_start');
     final attempt = ++_bootstrapAttempt;
     debugPrint(
         '[AuthGate] driver bootstrap start uid=${user.uid} attempt=$attempt gate=$gate');
@@ -863,7 +938,10 @@ class _AuthGateState extends State<AuthGate> {
         _statusMessage = null;
         _profileSyncIssueMessage = null;
       });
+      driverStartupStep('startup_ready', fields: {'uid': profile.driverId});
     } on _DriverProfileSyncFailure catch (error) {
+      driverStartupLog('driver_profile_fail reason=${error.debugReason}');
+      driverStartupLog('rtdb_session_done');
       debugPrint(
         '[AuthGate] driver bootstrap recovered with fallback uid=${user.uid} reason=${error.debugReason}',
       );
@@ -884,7 +962,10 @@ class _AuthGateState extends State<AuthGate> {
         _statusMessage = null;
         _profileSyncIssueMessage = error.userMessage;
       });
+      driverStartupStep('startup_ready_fallback', fields: {'uid': user.uid});
     } catch (error, stackTrace) {
+      driverStartupLog('driver_profile_fail reason=$error');
+      driverStartupLog('rtdb_session_done');
       debugPrint(
           '[AuthGate] driver bootstrap failed uid=${user.uid} error=$error');
       debugPrintStack(
@@ -905,16 +986,21 @@ class _AuthGateState extends State<AuthGate> {
         _profileSyncIssueMessage =
             'We could not refresh your driver profile right now. The map is open, and you can retry in a moment.';
       });
+      driverStartupStep('startup_ready_degraded', fields: {'uid': user.uid});
     }
   }
 
   Future<DriverProfileData> _loadDriverProfile(User user) async {
     final path = driverProfilePath(user.uid);
+    final int maxAttempts = driverStartupIsIosSimulator ? 1 : 2;
+    final Duration authGateBudget = driverStartupIsIosSimulator
+        ? const Duration(seconds: 8)
+        : const Duration(seconds: 22);
 
-    for (var attempt = 1; attempt <= 2; attempt += 1) {
+    for (var attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         debugPrint(
-          '[AuthGate] driver profile fetch started uid=${user.uid} attempt=$attempt path=$path timeout=${kDriverProfileReadTimeout.inSeconds}s',
+          '[AuthGate] driver profile fetch started uid=${user.uid} attempt=$attempt path=$path timeout=${authGateBudget.inSeconds}s',
         );
         final result = await fetchDriverProfileRecord(
           rootRef: _rootRef,
@@ -922,13 +1008,16 @@ class _AuthGateState extends State<AuthGate> {
           source: 'auth_gate_attempt_$attempt',
           role: AppRole.driver,
           createIfMissing: true,
-        ).timeout(const Duration(seconds: 22));
+        ).timeout(authGateBudget);
 
         debugPrint(
           '[AuthGate] driver profile fetch resolved uid=${user.uid} attempt=$attempt path=${result.path} found=${result.snapshotFound} createdFallback=${result.createdFallbackProfile} uidMatches=${result.uidMatchesRecord} parseWarning=${result.parseWarning ?? 'none'} readError=${result.readError ?? 'none'} persistWarning=${result.persistWarning ?? 'none'}',
         );
+        driverStartupLog('rtdb_session_done');
+        driverStartupLog('driver_profile_done');
         return DriverProfileData.fromMap(user.uid, result.profile);
       } on TimeoutException catch (error, stackTrace) {
+        driverStartupLog('driver_profile_fail reason=timeout');
         debugPrint(
           '[AuthGate] driver profile timeout uid=${user.uid} attempt=$attempt path=$path reason=exceeded_auth_gate_budget_s',
         );
@@ -936,7 +1025,7 @@ class _AuthGateState extends State<AuthGate> {
           label: '[AuthGate] driver profile timeout stack',
           stackTrace: stackTrace,
         );
-        if (attempt == 1) {
+        if (attempt == 1 && attempt < maxAttempts) {
           _setDebugStep('retrying driver profile');
           continue;
         }
@@ -947,6 +1036,7 @@ class _AuthGateState extends State<AuthGate> {
               'We could not refresh your driver profile right now. The map is open, and you can retry in a moment.',
         );
       } catch (error, stackTrace) {
+        driverStartupLog('driver_profile_fail reason=$error');
         debugPrint(
           '[AuthGate] driver profile fetch failed uid=${user.uid} attempt=$attempt path=$path error=$error',
         );
@@ -1011,6 +1101,7 @@ class _AuthGateState extends State<AuthGate> {
 
   @override
   void dispose() {
+    _authStuckGuardTimer?.cancel();
     _authSubscription?.cancel();
     super.dispose();
   }

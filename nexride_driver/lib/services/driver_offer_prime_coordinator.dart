@@ -11,9 +11,9 @@ class DriverOfferPrimeCoordinator {
   static final DriverOfferPrimeCoordinator instance =
       DriverOfferPrimeCoordinator._();
 
-  VoidCallback? _handler;
+  void Function(String rideId)? _handler;
 
-  void register(VoidCallback onPrimeOfferQueue) {
+  void register(void Function(String rideId) onPrimeOfferQueue) {
     _handler = onPrimeOfferQueue;
   }
 
@@ -22,15 +22,17 @@ class DriverOfferPrimeCoordinator {
   }
 
   /// Run once after layout and again shortly after (navigation cold-start).
-  void requestPrime() {
+  /// [rideId] is the FCM-supplied offer rideId, or empty if unknown.
+  void requestPrime({String rideId = ''}) {
     final handler = _handler;
     if (handler == null) {
       return;
     }
+    final capturedRideId = rideId;
     void run() {
       final h = _handler;
       if (h != null) {
-        h();
+        h(capturedRideId);
       }
     }
 

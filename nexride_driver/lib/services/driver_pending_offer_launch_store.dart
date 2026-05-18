@@ -50,6 +50,11 @@ class DriverPendingOfferLaunchStore {
       '[DRIVER_PENDING_LAUNCH_CAPTURE] ride=$_rideRequestId '
       'delivery=$_deliveryRequestId serviceType=$svc',
     );
+    if (_rideRequestId != null && _rideRequestId!.isNotEmpty) {
+      debugPrint(
+        'OFFER_POPUP_STAGE=notification_received rideId=$_rideRequestId',
+      );
+    }
   }
 
   bool get hasPendingOffer =>
