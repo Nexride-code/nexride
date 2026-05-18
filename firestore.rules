@@ -63,6 +63,12 @@ service cloud.firestore {
         'termsVersion',
         'ageConfirmed',
         'ageConfirmedAt',
+        'accepted_terms_version',
+        'accepted_terms_at',
+        'accepted_privacy_version',
+        'accepted_privacy_at',
+        'accepted_guidelines_version',
+        'accepted_guidelines_at',
       ]);
     }
 
@@ -81,6 +87,12 @@ service cloud.firestore {
         'termsVersion',
         'ageConfirmed',
         'ageConfirmedAt',
+        'accepted_terms_version',
+        'accepted_terms_at',
+        'accepted_privacy_version',
+        'accepted_privacy_at',
+        'accepted_guidelines_version',
+        'accepted_guidelines_at',
         'selfieUploaded',
         'selfieUploadedAt',
         'rollout_region_id',

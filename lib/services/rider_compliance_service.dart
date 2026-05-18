@@ -7,7 +7,12 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 
 import '../compliance/rider_compliance_constants.dart';
-import '../compliance/rider_policy_text.dart';
+import '../legal/legal_acceptance_service.dart';
+import '../legal/legal_models.dart';
+import '../legal/legal_policy_analytics_service.dart';
+import '../legal/legal_policy_catalog.dart';
+import '../legal/legal_policy_registry_service.dart';
+import '../legal/legal_versions.dart';
 
 import 'rider_ride_cloud_functions_service.dart';
 
@@ -27,6 +32,9 @@ class RiderComplianceSnapshot {
     required this.termsAccepted,
     required this.ageConfirmed,
     this.termsVersion,
+    this.acceptedTermsVersion,
+    this.acceptedPrivacyVersion,
+    this.acceptedGuidelinesVersion,
     this.verificationStatus,
     this.fetchFailed = false,
   });
@@ -35,6 +43,9 @@ class RiderComplianceSnapshot {
   final bool termsAccepted;
   final bool ageConfirmed;
   final String? termsVersion;
+  final String? acceptedTermsVersion;
+  final String? acceptedPrivacyVersion;
+  final String? acceptedGuidelinesVersion;
   final String? verificationStatus;
   final bool fetchFailed;
 
@@ -46,8 +57,6 @@ class RiderComplianceSnapshot {
       return RiderIdentityBookingPhase.statusUnavailable;
     }
     final status = _normStatus(verificationStatus);
-    // Admin approval in Firestore unlocks booking even when no selfie was stored
-    // (legacy riders or manual clearance).
     if (status == 'approved' ||
         status == 'verified' ||
         status == 'cleared' ||
@@ -67,15 +76,27 @@ class RiderComplianceSnapshot {
   bool get blocksRideBooking =>
       identityPhase != RiderIdentityBookingPhase.approved;
 
-  bool get needsTermsAcceptance {
+  bool needsTermsAcceptance(LegalPolicyVersionConfig config) {
     if (fetchFailed) {
       return false;
     }
     if (termsAccepted != true || ageConfirmed != true) {
       return true;
     }
-    final v = (termsVersion ?? '').trim();
-    return v.isEmpty || v != RiderComplianceConstants.termsVersion;
+    final acceptance = LegalAcceptanceSnapshot(
+      termsAccepted: termsAccepted,
+      ageConfirmed: ageConfirmed,
+      acceptedTermsVersion: acceptedTermsVersion ?? termsVersion,
+      acceptedPrivacyVersion: acceptedPrivacyVersion,
+      acceptedGuidelinesVersion: acceptedGuidelinesVersion,
+      legacyTermsVersion: termsVersion,
+    );
+    return acceptance.needsReacceptance(config);
+  }
+
+  /// Legacy synchronous check using bundled default versions.
+  bool get needsTermsAcceptanceLegacy {
+    return needsTermsAcceptance(LegalPolicyVersionConfig.defaults());
   }
 }
 
@@ -92,26 +113,28 @@ String riderPolicyDocumentAnalyticsValue(RiderPolicyDocumentKind kind) {
   }
 }
 
-String riderPolicyDocumentTitle(RiderPolicyDocumentKind kind) {
+LegalPolicyId riderPolicyDocumentLegalId(RiderPolicyDocumentKind kind) {
   switch (kind) {
     case RiderPolicyDocumentKind.terms:
-      return 'Terms of Service';
+      return LegalPolicyId.termsOfService;
     case RiderPolicyDocumentKind.privacy:
-      return 'Privacy Policy';
+      return LegalPolicyId.privacyPolicy;
     case RiderPolicyDocumentKind.community:
-      return 'Community Guidelines';
+      return LegalPolicyId.communityGuidelines;
   }
 }
 
+String riderPolicyDocumentTitle(RiderPolicyDocumentKind kind) {
+  return LegalPolicyCatalog.byId(riderPolicyDocumentLegalId(kind))?.title ??
+      kind.name;
+}
+
 String riderPolicyDocumentBody(RiderPolicyDocumentKind kind) {
-  switch (kind) {
-    case RiderPolicyDocumentKind.terms:
-      return RiderPolicyText.termsOfService;
-    case RiderPolicyDocumentKind.privacy:
-      return RiderPolicyText.privacyPolicy;
-    case RiderPolicyDocumentKind.community:
-      return RiderPolicyText.communityGuidelines;
+  final doc = LegalPolicyCatalog.byId(riderPolicyDocumentLegalId(kind));
+  if (doc == null) {
+    return '';
   }
+  return doc.sections.map((s) => '${s.title}\n${s.body}').join('\n\n');
 }
 
 class RiderComplianceService {
@@ -120,6 +143,11 @@ class RiderComplianceService {
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAnalytics _analytics = FirebaseAnalytics.instance;
+  final LegalAcceptanceService _acceptance = LegalAcceptanceService.instance;
+  final LegalPolicyRegistryService _registry =
+      LegalPolicyRegistryService.instance;
+  final LegalPolicyAnalyticsService _legalAnalytics =
+      LegalPolicyAnalyticsService.instance;
 
   CollectionReference<Map<String, dynamic>> get _users =>
       _firestore.collection('users');
@@ -159,6 +187,10 @@ class RiderComplianceService {
     }
   }
 
+  Future<bool> needsTermsAcceptanceForUser(String uid) async {
+    return _acceptance.needsReacceptance(uid);
+  }
+
   RiderComplianceSnapshot _snapshotFromDoc(
     DocumentSnapshot<Map<String, dynamic>> doc,
   ) {
@@ -186,6 +218,9 @@ class RiderComplianceService {
       termsAccepted: readBool('termsAccepted'),
       ageConfirmed: readBool('ageConfirmed'),
       termsVersion: m['termsVersion']?.toString(),
+      acceptedTermsVersion: m['accepted_terms_version']?.toString(),
+      acceptedPrivacyVersion: m['accepted_privacy_version']?.toString(),
+      acceptedGuidelinesVersion: m['accepted_guidelines_version']?.toString(),
       verificationStatus: m['verificationStatus']?.toString(),
     );
   }
@@ -193,18 +228,7 @@ class RiderComplianceService {
   Future<void> saveSignupConsent({
     required String uid,
   }) async {
-    final id = uid.trim();
-    if (id.isEmpty) {
-      return;
-    }
-    await _users.doc(id).set(<String, dynamic>{
-      'termsAccepted': true,
-      'termsAcceptedAt': FieldValue.serverTimestamp(),
-      'termsVersion': RiderComplianceConstants.termsVersion,
-      'ageConfirmed': true,
-      'ageConfirmedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
-
+    await _acceptance.saveCoreAcceptance(uid: uid, context: 'signup');
     await _analytics.logEvent(
       name: 'TERMS_ACCEPTED',
       parameters: <String, Object>{
@@ -220,18 +244,10 @@ class RiderComplianceService {
   }
 
   Future<void> saveUpdatedTermsAcceptance({required String uid}) async {
-    final id = uid.trim();
-    if (id.isEmpty) {
-      return;
-    }
-    await _users.doc(id).set(<String, dynamic>{
-      'termsAccepted': true,
-      'termsAcceptedAt': FieldValue.serverTimestamp(),
-      'termsVersion': RiderComplianceConstants.termsVersion,
-      'ageConfirmed': true,
-      'ageConfirmedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
-
+    await _acceptance.saveCoreAcceptance(
+      uid: uid,
+      context: 'updated_terms_modal',
+    );
     await _analytics.logEvent(
       name: 'TERMS_ACCEPTED',
       parameters: <String, Object>{
@@ -248,6 +264,15 @@ class RiderComplianceService {
   }
 
   Future<void> logPolicyViewed(RiderPolicyDocumentKind kind) async {
+    final id = riderPolicyDocumentLegalId(kind);
+    final versions = await _registry.loadVersions();
+    final doc = LegalPolicyCatalog.byId(id);
+    await _legalAnalytics.logPolicyOpened(
+      policyId: id,
+      audience: 'rider',
+      version: versions.forKey(doc?.versionKey),
+      source: 'legacy_terms_viewed',
+    );
     await _analytics.logEvent(
       name: 'TERMS_VIEWED',
       parameters: <String, Object>{
@@ -296,9 +321,12 @@ class RiderComplianceService {
     await _analytics.logEvent(name: 'SELFIE_UPLOAD_SUCCESS');
 
     try {
-      await RiderRideCloudFunctionsService.instance.riderNotifySelfieSubmittedForReview();
+      await RiderRideCloudFunctionsService.instance
+          .riderNotifySelfieSubmittedForReview();
     } catch (e, st) {
-      debugPrint('[RiderCompliance] riderNotifySelfieSubmittedForReview failed: $e');
+      debugPrint(
+        '[RiderCompliance] riderNotifySelfieSubmittedForReview failed: $e',
+      );
       debugPrintStack(
         label: '[RiderCompliance] notify selfie stack',
         stackTrace: st,

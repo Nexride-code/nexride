@@ -1,13 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'map_screen.dart';
+import 'nex_ride_app.dart' show rootScaffoldMessengerKey;
+import 'support/rider_root_navigation.dart';
 import 'ride_type_screen.dart';
 import 'rider_signup.dart';
 import 'services/rider_trip_deep_link_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
-import 'support/friendly_firebase_errors.dart';
-import 'support/production_user_messages.dart';
+import 'support/rider_login_support.dart';
 import 'support/startup_rtdb_support.dart';
 
 class RiderLogin extends StatefulWidget {
@@ -27,176 +30,188 @@ class _RiderLoginState extends State<RiderLogin> {
       const RiderTrustBootstrapService();
 
   bool isLoading = false;
+  bool _didNavigateAfterLogin = false;
 
   Future<void> loginUser() async {
-    if (emailController.text.trim().isEmpty ||
-        passwordController.text.trim().isEmpty) {
-      showMessage("Email and password required");
+    final email = emailController.text.trim();
+    final password = passwordController.text.trim();
+
+    if (email.isEmpty || password.isEmpty) {
+      showMessage('Email and password required');
       return;
     }
 
-    setState(() => isLoading = true);
+    logRiderLoginTap();
+
+    Widget? homeDestination;
+    var navigateHome = false;
 
     try {
-      // 🔐 LOGIN
-      UserCredential userCredential = await auth.signInWithEmailAndPassword(
-        email: emailController.text.trim(),
-        password: passwordController.text.trim(),
-      );
-
-      String uid = userCredential.user!.uid;
-
-      final existingUser = await readUserProfileWithFallback(
-        rootRef: dbRef,
-        uid: uid,
-        source: 'rider_login.user_profile',
-      );
-      final userData = <String, dynamic>{
-        ...existingUser,
-        if (existingUser.isEmpty) ...<String, dynamic>{
-          "uid": uid,
-          "name": emailController.text.split("@")[0],
-          "email": emailController.text.trim(),
-          "phone": "",
-          "role": "rider",
-          "created_at": ServerValue.timestamp,
-        },
-      };
-
-      final bundle = await _trustBootstrapService.ensureRiderTrustState(
-        riderId: uid,
-        existingUser: userData,
-        fallbackName: emailController.text.split("@")[0],
-        fallbackEmail: emailController.text.trim(),
-      );
-
-      final bootstrapReady = await hasRiderBootstrapArtifacts(
-        rootRef: dbRef,
-        riderId: uid,
-        source: 'rider_login.bootstrap_check',
-      );
-      try {
-        if (!bootstrapReady) {
-          await persistRiderOwnedBootstrap(
-            rootRef: dbRef,
-            riderId: uid,
-            userProfile: <String, dynamic>{
-              ...userData,
-              ...bundle.userProfile,
-              "created_at": userData["created_at"] ?? ServerValue.timestamp,
-            },
-            verification: bundle.verification,
-            deviceFingerprints: bundle.deviceFingerprints,
-            source: 'rider_login.bootstrap_write',
-          );
-        } else {
-          await dbRef.child('users/$uid').update(<String, dynamic>{
-            'updated_at': ServerValue.timestamp,
-          });
-        }
-      } on StartupRtdbException catch (e, st) {
-        debugPrint('[RiderLogin] full bootstrap blocked: $e');
-        debugPrintStack(label: '[RiderLogin] bootstrap stack', stackTrace: st);
-        await persistMinimalRiderProfileBestEffort(
-          rootRef: dbRef,
-          riderId: uid,
-          email: emailController.text.trim(),
-          displayNameFallback: emailController.text.split('@').first,
-          source: 'rider_login.minimal_after_bootstrap_failure',
-        );
-      } catch (e, st) {
-        debugPrint('[RiderLogin] bootstrap unexpected: $e');
-        debugPrintStack(
-          label: '[RiderLogin] bootstrap unexpected stack',
-          stackTrace: st,
-        );
-        await persistMinimalRiderProfileBestEffort(
-          rootRef: dbRef,
-          riderId: uid,
-          email: emailController.text.trim(),
-          displayNameFallback: emailController.text.split('@').first,
-          source: 'rider_login.minimal_after_unexpected_failure',
-        );
+      if (mounted) {
+        setState(() => isLoading = true);
       }
 
-      debugPrint(
-        existingUser.isNotEmpty
-            ? '[RiderLogin] rider profile found'
-            : '[RiderLogin] rider profile ensured',
-      );
+      logRiderLoginAuthStart();
 
-      final effectiveRole =
-          (userData['role'] ?? 'rider').toString().trim().toLowerCase();
-      // ✅ ROLE CHECK (default to rider when absent)
-      if (effectiveRole != 'rider') {
-        await auth.signOut();
-        if (!mounted) {
-          return;
-        }
-        showMessage('This account is not a rider account.');
-        setState(() => isLoading = false);
-        return;
-      }
+      final UserCredential userCredential = await auth
+          .signInWithEmailAndPassword(
+            email: email,
+            password: password,
+          )
+          .timeout(kRiderLoginAuthTimeout);
 
-      if (!mounted) {
-        return;
-      }
-      showMessage('Welcome back.');
-
-      final pendingTripRideId =
-          await RiderTripDeepLinkService.instance.consumePendingAfterAuth();
-      if (!mounted) {
-        return;
-      }
-      if (pendingTripRideId != null && pendingTripRideId.isNotEmpty) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute<void>(
-            settings: RouteSettings(name: '/trip_map/$pendingTripRideId'),
-            builder: (context) => MapScreen(
-              initialOpenRideId: pendingTripRideId,
-            ),
+      final uid = (userCredential.user?.uid ?? '').trim();
+      if (uid.isEmpty) {
+        showLoginFailure(
+          const RiderLoginFailure(
+            logTag: 'RIDER_LOGIN_FAIL',
+            userMessage:
+                'Sign-in did not return a valid account. Please try again.',
+            debugDetail: 'RIDER_LOGIN_FAIL reason=null_user_after_sign_in',
           ),
         );
-      } else {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (context) => const RideTypeScreen()),
-        );
+        return;
       }
-    } on FirebaseAuthException catch (e) {
-      debugPrint("AUTH ERROR: ${e.code}");
 
-      if (e.code == 'user-not-found') {
-        showMessage('No account found for that email.');
-      } else if (e.code == 'wrong-password') {
-        showMessage('Incorrect password.');
-      } else {
-        showMessage(friendlyFirebaseAuthError(e));
+      logRiderLoginAuthSuccess(uid);
+
+      RiderLoginProfileResult profileResult;
+      try {
+        profileResult = await restoreOrCreateRiderProfileAfterLogin(
+          rootRef: dbRef,
+          uid: uid,
+          email: email,
+          trustBootstrapService: _trustBootstrapService,
+        );
+      } on TimeoutException catch (error) {
+        logRiderLoginTimeout(error);
+        logRiderLoginProfileFail(uid, error);
+        await persistMinimalRiderProfileBestEffort(
+          rootRef: dbRef,
+          riderId: uid,
+          email: email,
+          displayNameFallback: email.split('@').first,
+          source: 'rider_login.timeout_minimal_profile',
+        );
+        profileResult = RiderLoginProfileResult(
+          userData: <String, dynamic>{
+            'uid': uid,
+            'name': email.split('@').first,
+            'email': email,
+            'role': 'rider',
+          },
+          profileSetupRequired: true,
+          effectiveRole: 'rider',
+        );
+        if (mounted) {
+          showMessage(
+            'Signed in. Profile sync timed out — continuing with a minimal profile.',
+          );
+        }
       }
-    } catch (e, stackTrace) {
-      debugPrint('[RiderLogin] GENERAL ERROR: $e');
-      debugPrintStack(label: '[RiderLogin] error stack', stackTrace: stackTrace);
-      if (e is StartupRtdbException) {
-        debugPrint(
-          '[RiderLogin] StartupRtdbException path=${e.path} cause=${e.cause}',
+
+      if (!isRiderAppCompatibleRole(profileResult.effectiveRole)) {
+        logRiderRoleCheckFail(uid, profileResult.effectiveRole);
+        await auth.signOut();
+        if (mounted) {
+          showMessage(riderRoleRejectionMessage(profileResult.effectiveRole));
+        }
+        return;
+      }
+
+      String? pendingTripRideId;
+      try {
+        pendingTripRideId = await RiderTripDeepLinkService.instance
+            .consumePendingAfterAuth()
+            .timeout(const Duration(seconds: 5));
+      } catch (error, stackTrace) {
+        debugPrint('RIDER_TRIP_LINK_AFTER_LOGIN_FAIL uid=$uid error=$error');
+        debugPrintStack(
+          label: 'RIDER_TRIP_LINK_AFTER_LOGIN',
+          stackTrace: stackTrace,
         );
       }
-      showMessage(kProductionRiderLoginSupportMessage);
+
+      if (!mounted) {
+        return;
+      }
+
+      homeDestination =
+          pendingTripRideId != null && pendingTripRideId.isNotEmpty
+              ? MapScreen(initialOpenRideId: pendingTripRideId)
+              : const RideTypeScreen();
+      navigateHome = true;
+    } on TimeoutException catch (error, stackTrace) {
+      logRiderLoginTimeout(error);
+      logRiderLoginFail(error, stackTrace);
+      showLoginFailure(classifyLoginFailure(error, stackTrace: stackTrace));
+    } on FirebaseAuthException catch (error, stackTrace) {
+      logRiderLoginFail(error, stackTrace);
+      showLoginFailure(classifyLoginFailure(error, stackTrace: stackTrace));
+    } catch (error, stackTrace) {
+      logRiderLoginFail(error, stackTrace);
+      showLoginFailure(
+        classifyLoginFailure(error, stackTrace: stackTrace, phase: 'post_auth'),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => isLoading = false);
+      }
     }
 
-    if (mounted) {
-      setState(() => isLoading = false);
+    if (navigateHome && homeDestination != null) {
+      await _navigateToHomeAfterLogin(homeDestination);
     }
   }
 
-  void showMessage(String message) {
-    if (!mounted) {
+  Future<void> _navigateToHomeAfterLogin(Widget destination) async {
+    if (_didNavigateAfterLogin) {
+      logRiderLoginNavigateHomeSkippedDuplicate();
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(message)));
+
+    _didNavigateAfterLogin = true;
+    logRiderLoginNavigateHomeStart();
+
+    try {
+      await riderRootReplaceAll(
+        destination,
+        logTag: 'RIDER_LOGIN_NAVIGATE_HOME',
+      );
+      logRiderLoginNavigateHomeDone();
+    } catch (error, stackTrace) {
+      _didNavigateAfterLogin = false;
+      debugPrint('RIDER_LOGIN_NAVIGATE_HOME_FAIL error=$error');
+      debugPrintStack(stackTrace: stackTrace);
+      showMessage('Unable to open home screen. Please try again.');
+    }
+  }
+
+  Future<void> _openSignUp() async {
+    if (isLoading) {
+      return;
+    }
+    debugPrint('RIDER_SIGNUP_OPEN');
+    try {
+      await riderRootPush(
+        const RiderSignup(),
+        logTag: 'RIDER_SIGNUP_OPEN',
+      );
+    } catch (error, stackTrace) {
+      debugPrint('RIDER_SIGNUP_OPEN_FAIL error=$error');
+      debugPrintStack(stackTrace: stackTrace);
+      showMessage('Unable to open sign up. Please try again.');
+    }
+  }
+
+  void showLoginFailure(RiderLoginFailure failure) {
+    showMessage(formatLoginFailureForSnack(failure));
+  }
+
+  void showMessage(String message) {
+    rootScaffoldMessengerKey.currentState?.showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   @override
@@ -212,59 +227,47 @@ class _RiderLoginState extends State<RiderLogin> {
 
     return Scaffold(
       backgroundColor: Colors.black,
-
       body: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 30),
-
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-
           children: [
             const Text(
-              "NexRide Rider",
+              'NexRide Rider',
               style: TextStyle(
                 color: gold,
                 fontSize: 32,
                 fontWeight: FontWeight.bold,
               ),
             ),
-
             const SizedBox(height: 10),
-
             const Text(
-              "Login to continue",
+              'Login to continue',
               style: TextStyle(color: Colors.grey, fontSize: 16),
             ),
-
             const SizedBox(height: 40),
-
             TextField(
               controller: emailController,
               style: const TextStyle(color: Colors.white),
               decoration: const InputDecoration(
-                hintText: "Email",
+                hintText: 'Email',
                 hintStyle: TextStyle(color: Colors.grey),
               ),
             ),
-
             const SizedBox(height: 20),
-
             TextField(
               controller: passwordController,
               obscureText: true,
               style: const TextStyle(color: Colors.white),
               decoration: const InputDecoration(
-                hintText: "Password",
+                hintText: 'Password',
                 hintStyle: TextStyle(color: Colors.grey),
               ),
             ),
-
             const SizedBox(height: 40),
-
             SizedBox(
               width: double.infinity,
               height: 55,
-
               child: ElevatedButton(
                 onPressed: isLoading ? null : loginUser,
                 style: ElevatedButton.styleFrom(
@@ -275,12 +278,10 @@ class _RiderLoginState extends State<RiderLogin> {
                 ),
                 child: isLoading
                     ? const CircularProgressIndicator(color: Colors.white)
-                    : const Text("Login", style: TextStyle(fontSize: 18)),
+                    : const Text('Login', style: TextStyle(fontSize: 18)),
               ),
             ),
-
             const SizedBox(height: 20),
-
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -288,18 +289,10 @@ class _RiderLoginState extends State<RiderLogin> {
                   "Don't have an account?",
                   style: TextStyle(color: Colors.grey),
                 ),
-
                 TextButton(
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const RiderSignup(),
-                      ),
-                    );
-                  },
+                  onPressed: isLoading ? null : () => unawaited(_openSignUp()),
                   child: const Text(
-                    "Sign Up",
+                    'Sign Up',
                     style: TextStyle(color: gold, fontWeight: FontWeight.bold),
                   ),
                 ),

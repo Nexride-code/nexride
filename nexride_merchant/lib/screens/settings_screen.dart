@@ -1,6 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../domain/merchant_portal_access.dart';
 import '../services/merchant_session_service.dart';
@@ -46,9 +47,18 @@ class SettingsScreen extends StatelessWidget {
               );
             },
           ),
-          const ListTile(
-            title: Text('Legal'),
-            subtitle: Text('NexRide merchant terms are governed by your store agreement and admin policies.'),
+          ListTile(
+            leading: const Icon(Icons.gavel_outlined),
+            title: const Text('Legal & Trust'),
+            subtitle: const Text(
+              'Merchant standards, privacy, and platform policies on nexride.africa',
+            ),
+            onTap: () async {
+              final uri = Uri.parse('https://nexride.africa/terms');
+              if (await canLaunchUrl(uri)) {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
+            },
           ),
         ],
       ),

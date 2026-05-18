@@ -22,6 +22,7 @@ import 'services/user_support_ticket_service.dart';
 import 'support/payment_method_support.dart';
 import 'support/rider_trust_support.dart';
 import 'support/startup_rtdb_support.dart';
+import 'legal/legal_navigation.dart';
 import 'support_center_screen.dart';
 import 'trip_history_screen.dart';
 import 'map_screen.dart';
@@ -1012,6 +1013,14 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
                           'Open support options for trip help, account questions, and verification guidance.',
                       trailing: _supportStatusChip(),
                       onTap: _openSupportSheet,
+                    ),
+                    const SizedBox(height: 14),
+                    _ProfileActionTile(
+                      icon: Icons.gavel_rounded,
+                      title: 'Legal & Trust',
+                      subtitle:
+                          'Terms, privacy, safety, refunds, NDPC, and community standards.',
+                      onTap: () => openLegalTrustCenter(context),
                     ),
                     if (_refreshing) ...<Widget>[
                       const SizedBox(height: 18),

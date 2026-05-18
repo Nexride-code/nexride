@@ -19,6 +19,7 @@ import 'support/rider_trust_support.dart';
 import 'support/startup_rtdb_support.dart';
 import 'widgets/rider_highlights_carousel.dart';
 import 'widgets/rider_rollout_area_sheet.dart';
+import 'legal/legal_policy_registry_service.dart';
 import 'services/rider_compliance_service.dart';
 import 'services/rider_rollout_profile_store.dart';
 import 'widgets/rider_updated_terms_dialog.dart';
@@ -159,7 +160,9 @@ class _RideTypeScreenState extends State<RideTypeScreen>
     }
     final snap =
         await RiderComplianceService.instance.fetchSnapshot(riderId);
-    if (!mounted || !snap.needsTermsAcceptance) {
+    final versions =
+        await LegalPolicyRegistryService.instance.loadVersions();
+    if (!mounted || !snap.needsTermsAcceptance(versions)) {
       return;
     }
     await showRiderUpdatedTermsDialog(

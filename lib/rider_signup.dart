@@ -9,6 +9,7 @@ import 'services/rider_compliance_service.dart'
 import 'services/rider_trust_bootstrap_service.dart';
 import 'support/firebase_rtdb_guard.dart';
 import 'support/friendly_firebase_errors.dart';
+import 'support/rider_root_navigation.dart';
 import 'support/startup_rtdb_support.dart';
 import 'widgets/rider_policy_bottom_sheet.dart';
 
@@ -136,11 +137,9 @@ class _RiderSignupState extends State<RiderSignup> {
       }
       showMessage("Account created ✅");
 
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => const RiderSelfieVerificationScreen(),
-        ),
+      await riderRootReplaceAll(
+        const RiderSelfieVerificationScreen(),
+        logTag: 'RIDER_SIGNUP_VERIFY_ROUTE',
       );
     } on FirebaseAuthException catch (e) {
       if (e.code == 'email-already-in-use') {

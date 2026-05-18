@@ -15,6 +15,7 @@ import 'services/rider_trust_rules_service.dart';
 import 'support/app_crash_guard.dart';
 import 'support/app_startup_state.dart';
 import 'support/production_user_messages.dart';
+import 'support/rider_root_navigation.dart';
 import 'support/startup_rtdb_support.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -149,6 +150,7 @@ class _SplashScreenState extends State<SplashScreen> {
       _lastKnownUser = authenticatedUser;
       _logStartup('AUTH_CHECK_OK hasUser=${authenticatedUser != null}');
       if (authenticatedUser != null) {
+        debugPrint('AUTH_RESTORE_OK uid=${authenticatedUser.uid}');
         startupStep('auth_restored', fields: {'uid': authenticatedUser.uid});
       }
       nextScreen = _fallbackScreenFor(authenticatedUser);
@@ -447,24 +449,53 @@ class _SplashScreenState extends State<SplashScreen> {
     }
     _hasNavigated = true;
     _startupFailSafeTimer?.cancel();
-    Navigator.of(
-      context,
-    ).pushReplacement(MaterialPageRoute<void>(builder: (_) => screen));
+    unawaited(
+      riderRootReplaceAll(screen, logTag: 'SPLASH_ROUTE'),
+    );
+  }
+
+  Widget _splashAnimation() {
+    return Lottie.asset(
+      'assets/animations/nexride_taxi_drive.json',
+      fit: BoxFit.cover,
+      repeat: true,
+      errorBuilder: (context, error, stackTrace) {
+        debugPrint('SPLASH_LOTTIE_FAIL error=$error');
+        return Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: <Color>[Color(0xFF1E1A14), Color(0xFF0F0E0C)],
+            ),
+          ),
+          child: const Center(
+            child: Icon(
+              Icons.local_taxi_rounded,
+              size: 120,
+              color: Color(0xFFD4AF37),
+            ),
+          ),
+        );
+      },
+      frameBuilder: (context, child, composition) {
+        if (composition == null) {
+          return const Center(
+            child: CircularProgressIndicator(color: Color(0xFFD4AF37)),
+          );
+        }
+        return child;
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF12100E),
       body: Stack(
         children: <Widget>[
-          Positioned.fill(
-            child: Lottie.asset(
-              'assets/animations/nexride_taxi_drive.json',
-              fit: BoxFit.cover,
-              repeat: true,
-            ),
-          ),
+          Positioned.fill(child: _splashAnimation()),
           Positioned.fill(
             child: Container(color: Colors.black.withValues(alpha: 0.35)),
           ),

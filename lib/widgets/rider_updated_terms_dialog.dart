@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../legal/legal_navigation.dart';
 import '../services/rider_compliance_service.dart'
     show RiderComplianceService, RiderPolicyDocumentKind;
 import 'rider_policy_bottom_sheet.dart';
@@ -39,6 +40,16 @@ Future<void> showRiderUpdatedTermsDialog({
                     style: TextStyle(color: Colors.white70, height: 1.45),
                   ),
                   const SizedBox(height: 10),
+                  TextButton(
+                    onPressed: () => openLegalTrustCenter(context),
+                    child: const Text(
+                      'Open Legal & Trust Center',
+                      style: TextStyle(
+                        color: Color(0xFFD4AF37),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
                   Wrap(
                     spacing: 4,
                     children: [

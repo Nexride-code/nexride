@@ -55,6 +55,7 @@ import 'trip_sync/trip_state_machine.dart';
 import 'widgets/native_places_autocomplete_field.dart';
 import 'widgets/ride_chat_sheet.dart';
 import 'onboarding/rider_selfie_verification_screen.dart';
+import 'legal/legal_policy_registry_service.dart';
 import 'services/rider_compliance_service.dart';
 import 'services/region_pricing_service.dart';
 import 'widgets/rider_identity_verification_banner.dart';
@@ -2129,7 +2130,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
     final snap = await RiderComplianceService.instance.fetchSnapshot(uid);
-    if (!mounted || !snap.needsTermsAcceptance) {
+    final versions =
+        await LegalPolicyRegistryService.instance.loadVersions();
+    if (!mounted || !snap.needsTermsAcceptance(versions)) {
       return;
     }
     await showRiderUpdatedTermsDialog(context: context, riderId: uid);
