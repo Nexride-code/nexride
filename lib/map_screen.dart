@@ -8719,12 +8719,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         }
         _syncRiderPaymentMethodFromRide(Map<String, dynamic>.from(data));
         _driverData = nextDriverData ?? _extractDriverData(data);
-        if (nextDriverData != null) {
-          final nextDriverId = _firstNonEmptyText(<dynamic>[nextDriverData['id']]);
-          if (nextDriverId.isNotEmpty && nextDriverId != 'waiting') {
-            unawaited(_enrichDriverDataProfile(nextDriverId));
-          }
-        }
         _activeTripSessionService.updateFromRideSnapshot(
           rideId,
           visibleRideData,
@@ -8934,56 +8928,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'plate': data['plate'],
       'rating': data['rating'],
     };
-  }
-
-  Future<void> _enrichDriverDataProfile(String driverId) async {
-    final normalizedDriverId = driverId.trim();
-    if (normalizedDriverId.isEmpty || normalizedDriverId == 'waiting') {
-      return;
-    }
-
-    final current = _driverData;
-    if (current == null) {
-      return;
-    }
-
-    try {
-      final snap = await _rideRequestsRef.root
-          .child('drivers/$normalizedDriverId')
-          .get();
-      final driverProfile = snap.value is Map
-          ? Map<String, dynamic>.from(snap.value as Map)
-          : const <String, dynamic>{};
-
-      final profileName = _firstNonEmptyText(<dynamic>[
-        driverProfile['name'],
-        driverProfile['full_name'],
-      ]).trim();
-      final profilePhone = _firstNonEmptyText(<dynamic>[
-        driverProfile['phone'],
-        driverProfile['phone_number'],
-      ]).trim();
-
-      if (profileName.isEmpty && profilePhone.isEmpty) {
-        return;
-      }
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _driverData = <String, dynamic>{
-          ...?_driverData,
-          if (profileName.isNotEmpty) 'name': profileName,
-          if (profilePhone.isNotEmpty) 'phone': profilePhone,
-        };
-      });
-    } catch (error) {
-      _logRideFlow(
-        '[DRIVER_PROFILE_ENRICH_FAIL] driverId=$normalizedDriverId error=$error',
-      );
-    }
   }
 
   void _applyRideStatus(String status) {
