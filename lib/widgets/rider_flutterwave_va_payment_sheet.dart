@@ -77,6 +77,31 @@ class _RiderFlutterwaveVaPaymentSheetState
         .toString()
         .trim()
         .toLowerCase();
+    final rideStatus = (row['status']?.toString() ?? '').trim().toLowerCase();
+    final terminalTrip = <String>{
+      'trip_cancelled',
+      'cancelled',
+      'canceled',
+      'expired',
+      'declined',
+      'driver_cancelled',
+      'rider_cancelled',
+    }.contains(tripState) ||
+        <String>{
+          'cancelled',
+          'driver_cancelled',
+          'rider_cancelled',
+          'expired',
+          'declined',
+        }.contains(rideStatus) ||
+        ps == 'cancelled' ||
+        ps == 'bank_transfer_expired' ||
+        ps == 'failed' ||
+        ps == 'declined';
+    if (terminalTrip && mounted) {
+      Navigator.of(context).pop(false);
+      return;
+    }
     final countdownFlag = row['va_payment_countdown_active'];
     final countdownActive =
         countdownFlag == true ||
