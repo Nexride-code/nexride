@@ -1,6 +1,6 @@
 class RiderFeatureFlags {
-  static const bool enableGroceries = true;
-  static const bool enableFood = true;
+  static const bool enableGroceries = false;
+  static const bool enableFood = false;
   static const bool hideUserVerificationWhenApproved = true;
   static bool get enableRiderRestrictions => false;
   static bool get enableCancellationFeeBlocking => false;

@@ -977,14 +977,16 @@ class _RiderProfileScreenState extends State<RiderProfileScreen>
                       onTap: () => unawaited(_openRiderServiceAreaSheet()),
                     ),
                     const SizedBox(height: 14),
-                    _ProfileActionTile(
-                      icon: Icons.storefront_outlined,
-                      title: 'Food & stores',
-                      subtitle:
-                          'Browse approved merchants in your rollout city, build a cart, and checkout with Flutterwave.',
-                      onTap: () => unawaited(_openMerchantFoodHub()),
-                    ),
-                    const SizedBox(height: 14),
+                    if (RiderFeatureFlags.enableFood) ...<Widget>[
+                      _ProfileActionTile(
+                        icon: Icons.storefront_outlined,
+                        title: 'Food & stores',
+                        subtitle:
+                            'Browse approved merchants in your rollout city, build a cart, and checkout with Flutterwave.',
+                        onTap: () => unawaited(_openMerchantFoodHub()),
+                      ),
+                      const SizedBox(height: 14),
+                    ],
                     _ProfileActionTile(
                       icon: Icons.receipt_long_outlined,
                       title: 'My orders',
