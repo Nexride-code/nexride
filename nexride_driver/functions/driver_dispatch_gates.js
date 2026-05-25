@@ -516,13 +516,17 @@ function buildDriverFanoutFilterTrace(driverId, profile, ridePayload, gates, now
     const sessionOnline =
       prof.isOnline === true || prof.is_online === true || prof.online === true;
     const ds = String(prof.dispatch_state ?? "").trim().toLowerCase();
-    if (ds && ds !== "available") {
+    if (ds && ds !== "available" && ds !== "online_available") {
       trace.filtered_reason = `dispatch_state_not_available:${ds}`;
       return trace;
     }
     if (!sessionOnline) {
       const st = String(prof.status ?? "").trim().toLowerCase();
-      if (st && st !== "available") {
+      if (
+        st &&
+        st !== "available" &&
+        st !== "online_available"
+      ) {
         trace.filtered_reason = `status_not_available:${st}`;
         return trace;
       }

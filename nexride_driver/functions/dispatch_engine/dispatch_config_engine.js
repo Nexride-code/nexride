@@ -8,7 +8,7 @@ const CONFIG_PATH = "app_config/nexride_dispatch";
 
 const DEFAULTS = {
   driver_offer_lease_ms: 8_000,
-  driver_offer_retry_ms: 5_000,
+  driver_offer_retry_ms: 12_000,
   driver_offer_batch_size: 5,
   driver_offer_max_attempts: 12,
   matching_retry_radius_km: 8,
@@ -37,8 +37,8 @@ function parseConfig(raw) {
     ),
     driver_offer_retry_ms: clampInt(
       c.driver_offer_retry_ms,
-      2_000,
-      60_000,
+      8_000,
+      15_000,
       DEFAULTS.driver_offer_retry_ms,
     ),
     driver_offer_batch_size: clampInt(

@@ -404,6 +404,7 @@ class _FakeAdminDataService extends AdminDataService {
   Future<void> updateDriverStatus({
     required AdminDriverRecord driver,
     required String status,
+    String reason = '',
   }) async {}
 
   @override

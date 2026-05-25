@@ -273,6 +273,10 @@ exports.createRideRequest = onCall(rideCallOpts, async (request) =>
   ride.createRideRequest(request.data, callableContext(request), db),
 );
 
+exports.retryRideMatching = onCall(rideCallOpts, async (request) =>
+  ride.retryRideMatching(request.data, callableContext(request), db),
+);
+
 exports.riderNotifySelfieSubmittedForReview = onCall(rideCallOpts, async (request) =>
   riderFirestoreIdentity.riderNotifySelfieSubmittedForReview(request.data, callableContext(request)),
 );
@@ -955,6 +959,15 @@ exports.setDriverOnline = onCall(
     ride.setDriverOnline(request.data, callableContext(request), db),
 );
 
+const refreshDriverAvailability = require("./refresh_driver_availability");
+exports.refreshDriverAvailability = onCall(rideCallOpts, async (request) =>
+  refreshDriverAvailability.refreshDriverAvailabilityCallable(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
 exports.setDriverOffline = onCall(
   {
     ...rideCallOpts,
@@ -1133,6 +1146,26 @@ exports.adminApproveWithdrawal = onCall(rideCallOpts, async (request) =>
 exports.adminRejectWithdrawal = onCall(rideCallOpts, async (request) =>
   adminCallables.adminRejectWithdrawal(request.data, callableContext(request), db),
 );
+exports.adminUpdateWithdrawalStatus = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminUpdateWithdrawalStatus(request.data, callableContext(request), db),
+);
+exports.adminReviewDriverVerificationCase = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminReviewDriverVerificationCase(request.data, callableContext(request), db),
+);
+exports.adminUpdateAppPricingConfig = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminUpdateAppPricingConfig(request.data, callableContext(request), db),
+);
+exports.adminUpdateDriverSubscriptionStatus = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminUpdateDriverSubscriptionStatus(request.data, callableContext(request), db),
+);
+exports.driverSelectBusinessModel = onCall(rideCallOpts, async (request) => {
+  const adminBusinessMutations = require("./admin_business_mutations");
+  return adminBusinessMutations.driverSelectBusinessModel(
+    request.data,
+    callableContext(request),
+    db,
+  );
+});
 exports.adminVerifyDriver = onCall(rideCallOpts, async (request) =>
   adminCallables.adminVerifyDriver(request.data, callableContext(request), db),
 );

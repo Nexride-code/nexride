@@ -788,15 +788,16 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
     final isOnline =
         driverRecord?['isOnline'] == true || driverRecord?['online'] == true;
-    await _rideRequestsRef.root.update(<String, dynamic>{
-      'drivers/$driverId/isAvailable': isOnline,
-      'drivers/$driverId/available': isOnline,
-      'drivers/$driverId/status': isOnline ? 'idle' : 'offline',
-      'drivers/$driverId/activeRideId': null,
-      'drivers/$driverId/currentRideId': null,
-      'drivers/$driverId/updated_at': rtdb.ServerValue.timestamp,
-      'driver_active_rides/$driverId': null,
+    final driverRef = _driversRef.child(driverId);
+    await driverRef.update(<String, dynamic>{
+      'isAvailable': isOnline,
+      'available': isOnline,
+      'status': isOnline ? 'idle' : 'offline',
+      'activeRideId': null,
+      'currentRideId': null,
+      'updated_at': rtdb.ServerValue.timestamp,
     });
+    await _driverActiveRidesRef.child(driverId).remove();
     debugPrint(
       '[Dispatch] driver availability restored requestId=$requestId driverId=$driverId reason=$reason',
     );

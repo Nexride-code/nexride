@@ -177,6 +177,13 @@ class RiderRideCloudFunctionsService {
         'cancel_reason': cancelReason,
       });
 
+  /// Re-run driver fan-out while ride is still searching (server-owned).
+  Future<Map<String, dynamic>> retryRideMatching({required String rideId}) =>
+      _call('retryRideMatching', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+      });
+
   Future<Map<String, dynamic>> expireRideRequest({required String rideId}) =>
       _call('expireRideRequest', <String, dynamic>{'rideId': rideId});
 

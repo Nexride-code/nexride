@@ -191,6 +191,14 @@ class RideCloudFunctionsService {
   Future<Map<String, dynamic>> setDriverOffline() =>
       _call('setDriverOffline', <String, dynamic>{});
 
+  /// Clears stale active-trip pointers, profile trip summary, and expired offers (server-owned).
+  Future<Map<String, dynamic>> refreshDriverAvailability({
+    String source = 'driver_app',
+  }) =>
+      _call('refreshDriverAvailability', <String, dynamic>{
+        'source': source,
+      });
+
   /// Clears stale active-trip pointers blocking new offers (server-owned).
   Future<Map<String, dynamic>> recordDriverOfferPopupAck({
     required String rideId,
@@ -333,6 +341,16 @@ class RideCloudFunctionsService {
 
   Future<Map<String, dynamic>> getNexrideOfficialBankAccount() =>
       _call('getNexrideOfficialBankAccount', <String, dynamic>{});
+
+  Future<Map<String, dynamic>> driverConfirmBankTransferPayment({
+    required String rideId,
+    required String reference,
+  }) =>
+      _call('driverConfirmBankTransferPayment', <String, dynamic>{
+        'rideId': rideId,
+        'reference': reference,
+        'tx_ref': reference,
+      });
 }
 
 bool rideCallableSucceeded(Map<String, dynamic>? response) =>

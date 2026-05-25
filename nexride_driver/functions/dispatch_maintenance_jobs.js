@@ -12,8 +12,8 @@ const admin = require("firebase-admin");
 const { REGION } = require("./params");
 const { sweepOrphanRideLifecyclePointers } = require("./ride_pointer_orphans");
 
-const STALE_OFFER_GRACE_MS = 5 * 60 * 1000; // 5 min past expires_at
-const ABANDONED_RIDE_GRACE_MS = 10 * 60 * 1000; // 10 min past ride expires_at
+const STALE_OFFER_GRACE_MS = 0; // purge as soon as expires_at passes
+const ABANDONED_RIDE_GRACE_MS = 45 * 1000; // 45s past ride search window
 
 function nowMs() {
   return Date.now();
@@ -68,6 +68,14 @@ async function sweepStaleDriverOfferQueue(db) {
     `scanned_offers=${scannedOffers}`,
     `removed=${removedOffers}`,
   );
+  if (removedOffers > 0) {
+    try {
+      const {
+        recordOfferExpired,
+      } = require("./dispatch_engine/dispatch_production_metrics");
+      recordOfferExpired(removedOffers);
+    } catch (_) {}
+  }
 }
 
 /**
@@ -137,6 +145,14 @@ async function expireAbandonedRidesInPool(db) {
     expired += 1;
   }
   console.log("DISPATCH_SWEEP_ABANDONED_RIDES", `expired=${expired}`);
+  if (expired > 0) {
+    try {
+      const {
+        recordMatchTimeout,
+      } = require("./dispatch_engine/dispatch_production_metrics");
+      recordMatchTimeout(expired);
+    } catch (_) {}
+  }
 }
 
 exports.sweepDispatchHealth = onSchedule(

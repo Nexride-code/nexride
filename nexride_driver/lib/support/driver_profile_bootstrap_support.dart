@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import 'app_role.dart';
 import 'driver_profile_support.dart';
+import 'dispatch_production_log.dart';
 import 'realtime_database_error_support.dart';
 
 const Duration kDriverProfileReadTimeout = Duration(seconds: 10);
@@ -69,11 +70,11 @@ Future<void> persistMinimalDriverProfileBestEffort({
         'created_at': ServerValue.timestamp,
       },
     });
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] minimal driver record best-effort ok source=$source uid=$uid path=$path',
     );
   } catch (error, stackTrace) {
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] minimal driver record FAILED source=$source uid=$uid path=$path error=$error',
     );
     debugPrintStack(
@@ -85,12 +86,12 @@ Future<void> persistMinimalDriverProfileBestEffort({
 
 void _logFirebaseDatabaseError(String label, Object error) {
   if (error is FirebaseException) {
-    debugPrint(
+    dispatchVerboseLog(
       '$label firebase code=${error.code} message=${error.message}',
     );
     return;
   }
-  debugPrint('$label error=$error');
+  dispatchVerboseLog('$label error=$error');
 }
 
 Future<Map<String, dynamic>> fetchDriverPricingConfig({
@@ -100,28 +101,28 @@ Future<Map<String, dynamic>> fetchDriverPricingConfig({
 }) async {
   const path = 'app_config/pricing';
   final budget = readTimeout ?? kDriverProfileReadTimeout;
-  debugPrint('[DriverProfile] pricing fetch started source=$source path=$path');
+  dispatchVerboseLog('[DriverProfile] pricing fetch started source=$source path=$path');
   try {
     final snapshot = await rootRef.child(path).get().timeout(budget);
     final rawValue = snapshot.value;
     if (rawValue is Map) {
       final pricing = Map<String, dynamic>.from(rawValue);
-      debugPrint(
+      dispatchVerboseLog(
         '[DriverProfile] pricing fetch completed source=$source path=$path found=true keys=${pricing.keys.length}',
       );
       return pricing;
     }
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] pricing fetch completed source=$source path=$path found=false valueType=${rawValue?.runtimeType ?? 'null'}',
     );
   } catch (error, stackTrace) {
     if (isRealtimeDatabasePermissionDenied(error)) {
-      debugPrint(
+      dispatchVerboseLog(
         '[DriverProfile] pricing config unavailable for source=$source; using embedded defaults.',
       );
       return <String, dynamic>{};
     }
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] pricing fetch failed source=$source path=$path error=$error',
     );
     debugPrintStack(
@@ -141,7 +142,7 @@ Future<void> _persistDriverVerificationShadow({
 }) async {
   try {
     await rootRef.child(verificationPath).set(verificationPayload);
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] verification shadow write ok source=$source uid=$uid path=$verificationPath',
     );
   } catch (error, stackTrace) {
@@ -172,13 +173,13 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
   final verificationPath = driverVerificationAdminPath(uid);
   final profileRef = rootRef.child(path);
 
-  debugPrint(
+  dispatchVerboseLog(
     '[DriverProfile] fetch started role=${role.name} source=$source uid=$uid path=$path mode=get_timeout=${kDriverProfileReadTimeout.inSeconds}s',
   );
-  debugPrint(
+  dispatchVerboseLog(
     '[DRIVER_BACKEND] op=driver_profile_fetch authUid=$uid driverProfilePath=$path source=$source',
   );
-  debugPrint(
+  dispatchVerboseLog(
     '[DRIVER_PROFILE_CHECK] uid=$uid path=$path op=get createIfMissing=$createIfMissing',
   );
 
@@ -190,7 +191,7 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
   } on TimeoutException catch (error, stackTrace) {
     readException = error;
     readError = 'read_timeout:$error';
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] drivers node read TIMEOUT source=$source uid=$uid path=$path',
     );
     debugPrintStack(
@@ -217,7 +218,7 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
   final rawValue = snapshot?.value;
   final rawValueType = rawValue?.runtimeType.toString() ?? 'null';
 
-  debugPrint(
+  dispatchVerboseLog(
     '[DriverProfile] raw fetch result source=$source uid=$uid path=$path readOk=$readSucceeded exists=$snapshotExists valueType=$rawValueType readError=${readError ?? 'none'}',
   );
 
@@ -228,7 +229,7 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
     existing = Map<String, dynamic>.from(rawValue);
   } else if (rawValue != null) {
     parseWarning = 'expected_map_received_$rawValueType';
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] parsing failure source=$source uid=$uid path=$path reason=$parseWarning',
     );
   }
@@ -240,7 +241,7 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
     rootRef: rootRef,
     source: source,
   );
-  debugPrint(
+  dispatchVerboseLog(
     '[DriverProfile] uid consistency source=$source uid=$uid path=$path recordId=${recordId?.isNotEmpty == true ? recordId : 'none'} matches=$uidMatchesRecord',
   );
 
@@ -253,7 +254,7 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
     pricingConfig: pricingConfig,
   );
 
-  debugPrint(
+  dispatchVerboseLog(
     '[DriverProfile] parsing success source=$source uid=$uid path=$path name=${profile['name']} status=${profile['status']} online=${profile['isOnline']} services=${(profile['serviceTypes'] as List<dynamic>).join(',')}',
   );
 
@@ -294,7 +295,7 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
       (readSucceeded || readDeniedByRules)) {
     final verification =
         Map<String, dynamic>.from(profile['verification'] as Map? ?? const {});
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] fallback profile creation started source=$source uid=$uid path=$path verificationPath=$verificationPath',
     );
     final driverPayload = <String, Object?>{
@@ -308,10 +309,10 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
     try {
       await profileRef.update(driverPayload);
       createdFallbackProfile = true;
-      debugPrint(
+      dispatchVerboseLog(
         '[DRIVER_PROFILE_REPAIR] uid=$uid path=$path op=seed_create ok=true readDenied=$readDeniedByRules',
       );
-      debugPrint(
+      dispatchVerboseLog(
         '[DriverProfile] drivers node create/repair write ok source=$source uid=$uid path=$path',
       );
     } catch (error, stackTrace) {
@@ -347,11 +348,11 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
       uid: uid,
       verificationPayload: verificationPayload,
     );
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] fallback profile creation flow finished source=$source uid=$uid path=$path createdDriverNode=$createdFallbackProfile',
     );
   } else if (requiresCompatibilityRepair) {
-    debugPrint(
+    dispatchVerboseLog(
       '[DriverProfile] compatibility repair started source=$source uid=$uid path=$path',
     );
     final repairPayload = <String, Object?>{
@@ -362,7 +363,7 @@ Future<DriverProfileFetchResult> fetchDriverProfileRecord({
     };
     try {
       await profileRef.update(repairPayload);
-      debugPrint(
+      dispatchVerboseLog(
         '[DriverProfile] compatibility repair completed source=$source uid=$uid path=$path',
       );
     } catch (error, stackTrace) {

@@ -56,7 +56,11 @@ async function createOfferLease(db, params) {
   const cfg = await loadDispatchConfig(db);
   const now = Date.now();
   const leaseId = newLeaseId(db);
-  const leaseExpiresAt = now + cfg.driver_offer_lease_ms;
+  const leaseMsOverride = Number(params.leaseMs ?? params.lease_ms ?? 0);
+  const leaseExpiresAt =
+    Number.isFinite(leaseMsOverride) && leaseMsOverride >= 3_000 && leaseMsOverride <= 120_000
+      ? now + Math.round(leaseMsOverride)
+      : now + cfg.driver_offer_lease_ms;
 
   const lease = {
     lease_id: leaseId,
