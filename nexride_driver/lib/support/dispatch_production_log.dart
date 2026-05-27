@@ -29,20 +29,20 @@ const Set<String> _dispatchProdEvents = <String>{
 void dispatchOfferEvent(
   String event, {
   String? rideId,
+  String? driverId,
   String? detail,
 }) {
   if (!_dispatchProdEvents.contains(event)) {
     return;
   }
   final rid = rideId?.trim() ?? '';
+  final did = driverId?.trim() ?? '';
   final extra = detail?.trim() ?? '';
-  if (rid.isEmpty && extra.isEmpty) {
-    debugPrint(event);
-    return;
-  }
-  if (extra.isEmpty) {
-    debugPrint('$event rideId=$rid');
-    return;
-  }
-  debugPrint('$event rideId=$rid $extra');
+  final parts = <String>[
+    event,
+    if (rid.isNotEmpty) 'rideId=$rid',
+    if (did.isNotEmpty) 'driverId=$did',
+    if (extra.isNotEmpty) extra,
+  ];
+  debugPrint(parts.join(' '));
 }

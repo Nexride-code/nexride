@@ -140,9 +140,12 @@ async function sweepOrphanRideLifecyclePointers(db) {
     const ride = rideSnap.val() && typeof rideSnap.val() === "object" ? rideSnap.val() : null;
     const riderOnRide = normUid(ride?.rider_id ?? ride?.riderId);
     if (!ride) {
-      schedule(`rider_active_trip/${riderId}`);
+      // Preserve pointer while ride_requests may be temporarily unreadable during search.
       schedule(`active_trips/${rideId}`);
-      clearedRiderPointers += 1;
+      continue;
+    }
+    const { rideIsOpenForMatching } = require("./dispatch_engine/dispatch_trip_state_engine");
+    if (rideIsOpenForMatching(ride)) {
       continue;
     }
     if (rideDocumentIsTerminal(ride)) {

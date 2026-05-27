@@ -135,6 +135,53 @@ async function setRiderActiveTripPointer(db, riderId, rideId) {
   });
 }
 
+/**
+ * Do not clear rider_active_trip while the ride is still in open-pool search.
+ * @returns {Promise<boolean>} true when pointer may be cleared
+ */
+async function riderActiveTripPointerMayClear(db, riderId, rideIdHint = "") {
+  const r = normUid(riderId);
+  if (!r) return true;
+  const rid = normUid(rideIdHint);
+  if (!rid) {
+    const ptrSnap = await db.ref(`rider_active_trip/${r}`).get();
+    const ptr = ptrSnap.val();
+    const ptrRide =
+      ptr && typeof ptr === "object"
+        ? normUid(ptr.ride_id ?? ptr.rideId)
+        : normUid(ptr);
+    if (!ptrRide) return true;
+    return riderActiveTripPointerMayClear(db, r, ptrRide);
+  }
+  const rideSnap = await db.ref(`ride_requests/${rid}`).get();
+  const ride = rideSnap.val();
+  if (!ride || typeof ride !== "object") {
+    return false;
+  }
+  const { rideIsOpenForMatching } = require("./dispatch_engine/dispatch_trip_state_engine");
+  if (rideIsOpenForMatching(ride)) {
+    console.log(
+      "RIDER_ACTIVE_POINTER_SKIP_CLEAR",
+      `riderId=${r}`,
+      `rideId=${rid}`,
+      `trip_state=${String(ride.trip_state ?? "").trim()}`,
+      `status=${String(ride.status ?? "").trim()}`,
+    );
+    return false;
+  }
+  return true;
+}
+
+async function clearRiderActiveTripPointerIfAllowed(db, riderId, rideIdHint = "") {
+  const r = normUid(riderId);
+  if (!r) return false;
+  if (!(await riderActiveTripPointerMayClear(db, r, rideIdHint))) {
+    return false;
+  }
+  await db.ref(`rider_active_trip/${r}`).remove();
+  return true;
+}
+
 /** Pointer only — never lifecycle fields. */
 async function setDriverActiveRidePointer(db, driverId, rideId) {
   const d = normUid(driverId);
@@ -1930,6 +1977,7 @@ async function writeDriverOfferPaths(
       },
     });
     dispatchVerboseLog("OFFER_WRITE_SUCCESS", `path=${qPath}`);
+    console.log("OFFER_WRITE_OK", `rideId=${rid}`, `driverId=${d}`, `path=${qPath}`);
     try {
       const {
         recordOfferWritten,
@@ -2238,8 +2286,33 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload, fanoutOptio
         rejectedDriverSamples.push(cand);
       }
       logger.info("MATCH_DRIVER_FILTER_TRACE", { rideId: rid, market, ...cand });
+      const prof = profile && typeof profile === "object" ? profile : {};
+      const traceStatus = String(prof.status ?? "").trim().toLowerCase() || "(none)";
+      const traceDispatchState =
+        String(prof.dispatch_state ?? "").trim().toLowerCase() || "(none)";
+      const traceServiceAreaCity =
+        String(prof.service_area_city_id ?? prof.rollout_city_id ?? "").trim() || "(none)";
+      const traceDispatchMarket =
+        String(cand.dispatch_market_id ?? prof.dispatch_market_id ?? prof.canonical_market_id ?? "")
+          .trim() || "(none)";
+      const traceReason = cand.allowed
+        ? "eligible"
+        : String(cand.filtered_reason ?? "unknown").trim() || "unknown";
+      console.log(
+        "MATCH_DRIVER_FILTER_TRACE",
+        `rideId=${rid}`,
+        `driverId=${d}`,
+        `status=${traceStatus}`,
+        `dispatch_state=${traceDispatchState}`,
+        `service_area_city=${traceServiceAreaCity}`,
+        `dispatch_market_id=${traceDispatchMarket}`,
+        `reason=${traceReason}`,
+      );
       if (cand.allowed) {
+        console.log("MATCH_ELIGIBLE", `rideId=${rid}`, `driverId=${d}`);
         logMatchLocationSource(logger, d, profile, ridePayload, { ok: true }, now);
+      } else {
+        console.log("MATCH_REJECT", `rideId=${rid}`, `driverId=${d}`, `reason=${traceReason}`);
       }
     }
   }
@@ -2248,6 +2321,18 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload, fanoutOptio
   const pickupLng = Number(pickup.lng ?? pickup.longitude ?? "");
   const radiusKm =
     dispatchCfg.matching_retry_radius_km + (Number(fanoutOptions.radiusExpandKm) || 0);
+  const rideServiceArea =
+    String(
+      ridePayload.resolved_service_city_id ??
+        ridePayload.service_city_id ??
+        ridePayload.rollout_city_id ??
+        "",
+    ).trim() || "(none)";
+  console.log(
+    "MATCH_DRIVER_POOL_QUERY",
+    `market=${market}`,
+    `serviceArea=${rideServiceArea}`,
+  );
 
   let raw = {};
   if (Number.isFinite(pickupLat) && Number.isFinite(pickupLng)) {
@@ -2270,6 +2355,7 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload, fanoutOptio
     raw = await loadDriversForDispatchMarket(db, market);
   }
   let scanCount = Object.keys(raw).length;
+  console.log("MATCH_DRIVER_POOL_READY", `rideId=${rid}`, `count=${scanCount}`);
   dispatchVerboseLog("MATCH_DRIVER_SCAN_COUNT", `count=${scanCount}`);
   if (scanCount === 0) {
     console.log(
@@ -2323,6 +2409,18 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload, fanoutOptio
     rejection_reason_breakdown: rejectionCounts,
   });
   if (eligibleDriverCount === 0 && scanCount > 0) {
+    for (const c of allCandidates) {
+      if (c.allowed) continue;
+      const d = normUid(c.driver_id);
+      const reason = String(c.filtered_reason ?? "unknown").trim() || "unknown";
+      console.log("MATCH_REJECT", `rideId=${rid}`, `driverId=${d}`, `reason=${reason}`);
+    }
+    console.log(
+      "MATCH_FANOUT_ZERO_ELIGIBLE",
+      `rideId=${rid}`,
+      `indexed=${scanCount}`,
+      `rejection_breakdown=${JSON.stringify(rejectionCounts)}`,
+    );
     try {
       const { recordNoCandidate } = require("./dispatch_engine/dispatch_production_metrics");
       recordNoCandidate();
@@ -2371,6 +2469,12 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload, fanoutOptio
   const batchNumber =
     (Number(ridePayload?.match_debug?.fanout_batch_number ?? 0) || 0) + (batch.length > 0 ? 1 : 0);
 
+  console.log(
+    "MATCH_OFFERS_WRITE_START",
+    `rideId=${rid}`,
+    `driverIds=[${batchDriverIds.join(",")}]`,
+  );
+
   for (const item of batch) {
     const d = item.driverId;
     const profile = item.profile;
@@ -2405,12 +2509,14 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload, fanoutOptio
       });
     }
   }
+  console.log("MATCH_OFFERS_WRITTEN", `rideId=${rid}`, `count=${offersWritten}`);
   console.log(
     "MATCH_LATENCY_OFFERS_WRITTEN",
     `rideId=${rid}`,
     `offersWritten=${offersWritten}`,
     `durationMs=${nowMs() - fanoutNow}`,
   );
+  console.log("MATCH_FANOUT_DONE", `rideId=${rid}`, `count=${offersWritten}`);
 
   const noEligibleReason =
     offersWritten === 0
@@ -2705,10 +2811,12 @@ async function clearActiveTripPointers(db, rideId, riderId, driverId) {
   const d = normUid(driverId);
   const u = {};
   if (rid) u[`active_trips/${rid}`] = null;
-  if (r) u[`rider_active_trip/${r}`] = null;
   if (d) u[`driver_active_ride/${d}`] = null;
   if (Object.keys(u).length) {
     await db.ref().update(u);
+  }
+  if (r) {
+    await clearRiderActiveTripPointerIfAllowed(db, r, rid);
   }
 }
 
@@ -3209,6 +3317,13 @@ async function createRideRequest(data, context, db) {
   }
   console.log("RIDER_CREATE_SUCCESS", rideId, market);
   console.log(
+    "RIDER_CREATE_RIDE_OK",
+    `rideId=${rideId}`,
+    `market=${resolvedMarket}`,
+    `serviceArea=${rolloutGate.city_id || "(none)"}`,
+    `paymentStatus=${String(payload.payment_status ?? "").trim().toLowerCase() || "(none)"}`,
+  );
+  console.log(
     "MATCH_LATENCY_RIDE_CREATED",
     `rideId=${rideId}`,
     `durationMs=${nowMs() - createStartedMs}`,
@@ -3226,6 +3341,30 @@ async function createRideRequest(data, context, db) {
     resolved_dispatch_market_id: resolvedMarket,
   };
   await fanOutDriverOffersIfEligible(db, rideId, fanoutPayload);
+  try {
+    const ptrSnap = await db.ref(`rider_active_trip/${riderId}`).get();
+    const ptrVal = ptrSnap.val();
+    const ptrRide =
+      ptrVal && typeof ptrVal === "object"
+        ? normUid(ptrVal.ride_id ?? ptrVal.rideId)
+        : normUid(ptrVal);
+    if (ptrRide !== rideId) {
+      await setRiderActiveTripPointer(db, riderId, rideId);
+      console.log(
+        "RIDER_ACTIVE_POINTER_REASSERT",
+        `riderId=${riderId}`,
+        `rideId=${rideId}`,
+        `prior=${ptrRide || "none"}`,
+      );
+    }
+  } catch (reassertErr) {
+    console.log(
+      "RIDER_ACTIVE_POINTER_REASSERT_FAIL",
+      `riderId=${riderId}`,
+      `rideId=${rideId}`,
+      reassertErr?.message ?? reassertErr,
+    );
+  }
   console.log(
     "MATCH_LATENCY_OFFERS_FANOUT_COMPLETE",
     `rideId=${rideId}`,
@@ -4547,7 +4686,7 @@ async function completeTrip(data, context, db) {
     );
   }
   if (riderId) {
-    await db.ref(`rider_active_trip/${riderId}`).remove();
+    await clearRiderActiveTripPointerIfAllowed(db, riderId, rideId);
   }
   const hookRef = db.ref(`trip_settlement_hooks/${rideId}`);
   await hookRef.update({
@@ -4667,7 +4806,7 @@ async function releaseOpenRideForBankTransferFailure(
   const rider = normUid(v?.rider_id);
   await clearFanoutAndOffers(db, rid);
   if (rider) {
-    await db.ref(`rider_active_trip/${rider}`).remove();
+    await clearRiderActiveTripPointerIfAllowed(db, rider, rid);
   }
   await db.ref(`active_trips/${rid}`).remove().catch(() => {});
   await syncRideTrackPublic(db, rid);
@@ -4748,7 +4887,7 @@ async function cancelRideRequest(data, context, db) {
     }
   }
   if (rider) {
-    await db.ref(`rider_active_trip/${rider}`).remove();
+    await clearRiderActiveTripPointerIfAllowed(db, rider, rideId);
   }
   await writeAudit(db, {
     type: "ride_cancel",
@@ -4802,7 +4941,7 @@ async function expireRideRequest(data, context, db) {
   }
   await clearFanoutAndOffers(db, rideId);
   if (uid) {
-    await db.ref(`rider_active_trip/${uid}`).remove();
+    await clearRiderActiveTripPointerIfAllowed(db, uid, rideId);
   }
   await writeAudit(db, { type: "ride_expire", ride_id: rideId, actor_uid: uid });
   await syncRideTrackPublic(db, rideId);

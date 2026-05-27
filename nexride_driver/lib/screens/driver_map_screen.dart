@@ -2264,7 +2264,41 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   }
 
   void _offerDiscoveryLog(String event, {String? rideId, String? detail}) {
-    dispatchOfferEvent(event, rideId: rideId, detail: detail);
+    dispatchOfferEvent(
+      event,
+      rideId: rideId,
+      driverId: _effectiveDriverId.trim(),
+      detail: detail,
+    );
+  }
+
+  Future<void> _logDriverOfferQueueSnapshot({
+    required String driverId,
+    required rtdb.DatabaseReference queueRef,
+  }) async {
+    final uid = driverId.trim();
+    if (uid.isEmpty) {
+      return;
+    }
+    try {
+      final snap = await queueRef.get();
+      final raw = snap.value;
+      var count = 0;
+      final keys = <String>[];
+      if (raw is Map) {
+        count = raw.length;
+        keys.addAll(raw.keys.map((k) => k.toString()));
+        keys.sort();
+      }
+      debugPrint(
+        'DRIVER_OFFER_QUEUE_SNAPSHOT driverId=$uid count=$count '
+        'keys=[${keys.join(",")}]',
+      );
+    } catch (error) {
+      debugPrint(
+        'DRIVER_OFFER_QUEUE_SNAPSHOT driverId=$uid count=0 keys=[] error=$error',
+      );
+    }
   }
 
   String _firebaseErrorCode(Object error) {
@@ -11791,8 +11825,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
     final attachUid =
         (FirebaseAuth.instance.currentUser?.uid ?? _effectiveDriverId).trim();
-    dispatchVerboseLog(
-      'DRIVER_OFFER_LISTENER_ATTACH_START path=driver_offer_queue/$attachUid uid=$attachUid',
+    debugPrint(
+      'DRIVER_OFFER_LISTENER_ATTACH driverId=$attachUid '
+      'path=driver_offer_queue/$attachUid',
     );
     final attachAuth = FirebaseAuth.instance.currentUser?.uid.trim();
     final attachEffective = _effectiveDriverId.trim();
@@ -11871,6 +11906,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _logRideReq(
         '[MATCH_DEBUG][QUERY_ATTACH:driver_offer_queue/$discoveryUid] '
         'discovery onChildAdded+onChildRemoved',
+      );
+      unawaited(
+        _logDriverOfferQueueSnapshot(
+          driverId: discoveryUid,
+          queueRef: driverOfferQueueRef,
+        ),
       );
       _rideRequestSubscription = driverOfferQueueRef.onChildAdded.listen(
         (event) async {

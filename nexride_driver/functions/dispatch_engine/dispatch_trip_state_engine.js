@@ -24,6 +24,7 @@ const CANONICAL_TRIP_STATES = new Set([
 const SEARCHING_TOKENS = new Set([
   "searching",
   "requested",
+  "requesting",
   "matching",
   "searching_driver",
   "awaiting_match",

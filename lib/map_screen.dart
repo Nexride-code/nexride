@@ -384,6 +384,59 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return terminalTrip.contains(ts);
   }
 
+  /// Open-pool search still in progress (must not clear rider_active_trip pointer).
+  bool _rideDataIsOpenPoolSearching(Map<String, dynamic> rideData) {
+    if (_rideSnapshotHydrationIndicatesTerminalRide(rideData)) {
+      return false;
+    }
+    final canon = TripStateMachine.canonicalStateFromSnapshot(rideData);
+    if (canon == TripLifecycleState.searching) {
+      return true;
+    }
+    final tripState =
+        TripStateMachine.normalizeTripState(rideData['trip_state']).trim();
+    final status = _valueAsText(rideData['status']).trim().toLowerCase();
+    const openTokens = <String>{
+      'searching',
+      'requesting',
+      'requested',
+      'matching',
+      'awaiting_match',
+      'searching_driver',
+    };
+    return openTokens.contains(tripState) || openTokens.contains(status);
+  }
+
+  bool _hasActiveOpenPoolSearchContext() {
+    final pendingSubmission = _pendingRideRequestSubmissionId?.trim() ?? '';
+    if (pendingSubmission.isNotEmpty) {
+      return true;
+    }
+    final rideId = (_currentRideId ?? _recoverableActiveRideId)?.trim();
+    if (rideId == null || rideId.isEmpty) {
+      return false;
+    }
+    if (_searchingDriver) {
+      return true;
+    }
+    final status = _rideStatus.trim().toLowerCase();
+    const openStatuses = <String>{
+      'searching',
+      'requesting',
+      'matching',
+      'awaiting_match',
+      'searching_driver',
+    };
+    if (openStatuses.contains(status)) {
+      return true;
+    }
+    final snap = _currentRideSnapshot;
+    if (snap != null && _rideDataIsOpenPoolSearching(snap)) {
+      return true;
+    }
+    return false;
+  }
+
   /// Ride must never drive active-trip hydration or arrived overlay.
   bool _rideSnapshotHydrationIndicatesTerminalRide(Map<String, dynamic> ride) {
     final canon = TripStateMachine.canonicalStateFromSnapshot(ride);
@@ -3876,7 +3929,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     final raw = event.snapshot.value;
     if (raw is! Map) {
-      debugPrint('RIDER_ACTIVE_POINTER_UPDATE uid=$uid rideId=(cleared)');
+      if (_hasActiveOpenPoolSearchContext()) {
+        debugPrint(
+          'RIDER_ACTIVE_POINTER_SKIP_CLEAR uid=$uid '
+          'rideId=${_currentRideId ?? _recoverableActiveRideId} '
+          'reason=active_open_pool_search',
+        );
+        return;
+      }
+      debugPrint(
+        'RIDER_ACTIVE_POINTER_UPDATE uid=$uid rideId=(cleared) '
+        'reason=pointer_node_empty',
+      );
       if (_recoverableActiveRideId != null && _currentRideId == null && mounted) {
         setState(() {
           _recoverableActiveRideId = null;
@@ -3896,6 +3960,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'RIDER_ACTIVE_POINTER_UPDATE uid=$uid rideId=$ptrRideId phase=$phase',
     );
     if (ptrRideId.isEmpty) {
+      if (_hasActiveOpenPoolSearchContext()) {
+        debugPrint(
+          'RIDER_ACTIVE_POINTER_SKIP_CLEAR uid=$uid '
+          'rideId=${_currentRideId ?? _recoverableActiveRideId} '
+          'reason=pointer_empty_during_search',
+        );
+        return;
+      }
       if (_recoverableActiveRideId != null && _currentRideId == null && mounted) {
         setState(() {
           _recoverableActiveRideId = null;
@@ -3909,9 +3981,47 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final rideSnap =
           await _rideRequestsRef.child(ptrRideId).get();
       final ridePayload = _asStringDynamicMap(rideSnap.value);
-      if (ridePayload == null ||
-          _rideSnapshotHydrationIndicatesTerminalRide(ridePayload)) {
-        final reason = ridePayload == null ? 'pointer_missing_ride' : 'terminal_ride_node';
+      if (ridePayload != null && _rideDataIsOpenPoolSearching(ridePayload)) {
+        _logRideFlow(
+          'RIDER_ACTIVE_POINTER_PRESERVED source=rider_active_trip_stream '
+          'rideId=$ptrRideId trip_state=${ridePayload['trip_state']} '
+          'status=${ridePayload['status']}',
+        );
+        if (_currentRideId == null && _recoverableActiveRideId != ptrRideId) {
+          if (mounted) {
+            setState(() {
+              _recoverableActiveRideId = ptrRideId;
+            });
+          } else {
+            _recoverableActiveRideId = ptrRideId;
+          }
+        }
+        if (_activeRideListenerRideId != ptrRideId || _rideListener == null) {
+          listenToRide(ptrRideId);
+        }
+        return;
+      }
+      if (ridePayload == null) {
+        debugPrint(
+          'RIDER_ACTIVE_POINTER_SKIP_CLEAR uid=$uid rideId=$ptrRideId '
+          'reason=ride_fetch_miss_during_search',
+        );
+        if (_currentRideId == null && _recoverableActiveRideId != ptrRideId) {
+          if (mounted) {
+            setState(() {
+              _recoverableActiveRideId = ptrRideId;
+            });
+          } else {
+            _recoverableActiveRideId = ptrRideId;
+          }
+        }
+        if (_activeRideListenerRideId != ptrRideId || _rideListener == null) {
+          listenToRide(ptrRideId);
+        }
+        return;
+      }
+      if (_rideSnapshotHydrationIndicatesTerminalRide(ridePayload)) {
+        const reason = 'terminal_ride_node';
         _logRideFlow(
           'ACTIVE_RIDE_POINTER_CLEARED source=rider_active_trip_stream '
           'rideId=$ptrRideId reason=$reason',
@@ -8951,6 +9061,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
 
       _logRideFlow('createRideRequest callable success rideId=$rideId');
+      debugPrint(
+        'RIDER_CREATE_RIDE_OK rideId=$rideId '
+        'market=${committedRideData['market'] ?? committedRideData['market_pool'] ?? dispatchMarket} '
+        'serviceArea=${committedRideData['resolved_service_city_id'] ?? committedRideData['service_city_id'] ?? city} '
+        'paymentStatus=${committedRideData[RtdbRideRequestFields.paymentStatus] ?? committedRideData['payment_status']}',
+      );
       {
         final nowMs = DateTime.now().millisecondsSinceEpoch;
         final eff = Map<String, dynamic>.from(
@@ -9079,14 +9195,34 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'ACTIVE_TRIP_CLEANED reason=$reason uid=${uid.isEmpty ? 'none' : uid} rideId=${normalizedRideId.isEmpty ? 'none' : normalizedRideId}',
     );
     if (uid.isNotEmpty) {
-      try {
-        await rtdb.FirebaseDatabase.instance
-            .ref('$_riderActiveTripPointerPath/$uid')
-            .remove();
-      } catch (error) {
-        _logRideFlow(
-          'ACTIVE_TRIP_CLEARED pointer_clear_failed uid=$uid error=$error',
-        );
+      var shouldClearPointer = true;
+      if (normalizedRideId.isNotEmpty) {
+        try {
+          final rideSnap = await _rideRequestsRef.child(normalizedRideId).get();
+          final rideData = _asStringDynamicMap(rideSnap.value);
+          if (rideData != null && _rideDataIsOpenPoolSearching(rideData)) {
+            shouldClearPointer = false;
+            debugPrint(
+              'RIDER_ACTIVE_POINTER_SKIP_CLEAR uid=$uid rideId=$normalizedRideId '
+              'reason=$reason',
+            );
+          }
+        } catch (error) {
+          _logRideFlow(
+            'ACTIVE_TRIP_CLEARED pointer_precheck_failed rideId=$normalizedRideId error=$error',
+          );
+        }
+      }
+      if (shouldClearPointer) {
+        try {
+          await rtdb.FirebaseDatabase.instance
+              .ref('$_riderActiveTripPointerPath/$uid')
+              .remove();
+        } catch (error) {
+          _logRideFlow(
+            'ACTIVE_TRIP_CLEARED pointer_clear_failed uid=$uid error=$error',
+          );
+        }
       }
     }
     if (normalizedRideId.isNotEmpty) {
@@ -9103,6 +9239,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _clearRiderActiveTripPointerBestEffort() async {
+    if (_hasActiveOpenPoolSearchContext()) {
+      debugPrint(
+        'RIDER_ACTIVE_POINTER_SKIP_CLEAR uid=${_currentRiderUid ?? 'none'} '
+        'rideId=${_currentRideId ?? _recoverableActiveRideId} '
+        'reason=pointer_only_best_effort_blocked',
+      );
+      return;
+    }
     await _clearStaleActiveTripArtifacts(
       rideId: '',
       reason: 'pointer_only_best_effort',

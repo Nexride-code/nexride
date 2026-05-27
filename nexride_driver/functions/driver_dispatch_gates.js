@@ -47,6 +47,22 @@ function driverOfferDispatchStateAllowsDispatch(raw) {
   return DRIVER_OFFER_AVAILABLE_DISPATCH_STATES.has(ds);
 }
 
+/**
+ * Session is online when explicit flags are set OR status/dispatch_state imply availability
+ * (e.g. setDriverOnline writes online_available even if is_online lags).
+ */
+function driverSessionOnlineForDispatch(profile) {
+  const d = profile && typeof profile === "object" ? profile : {};
+  if (d.isOnline === true || d.is_online === true || d.online === true) {
+    return true;
+  }
+  const st = String(d.status ?? "").trim().toLowerCase();
+  const ds = String(d.dispatch_state ?? "").trim().toLowerCase();
+  return (
+    driverOfferStatusAllowsDispatch(st) && driverOfferDispatchStateAllowsDispatch(ds)
+  );
+}
+
 function normUid(uid) {
   return String(uid ?? "").trim();
 }
@@ -363,9 +379,7 @@ function evaluateDriverForOfferSoft(driverProfile, ridePayload, gates = {}) {
   if (!driverRideMarketsAligned(d, ridePayload)) {
     return { ok: false, log: "DRIVER_FILTERED_MARKET_SOFT", detail: "market_mismatch" };
   }
-  const online =
-    d.isOnline === true || d.is_online === true || d.online === true;
-  if (!online) {
+  if (!driverSessionOnlineForDispatch(d)) {
     return { ok: false, log: "NOT_ONLINE", detail: "session_off" };
   }
   const st = String(d.status ?? "").trim().toLowerCase();
@@ -554,19 +568,17 @@ function buildDriverFanoutFilterTrace(driverId, profile, ridePayload, gates, now
       return trace;
     }
   } else {
-    const sessionOnline =
-      prof.isOnline === true || prof.is_online === true || prof.online === true;
     const ds = String(prof.dispatch_state ?? "").trim().toLowerCase();
     if (!driverOfferDispatchStateAllowsDispatch(ds)) {
       trace.filtered_reason = `dispatch_state_not_available:${ds}`;
       return trace;
     }
-    if (!sessionOnline) {
-      const st = String(prof.status ?? "").trim().toLowerCase();
-      if (!driverOfferStatusAllowsDispatch(st)) {
-        trace.filtered_reason = `status_not_available:${st}`;
-        return trace;
-      }
+    const st = String(prof.status ?? "").trim().toLowerCase();
+    if (!driverOfferStatusAllowsDispatch(st)) {
+      trace.filtered_reason = `status_not_available:${st}`;
+      return trace;
+    }
+    if (!driverSessionOnlineForDispatch(prof)) {
       trace.filtered_reason = "not_online";
       return trace;
     }
@@ -767,6 +779,7 @@ module.exports = {
   evaluateCarRideVehicleAndCapability,
   loadDispatchGates,
   summarizeDriverForFanout,
+  driverSessionOnlineForDispatch,
   STALE_DRIVER_LOCATION_MS,
   MAX_DRIVER_PICKUP_DISTANCE_KM,
 };

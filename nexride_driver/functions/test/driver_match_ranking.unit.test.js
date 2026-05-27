@@ -189,4 +189,56 @@ assert.ok(
 const pri = computeDriverPriorityGroup(gwarinpaDriver, gwarinpaRide);
 assert.equal(pri.priority_group, PRIORITY_AREA_SAME_CITY);
 
+const lugbeRide = {
+  market_pool: "abuja_fct",
+  dispatch_market_id: "abuja_fct",
+  resolved_dispatch_market_id: "abuja_fct",
+  resolved_service_city_id: "lugbe",
+  pickup: { lat: 8.95, lng: 7.37 },
+  service_type: "ride",
+};
+const gwarinpaForLugbe = evaluateDriverMatchCandidate(
+  "d-lugbe-cross",
+  {
+    ...gwarinpaDriver,
+    status: "online_available",
+    dispatch_state: "online_available",
+    is_online: false,
+    isOnline: false,
+    online: false,
+  },
+  lugbeRide,
+  gates,
+  now,
+  { useSoft: true },
+);
+assert.equal(
+  gwarinpaForLugbe.allowed,
+  true,
+  `same-market cross-city driver must match: ${gwarinpaForLugbe.filtered_reason}`,
+);
+assert.equal(gwarinpaForLugbe.priority_group, PRIORITY_AREA_SAME_MARKET);
+
+const strictOnlineAvailable = evaluateDriverMatchCandidate(
+  "d-strict-online",
+  {
+    status: "online_available",
+    dispatch_state: "online_available",
+    dispatch_market_id: "abuja_fct",
+    service_area_city_id: "gwarinpa",
+    selected_service_area_id: "gwarinpa",
+    driver_availability_mode: "service_area",
+    nexride_verified: true,
+  },
+  gwarinpaRide,
+  { soft_verification: false, require_bvn: false },
+  now,
+  { useSoft: false },
+);
+assert.equal(
+  strictOnlineAvailable.allowed,
+  true,
+  `online_available without is_online must pass strict fan-out: ${strictOnlineAvailable.filtered_reason}`,
+);
+
 console.log("driver_match_ranking.unit.test.js OK");

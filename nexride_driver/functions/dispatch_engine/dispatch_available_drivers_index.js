@@ -21,9 +21,21 @@ function geoBucketPath(market, geohash, driverId) {
 
 function isDriverOnline(profile) {
   if (!profile || typeof profile !== "object") return false;
-  if (profile.is_online === true || profile.isOnline === true) return true;
-  if (String(profile.status ?? "").trim().toLowerCase() === "online") return true;
-  if (String(profile.dispatch_state ?? "").trim().toLowerCase() === "online") return true;
+  if (profile.is_online === true || profile.isOnline === true || profile.online === true) {
+    return true;
+  }
+  const status = String(profile.status ?? "").trim().toLowerCase();
+  if (status === "online" || status === "available" || status === "online_available") {
+    return true;
+  }
+  const dispatchState = String(profile.dispatch_state ?? "").trim().toLowerCase();
+  if (
+    dispatchState === "online" ||
+    dispatchState === "available" ||
+    dispatchState === "online_available"
+  ) {
+    return true;
+  }
   return false;
 }
 

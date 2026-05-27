@@ -174,6 +174,24 @@ assert.equal(
   `setDriverOnline profile must pass soft fan-out: ${softOnlineAvailable.log}:${softOnlineAvailable.detail}`,
 );
 
+const softOnlineAvailableNoFlag = evaluateDriverForOfferSoft(
+  {
+    status: "online_available",
+    dispatch_state: "online_available",
+    dispatch_market_id: "abuja_fct",
+    canonical_market_id: "abuja_fct",
+    nexride_verified: true,
+    verification: { restrictions: { canGoOnline: true, ride: true } },
+  },
+  { market_pool: "abuja_fct", dispatch_market_id: "abuja_fct", service_type: "ride" },
+  { require_bvn: false },
+);
+assert.equal(
+  softOnlineAvailableNoFlag.ok,
+  true,
+  `online_available without is_online must pass soft fan-out: ${softOnlineAvailableNoFlag.log}:${softOnlineAvailableNoFlag.detail}`,
+);
+
 assert.equal(
   driverRideMarketsAligned(
     { dispatch_market_id: "abuja_fct" },
