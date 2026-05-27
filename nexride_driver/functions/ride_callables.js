@@ -10,6 +10,7 @@ const { dispatchVerboseLog } = require("./dispatch_engine/dispatch_production_lo
 const { platformFeeNgn } = require("./params");
 const { syncRideTrackPublic } = require("./track_public");
 const { syncLiveJobMirror, syncLiveDriverMirror } = require("./live_job_mirror");
+const cardPayment = require("./card_payment_flow");
 
 /** Public ride track + lightweight liveJobs/liveDrivers mirrors (UI sync only). */
 async function syncRideRealtimeMirrors(db, rideId, driverId) {
@@ -500,7 +501,7 @@ async function applyDriverAcceptAdminMerge(db, rideRef, rideId, driverId, now, o
   if (!cur) {
     return { ok: false, reason: "invalid_state" };
   }
-  if (!paymentAllowsDispatch(cur)) {
+  if (!paymentAllowsAcceptRide(cur)) {
     return { ok: false, reason: "payment_not_verified" };
   }
   const tripState = String(cur.trip_state ?? "").trim().toLowerCase();
@@ -910,7 +911,7 @@ function evaluateAcceptTransactionDecision(current, driverId, opts = {}) {
   )
     .trim()
     .toLowerCase();
-  const allowsDispatch = paymentAllowsDispatch(current);
+  const allowsDispatch = paymentAllowsAcceptRide(current);
   const offerExpiresAt = Number(authorityOfferVal?.expires_at ?? 0) || 0;
   const rideExpiresAt = Number(current.expires_at ?? current.request_expires_at ?? 0) || 0;
   const acceptOpen = acceptWindowOpenForAccept(current, authorityOfferVal, acceptStartedAt, now);
@@ -1166,7 +1167,7 @@ function inferAcceptTxAbortReason(ride, driverId, authorityOfferVal, acceptStart
   if (assigned && assigned !== normUid(driverId)) {
     return "driver_already_set";
   }
-  if (!paymentAllowsDispatch(ride)) {
+  if (!paymentAllowsAcceptRide(ride)) {
     return "payment_not_verified";
   }
   if (!ridePoolOpenForAccept(ride)) {
@@ -1192,6 +1193,16 @@ const BANK_TRANSFER_DISPATCH_STATUSES = new Set([
   "pending_review",
   "paid",
   "verified",
+]);
+
+/** Accept may proceed while payment is still under review (Start Trip stays gated). */
+const ACCEPT_RIDE_REVIEW_PAYMENT_STATUSES = new Set([
+  "pending_manual_confirmation",
+  "payment_review",
+  "bank_transfer_pending",
+  "automated_va",
+  "pending",
+  "pending_review",
 ]);
 
 /** Grace after offer TTL when accept began before expiry (ms). */
@@ -1457,18 +1468,11 @@ function paymentAllowsDispatch(ride) {
     return BANK_TRANSFER_DISPATCH_STATUSES.has(status);
   }
 
-  if (
-    method === "card" ||
-    method === "flutterwave" ||
-    method === "credit_card" ||
-    method === "creditcard" ||
-    method === "debit_card"
-  ) {
-    if (["paid", "verified", "prepaid"].includes(status)) return true;
-    // Card on file: match drivers before hosted checkout / capture.
-    if (status === "pending") return true;
-    // VA issued but ride still tagged `flutterwave` + `pending_transfer`.
-    return status === "pending_transfer";
+  if (cardPayment.isCardPaymentMethod(method)) {
+    if (cardPayment.CARD_BLOCKED_MATCH_STATUSES.has(status)) {
+      return false;
+    }
+    return cardPayment.cardPaymentAllowsMatching(ride);
   }
 
   return [
@@ -1480,7 +1484,52 @@ function paymentAllowsDispatch(ride) {
   ].includes(status);
 }
 
-/** Fan-out may start before VA is issued; accept still uses [paymentAllowsDispatch]. */
+/**
+ * Driver accept may proceed before payment is fully settled.
+ * Fan-out / Start Trip still use [paymentAllowsDispatch].
+ */
+function paymentAllowsAcceptRide(ride) {
+  if (!ride || typeof ride !== "object") {
+    return false;
+  }
+  const method = normalizedPaymentMethod(ride);
+  if (cardPayment.isCardPaymentMethod(method)) {
+    return cardPayment.cardPaymentAllowsMatching(ride);
+  }
+  if (paymentAllowsDispatch(ride)) {
+    return true;
+  }
+  if (method === "cash") {
+    return false;
+  }
+  const status = String(ride.payment_status ?? ride.paymentStatus ?? "")
+    .trim()
+    .toLowerCase();
+  if (status === "bank_transfer_expired" || status === "failed" || status === "declined") {
+    return false;
+  }
+  if (ACCEPT_RIDE_REVIEW_PAYMENT_STATUSES.has(status)) {
+    return true;
+  }
+  const settlement = String(ride.settlement_status ?? ride.settlementStatus ?? "")
+    .trim()
+    .toLowerCase();
+  if (settlement === "payment_review") {
+    return true;
+  }
+  const automatedVa =
+    ride.bank_transfer_automated === true ||
+    ride.automated_va === true ||
+    String(ride.payment_provider ?? ride.paymentProvider ?? "")
+      .trim()
+      .toLowerCase() === "flutterwave_va";
+  if (automatedVa && (status === "" || ACCEPT_RIDE_REVIEW_PAYMENT_STATUSES.has(status))) {
+    return true;
+  }
+  return false;
+}
+
+/** Fan-out may start before VA is issued; accept uses [paymentAllowsAcceptRide]. */
 function paymentAllowsFanout(ride) {
   if (!ride || typeof ride !== "object") {
     return false;
@@ -1497,6 +1546,9 @@ function paymentAllowsFanout(ride) {
       BANK_TRANSFER_DISPATCH_STATUSES.has(status) || status === "pending_manual_confirmation"
     );
   }
+  if (cardPayment.isCardPaymentMethod(method)) {
+    return cardPayment.cardPaymentAllowsMatching(ride);
+  }
   return paymentAllowsDispatch(ride);
 }
 
@@ -1507,7 +1559,12 @@ function rideHasVerifiedOnlinePayment(ride) {
     .trim()
     .toLowerCase();
   const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
-  if ((ps === "verified" || ps === "paid") && Boolean(ptid)) return true;
+  if ((ps === "verified" || ps === "paid" || ps === "card_captured") && Boolean(ptid)) {
+    return true;
+  }
+  if (cardPayment.isCardPaymentMethod(ride.payment_method ?? ride.paymentMethod)) {
+    return cardPayment.CARD_AUTHORIZED_STATUSES.has(ps) && Boolean(ptid);
+  }
   // Driver attestation for card-on-file, bank transfer, or delayed capture.
   if (ride.driver_confirmed_rider_payment === true) return true;
   return false;
@@ -2129,6 +2186,14 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload, fanoutOptio
     return;
   }
   if (!paymentAllowsFanout(ridePayload)) {
+    if (cardPayment.isCardPaymentMethod(ridePayload.payment_method ?? ridePayload.paymentMethod)) {
+      console.log(
+        "CARD_PAYMENT_BLOCKED_MATCHING",
+        `rideId=${rid}`,
+        `payment_status=${String(ridePayload.payment_status ?? "").trim().toLowerCase()}`,
+        `payment_method=${String(ridePayload.payment_method ?? "").trim().toLowerCase()}`,
+      );
+    }
     dispatchVerboseLog(
       "MATCH_FANOUT_ABORT",
       `rideId=${rid}`,
@@ -3073,11 +3138,50 @@ async function createRideRequest(data, context, db) {
     paymentNormalized = "flutterwave";
   }
 
+  const rideRef = db.ref("ride_requests").push();
+  const rideId = normUid(rideRef.key);
+  if (!rideId) {
+    console.log("RIDER_CREATE_FAIL", riderId, "ride_id_alloc_failed");
+    return { success: false, reason: "ride_id_alloc_failed" };
+  }
+
+  const isCardRide =
+    cardPayment.isCardPaymentMethod(paymentNormalized) && !prepaidFwRef;
+  let cardAuthResult = null;
+  if (isCardRide) {
+    paymentNormalized = "card";
+    cardAuthResult = await cardPayment.authorizeCardForRideCreation({
+      db,
+      riderId,
+      context,
+      data,
+      pricing,
+      currency,
+      rideId,
+    });
+    if (!cardAuthResult?.ok) {
+      console.log(
+        "CARD_PAYMENT_BLOCKED_MATCHING",
+        `rideId=${rideId}`,
+        `riderId=${riderId}`,
+        `reason=${cardAuthResult?.reason || "card_authorization_failed"}`,
+      );
+      return {
+        success: false,
+        reason: cardAuthResult?.reason || "card_authorization_failed",
+        message:
+          "Card authorization failed. Please try another card or payment method.",
+      };
+    }
+  }
+
   const paymentStatus = prepaidFwRef
     ? "paid"
-    : paymentNormalized === "bank_transfer"
-      ? "pending_manual_confirmation"
-      : "pending";
+    : cardAuthResult?.ok
+      ? cardAuthResult.payment_status
+      : paymentNormalized === "bank_transfer"
+        ? "pending_manual_confirmation"
+        : "pending";
 
   const distanceKm =
     Number(intentMerged?.distance_km ??
@@ -3099,13 +3203,6 @@ async function createRideRequest(data, context, db) {
   }
   const searchWindowMs = 45_000;
   const expiresAt = nowMs() + searchWindowMs;
-
-  const rideRef = db.ref("ride_requests").push();
-  const rideId = normUid(rideRef.key);
-  if (!rideId) {
-    console.log("RIDER_CREATE_FAIL", riderId, "ride_id_alloc_failed");
-    return { success: false, reason: "ride_id_alloc_failed" };
-  }
 
   const trackToken = normUid(db.ref().push().key);
   if (!trackToken) {
@@ -3144,14 +3241,26 @@ async function createRideRequest(data, context, db) {
     eta_min: etaMin,
     payment_method: paymentNormalized,
     payment_status: paymentStatus,
-    payment_transaction_id: prepaidFwRef ? prepaidTransactionId : null,
+    payment_transaction_id: prepaidFwRef
+      ? prepaidTransactionId
+      : cardAuthResult?.ok
+        ? cardAuthResult.payment_transaction_id
+        : null,
     customer_transaction_reference: prepaidFwRef
       ? prepaidFwRef
-      : String(data?.customer_transaction_reference ?? data?.customerTransactionReference ?? "")
-            .trim() || null,
+      : cardAuthResult?.ok
+        ? cardAuthResult.tx_ref
+        : String(data?.customer_transaction_reference ?? data?.customerTransactionReference ?? "")
+              .trim() || null,
     payment_reference: prepaidFwRef
       ? prepaidFwRef
-      : String(data?.payment_reference ?? data?.paymentReference ?? "").trim() || null,
+      : cardAuthResult?.ok
+        ? cardAuthResult.tx_ref
+        : String(data?.payment_reference ?? data?.paymentReference ?? "").trim() || null,
+    payment_intent_id: cardAuthResult?.ok ? cardAuthResult.payment_intent_id : null,
+    authorization_ref: cardAuthResult?.ok ? cardAuthResult.authorization_ref : null,
+    flw_ref: cardAuthResult?.ok ? cardAuthResult.flw_ref : null,
+    card_payment_method_id: cardAuthResult?.ok ? cardAuthResult.payment_method_id : null,
     payment_recipient: paymentNormalized === "bank_transfer" ? "nexride" : null,
     created_at: ts,
     updated_at: ts,
@@ -3307,7 +3416,17 @@ async function createRideRequest(data, context, db) {
         console.log("PREPAID_ROLLBACK_FAIL", prepaidFwRef, rollbackErr?.message ?? rollbackErr);
       }
     }
+    if (cardAuthResult?.ok) {
+      await cardPayment.rollbackCardAuthorization(db, cardAuthResult);
+    }
     return { success: false, reason: "ride_write_failed" };
+  }
+  if (cardAuthResult?.ok && cardAuthResult.tx_ref) {
+    await db.ref(`payment_transactions/${cardAuthResult.tx_ref}`).update({
+      ride_id: rideId,
+      consumed_ride_id: rideId,
+      updated_at: ts,
+    });
   }
   try {
     await setRiderActiveTripPointer(db, riderId, rideId);
@@ -3740,13 +3859,23 @@ async function acceptRideRequest(data, context, db) {
     return { success: false, reason: "offer_expired" };
   }
 
-  if (!paymentAllowsDispatch(pre || {})) {
+  const paymentAllowsAccept = paymentAllowsAcceptRide(pre || {});
+  if (!paymentAllowsAccept) {
     dispatchVerboseLog("DRIVER_ACCEPT_FAIL_REASON", rideId, "payment_not_verified");
     await recordAcceptFailureDebug(db, rideId, driverId, {
       ...acceptDebugCtx,
       reason: "payment_not_verified",
     });
     return { success: false, reason: "payment_not_dispatchable" };
+  }
+  if (!paymentAllowsDispatch(pre || {})) {
+    console.log(
+      "ACCEPT_PAYMENT_REVIEW_ALLOWED",
+      `rideId=${rideId}`,
+      `driverId=${driverId}`,
+      `payment_status=${prePaymentStatus}`,
+      `payment_method=${normalizedPaymentMethod(pre || {})}`,
+    );
   }
   const lastFailure = { reason: "unknown" };
   const maxTxAttempts = 8;
@@ -4029,7 +4158,7 @@ async function acceptRideRequest(data, context, db) {
       postDiag &&
       ridePoolOpenForAccept(postDiag) &&
       !canonicalAssignedDriverId(postDiag) &&
-      paymentAllowsDispatch(postDiag) &&
+      paymentAllowsAcceptRide(postDiag) &&
       acceptWindowOpenForAccept(postDiag, authorityOfferVal, acceptStartedAt, now);
     if (openUnassigned) {
       console.log(
@@ -4492,10 +4621,34 @@ async function startTrip(data, context, db) {
     const ptidStart = String(cur.payment_transaction_id ?? cur.flw_tx_id ?? "").trim();
     /** @type {Record<string, unknown>} */
     const bankTransferPatch = {};
-    if (pmStart === "bank_transfer") {
+    if (cardPayment.isCardPaymentMethod(pmStart)) {
+      if (!cardPayment.cardPaymentAllowsMatching(cur)) {
+        console.log(
+          "START_TRIP_BLOCKED_PAYMENT_PENDING",
+          `rideId=${rideId}`,
+          `driverId=${driverId}`,
+          `payment_status=${psStart}`,
+          `payment_method=${pmStart}`,
+          `reason=card_not_authorized`,
+        );
+        reason = "card_authorization_pending";
+        return;
+      }
+    } else if (pmStart === "bank_transfer") {
       const bankSettled =
         (psStart === "verified" || psStart === "paid") && Boolean(ptidStart);
-      if (!bankSettled && psStart !== "pending_transfer") {
+      if (
+        !bankSettled &&
+        psStart !== "pending_transfer" &&
+        !rideHasVerifiedOnlinePayment(cur)
+      ) {
+        console.log(
+          "START_TRIP_BLOCKED_PAYMENT_PENDING",
+          `rideId=${rideId}`,
+          `driverId=${driverId}`,
+          `payment_status=${psStart}`,
+          `payment_method=${pmStart}`,
+        );
         reason = "bank_transfer_pending_confirmation";
         return;
       }
@@ -4617,6 +4770,19 @@ async function completeTrip(data, context, db) {
     `reason=${commissionPolicy.reason}`,
   );
   const rideRef = db.ref(`ride_requests/${rideId}`);
+  const preRideSnap = await rideRef.get();
+  const preRide =
+    preRideSnap.exists() && typeof preRideSnap.val() === "object" ? preRideSnap.val() : null;
+  if (preRide && cardPayment.isCardPaymentMethod(preRide.payment_method ?? preRide.paymentMethod)) {
+    const capture = await cardPayment.captureRideCardOnCompletion({
+      db,
+      rideId,
+      ride: preRide,
+    });
+    if (!capture.ok) {
+      return { success: false, reason: capture.reason || "card_capture_failed" };
+    }
+  }
   let reason = "unknown";
   const tx = await rideRef.transaction((cur) => {
     if (!cur || typeof cur !== "object") {
@@ -4871,6 +5037,17 @@ async function cancelRideRequest(data, context, db) {
   const v = tx.snapshot.val();
   const rider = normUid(v?.rider_id);
   const drv = normUid(v?.driver_id);
+  const tripState = String(v?.trip_state ?? "").trim().toLowerCase();
+  const tripStarted =
+    tripState === TRIP_STATE.on_trip ||
+    tripState === TRIP_STATE.in_progress ||
+    tripState === "trip_started";
+  if (
+    !tripStarted &&
+    cardPayment.isCardPaymentMethod(v?.payment_method ?? v?.paymentMethod)
+  ) {
+    await cardPayment.voidRideCardOnCancel({ db, rideId, ride: v });
+  }
   await clearFanoutAndOffers(db, rideId);
   if (drv && !isPlaceholderDriverId(v?.driver_id)) {
     await clearActiveTripPointers(db, rideId, rider, drv);
@@ -5540,6 +5717,7 @@ module.exports = {
   createRideRequest,
   acceptRideRequest,
   paymentAllowsDispatch,
+  paymentAllowsAcceptRide,
   paymentAllowsFanout,
   normalizedPaymentMethod,
   effectiveAcceptExpiryMs,
