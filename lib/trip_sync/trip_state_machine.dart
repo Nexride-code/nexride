@@ -1,22 +1,20 @@
 import 'dart:developer' as developer;
 
 class TripLifecycleState {
-  /// RTDB canonical `trip_state` values (Cloud Functions enforce).
+  /// RTDB canonical `trip_state` values — sole lifecycle authority (Cloud Functions).
   static const String searching = 'searching';
-  static const String driverAssigned = 'driver_assigned';
-  static const String driverArriving = 'driver_arriving';
+  static const String assigned = 'assigned';
   static const String arrived = 'arrived';
-  static const String inProgress = 'in_progress';
+  static const String onTrip = 'on_trip';
   static const String completed = 'completed';
   static const String cancelled = 'cancelled';
   static const String expired = 'expired';
 
   static const Set<String> all = <String>{
     searching,
-    driverAssigned,
-    driverArriving,
+    assigned,
     arrived,
-    inProgress,
+    onTrip,
     completed,
     cancelled,
     expired,
@@ -25,13 +23,16 @@ class TripLifecycleState {
   /// UI-only — no matching `trip_state` in RTDB (no ride document loaded locally).
   static const String planning = 'planning';
 
-  /// Legacy names used across the driver UI map to the same RTDB strings.
+  /// Legacy read aliases (normalize to canonical via [TripStateMachine.normalizeTripState]).
+  static const String driverAssigned = assigned;
+  static const String driverArriving = assigned;
+  static const String inProgress = onTrip;
   static const String requested = searching;
   static const String searchingDriver = searching;
-  static const String pendingDriverAction = driverAssigned;
-  static const String driverAccepted = driverAssigned;
+  static const String pendingDriverAction = assigned;
+  static const String driverAccepted = assigned;
   static const String driverArrived = arrived;
-  static const String tripStarted = inProgress;
+  static const String tripStarted = onTrip;
   static const String tripCompleted = completed;
   static const String tripCancelled = cancelled;
 }
@@ -60,18 +61,16 @@ class TripStateMachine {
   static const Duration routeLogTimeout = Duration(minutes: 3);
 
   static const Set<String> restorableStates = <String>{
-    TripLifecycleState.searchingDriver,
-    TripLifecycleState.driverAccepted,
-    TripLifecycleState.driverArriving,
-    TripLifecycleState.driverArrived,
-    TripLifecycleState.tripStarted,
+    TripLifecycleState.searching,
+    TripLifecycleState.assigned,
+    TripLifecycleState.arrived,
+    TripLifecycleState.onTrip,
   };
 
   static const Set<String> activeDriverStates = <String>{
-    TripLifecycleState.driverAccepted,
-    TripLifecycleState.driverArriving,
-    TripLifecycleState.driverArrived,
-    TripLifecycleState.tripStarted,
+    TripLifecycleState.assigned,
+    TripLifecycleState.arrived,
+    TripLifecycleState.onTrip,
   };
 
   static const Set<String> terminalStates = <String>{
@@ -83,23 +82,19 @@ class TripStateMachine {
   static const Map<String, Set<String>> _allowedTransitions =
       <String, Set<String>>{
     TripLifecycleState.searching: <String>{
-      TripLifecycleState.driverAssigned,
+      TripLifecycleState.assigned,
       TripLifecycleState.cancelled,
       TripLifecycleState.expired,
     },
-    TripLifecycleState.driverAssigned: <String>{
-      TripLifecycleState.driverArriving,
-      TripLifecycleState.cancelled,
-    },
-    TripLifecycleState.driverArriving: <String>{
+    TripLifecycleState.assigned: <String>{
       TripLifecycleState.arrived,
       TripLifecycleState.cancelled,
     },
     TripLifecycleState.arrived: <String>{
-      TripLifecycleState.inProgress,
+      TripLifecycleState.onTrip,
       TripLifecycleState.cancelled,
     },
-    TripLifecycleState.inProgress: <String>{
+    TripLifecycleState.onTrip: <String>{
       TripLifecycleState.completed,
       TripLifecycleState.cancelled,
     },
@@ -107,6 +102,65 @@ class TripStateMachine {
     TripLifecycleState.cancelled: <String>{},
     TripLifecycleState.expired: <String>{},
   };
+
+  /// Normalize legacy RTDB tokens to canonical [trip_state] values.
+  static String normalizeTripState(dynamic raw) {
+    final token = _normalizeText(raw);
+    return switch (token) {
+      '' || 'idle' || 'requested' || 'requesting' => TripLifecycleState.searching,
+      'searching_driver' ||
+      'matching' ||
+      'awaiting_match' ||
+      'offered' ||
+      'offer_pending' ||
+      'pending_driver_action' ||
+      'pending_driver_acceptance' ||
+      'driver_reviewing_request' =>
+        TripLifecycleState.searching,
+      'assigned' ||
+      'matched' ||
+      'accepted' ||
+      'driver_accepted' ||
+      'driver_assigned' ||
+      'driver_found' ||
+      'driver_matched' ||
+      'driver_arriving' ||
+      'arriving' ||
+      'enroute_to_pickup' =>
+        TripLifecycleState.assigned,
+      'arrived' || 'driver_arrived' => TripLifecycleState.arrived,
+      'on_trip' ||
+      'ontrip' ||
+      'in_progress' ||
+      'trip_started' =>
+        TripLifecycleState.onTrip,
+      'completed' || 'trip_completed' => TripLifecycleState.completed,
+      'cancelled' ||
+      'canceled' ||
+      'trip_cancelled' ||
+      'driver_cancelled' ||
+      'rider_cancelled' =>
+        TripLifecycleState.cancelled,
+      'expired' => TripLifecycleState.expired,
+      _ => TripLifecycleState.all.contains(token)
+          ? token
+          : TripLifecycleState.searching,
+    };
+  }
+
+  /// Canonical lifecycle authority: [trip_state] on ride_requests / mirrors.
+  static bool tripStateIndicatesArrived(dynamic tripState) {
+    return normalizeTripState(tripState) == TripLifecycleState.arrived;
+  }
+
+  static bool tripStateIndicatesArrivedSnapshot(Map<String, dynamic>? rideData) {
+    if (rideData == null || rideData.isEmpty) {
+      return false;
+    }
+    return tripStateIndicatesArrived(
+      rideData['trip_state'] ?? rideData['tripState'],
+    );
+  }
 
   static String canonicalStateFromSnapshot(Map<String, dynamic>? rideData) {
     if (rideData == null) {
@@ -184,125 +238,44 @@ class TripStateMachine {
     };
   }
 
+  /// Canonical lifecycle from [trip_state] only (status is display-only legacy).
   static String canonicalStateFromValues({
     dynamic tripState,
     dynamic status,
     dynamic assignedDriverId,
   }) {
     final normalizedTripState = _normalizeText(tripState);
-    final normalizedStatus = _normalizeText(status);
     final assignedNorm = _normalizeText(assignedDriverId);
     final hasConcreteDriver = assignedNorm.isNotEmpty &&
         assignedNorm != 'waiting';
 
-    String? normalizeTripStateToken(String raw) {
-      return switch (raw) {
-        'requested' ||
-        'requesting' ||
-        'searching_driver' ||
-        'matching' ||
-        'awaiting_match' ||
-        'offered' ||
-        'offer_pending' =>
-          TripLifecycleState.searching,
-        'driver_accepted' ||
-        'pending_driver_action' ||
-        'pending_driver_acceptance' ||
-        'driver_reviewing_request' =>
-          TripLifecycleState.driverAssigned,
-        'trip_started' => TripLifecycleState.inProgress,
-        'trip_completed' => TripLifecycleState.completed,
-        'trip_cancelled' => TripLifecycleState.cancelled,
-        'driver_arrived' => TripLifecycleState.arrived,
-        'driver_assigned' => TripLifecycleState.driverAssigned,
-        'in_progress' => TripLifecycleState.inProgress,
-        'arrived' => TripLifecycleState.arrived,
-        'expired' => TripLifecycleState.expired,
-        _ => raw,
-      };
+    var resolved = normalizedTripState.isEmpty
+        ? TripLifecycleState.searching
+        : normalizeTripState(normalizedTripState);
+
+    const needsDriver = <String>{
+      TripLifecycleState.assigned,
+      TripLifecycleState.arrived,
+      TripLifecycleState.onTrip,
+    };
+    if (needsDriver.contains(resolved) && !hasConcreteDriver) {
+      resolved = TripLifecycleState.searching;
     }
 
-    String? canonicalFromTripStateField() {
-      final mapped = normalizeTripStateToken(normalizedTripState);
-      if (mapped == 'driver_on_the_way') {
-        return TripLifecycleState.driverArriving;
-      }
-      if (TripLifecycleState.all.contains(mapped)) {
-        if (mapped == TripLifecycleState.searching &&
-            (normalizedStatus == 'searching' ||
-                normalizedStatus == 'searching_driver')) {
-          return TripLifecycleState.searching;
-        }
-        return mapped;
-      }
-      return null;
-    }
-
-    final fromTrip = canonicalFromTripStateField();
-    final fromLegacy = _canonicalFromLegacyNormalizedStatus(normalizedStatus);
-
-    String coerceIfMissingDriver(String canonical) {
-      if (hasConcreteDriver) {
-        return canonical;
-      }
-      const needsDriver = <String>{
-        TripLifecycleState.driverAssigned,
-        TripLifecycleState.driverArriving,
-        TripLifecycleState.arrived,
-        TripLifecycleState.inProgress,
-      };
-      if (needsDriver.contains(canonical)) {
-        return TripLifecycleState.searching;
-      }
-      return canonical;
-    }
-
-    if (fromTrip != null) {
-      if (isTerminal(fromTrip)) {
-        return fromTrip;
-      }
-      // [trip_state] is the lifecycle source of truth: stale legacy [status] values
-      // (e.g. cancelled) must not hide an active pre-accept trip still encoded in
-      // [trip_state] (requested / searching_driver / pending_driver_action / …).
-      if (isTerminal(fromLegacy)) {
-        return fromTrip;
-      }
-      var effective = fromTrip;
-      // Partial RTDB: [trip_state] can still be open-search while [driver_id] is set.
-      // Prefer assigned / active lifecycle so rider UIs do not fall back to "searching".
-      if (hasConcreteDriver && effective == TripLifecycleState.searching) {
-        if (isPendingDriverAssignmentState(fromLegacy) ||
-            isDriverActiveState(fromLegacy)) {
-          effective = fromLegacy;
-          developer.log(
-            '[MATCH_DEBUG][RIDER_STATE_ACCEPTED_LOCKED] '
-            'tripState=$normalizedTripState status=$normalizedStatus '
-            'driverId=$assignedNorm uplift=$effective',
-            name: 'nexride.trip_state',
-          );
-        } else if (fromLegacy == TripLifecycleState.searching) {
-          effective = TripLifecycleState.driverAssigned;
-          developer.log(
-            '[MATCH_DEBUG][RIDER_STATE_ACCEPTED_LOCKED] '
-            'tripState=$normalizedTripState status=$normalizedStatus '
-            'driverId=$assignedNorm uplift=$effective (bound_driver_stale_open_state)',
-            name: 'nexride.trip_state',
-          );
-        }
-      }
-      return coerceIfMissingDriver(effective);
-    }
-
-    return coerceIfMissingDriver(fromLegacy);
+    developer.log(
+      'CANONICAL_STATE_RESOLVE raw_trip_state=$normalizedTripState '
+      'resolved=$resolved driver_bound=$hasConcreteDriver',
+      name: 'nexride.trip_state',
+    );
+    return resolved;
   }
 
   static String legacyStatusForCanonical(String canonicalState) {
     return switch (canonicalState) {
       TripLifecycleState.searching => 'searching',
-      TripLifecycleState.driverAssigned => 'accepted',
-      TripLifecycleState.driverArriving => 'arriving',
+      TripLifecycleState.assigned => 'accepted',
       TripLifecycleState.arrived => 'arrived',
-      TripLifecycleState.inProgress => 'on_trip',
+      TripLifecycleState.onTrip => 'on_trip',
       TripLifecycleState.completed => 'completed',
       TripLifecycleState.cancelled => 'cancelled',
       TripLifecycleState.expired => 'cancelled',
@@ -517,8 +490,7 @@ class TripStateMachine {
     }
 
     final effectiveNow = nowMs ?? DateTime.now().millisecondsSinceEpoch;
-    if (canonicalState == TripLifecycleState.driverAssigned ||
-        canonicalState == TripLifecycleState.driverArriving ||
+    if (canonicalState == TripLifecycleState.assigned ||
         canonicalState == TripLifecycleState.arrived) {
       final timeoutAt = acceptedStartTimeoutAt(rideData);
       if (timeoutAt > 0 && effectiveNow >= timeoutAt) {
@@ -532,7 +504,7 @@ class TripStateMachine {
       }
     }
 
-    if (canonicalState == TripLifecycleState.inProgress &&
+    if (canonicalState == TripLifecycleState.onTrip &&
         !hasRouteCheckpoint(rideData)) {
       final timeoutAt = routeLogTimeoutAt(rideData);
       if (timeoutAt > 0 && effectiveNow >= timeoutAt) {
@@ -643,27 +615,22 @@ class TripStateMachine {
       return 'missing_search_started_at';
     }
 
-    if ((state == TripLifecycleState.driverAssigned ||
-            state == TripLifecycleState.driverArriving ||
+    if ((state == TripLifecycleState.assigned ||
             state == TripLifecycleState.arrived ||
-            state == TripLifecycleState.inProgress ||
+            state == TripLifecycleState.onTrip ||
             state == TripLifecycleState.completed) &&
         acceptedAt == null) {
       return 'missing_accepted_at';
     }
 
-    if (state == TripLifecycleState.driverArriving && arrivingAt == null) {
-      return 'missing_arriving_at';
-    }
-
     if ((state == TripLifecycleState.arrived ||
-            state == TripLifecycleState.inProgress ||
+            state == TripLifecycleState.onTrip ||
             state == TripLifecycleState.completed) &&
         arrivedAt == null) {
       return 'missing_arrived_at';
     }
 
-    if ((state == TripLifecycleState.inProgress ||
+    if ((state == TripLifecycleState.onTrip ||
             state == TripLifecycleState.completed) &&
         startedAt == null) {
       return 'missing_started_at';
@@ -718,18 +685,11 @@ class TripStateMachine {
         setTransitionTimestamp('requested_at');
         setTransitionTimestamp('search_started_at');
         break;
-      case TripLifecycleState.driverAssigned:
+      case TripLifecycleState.assigned:
         setTransitionTimestamp('requested_at');
         setTransitionTimestamp('search_started_at');
         setTransitionTimestamp('assigned_at');
         setTransitionTimestamp('accepted_at');
-        break;
-      case TripLifecycleState.driverArriving:
-        setTransitionTimestamp('requested_at');
-        setTransitionTimestamp('search_started_at');
-        setTransitionTimestamp('assigned_at');
-        setTransitionTimestamp('accepted_at');
-        setTransitionTimestamp('arriving_at');
         break;
       case TripLifecycleState.arrived:
         setTransitionTimestamp('requested_at');
@@ -739,7 +699,7 @@ class TripStateMachine {
         setTransitionTimestamp('arriving_at');
         setTransitionTimestamp('arrived_at');
         break;
-      case TripLifecycleState.inProgress:
+      case TripLifecycleState.onTrip:
         setTransitionTimestamp('requested_at');
         setTransitionTimestamp('search_started_at');
         setTransitionTimestamp('assigned_at');

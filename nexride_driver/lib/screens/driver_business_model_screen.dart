@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/material.dart';
 
@@ -151,13 +152,33 @@ class _DriverBusinessModelScreenState extends State<DriverBusinessModelScreen> {
     nextModel['updatedAt'] = rtdb.ServerValue.timestamp;
 
     try {
-      await _rootRef.update(<String, dynamic>{
-        'drivers/${widget.driverId}/businessModel': nextModel,
-        'drivers/${widget.driverId}/updated_at': rtdb.ServerValue.timestamp,
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'driverSelectBusinessModel',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'driverId': widget.driverId,
+        'driver_id': widget.driverId,
+        'selectedModel': selectedModel,
+        'model': selectedModel,
       });
+      final data = result.data;
+      if (data is! Map) {
+        throw StateError('invalid_business_model_response');
+      }
+      final map = Map<String, dynamic>.from(data);
+      if (map['success'] != true && map['success'] != 1) {
+        final reason = '${map['reason'] ?? 'business_model_update_failed'}'.trim();
+        throw StateError(
+          reason.isEmpty ? 'business_model_update_failed' : reason,
+        );
+      }
 
       debugPrint(
-        '[DriverBusinessModel] selection saved model=$selectedModel canGoOnline=${nextModel['canGoOnline']}',
+        '[DriverBusinessModel] selection saved via CF model=$selectedModel '
+        'canGoOnline=${map['canGoOnline'] ?? nextModel['canGoOnline']}',
       );
 
       if (!mounted) {

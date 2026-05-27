@@ -25,6 +25,7 @@ class LegalPolicyRegistryService {
       return _cached!;
     }
 
+    debugPrint('LEGAL_POLICY_READ path=$_rtdbPath');
     try {
       final snap = await FirebaseDatabase.instance
           .ref(_rtdbPath)

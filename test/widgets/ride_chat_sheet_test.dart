@@ -129,7 +129,8 @@ void main() {
         find.text('Sending this message took too long. Please try again.'),
         findsNothing,
       );
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.byIcon(Icons.send), findsOneWidget);
 
       completer.complete(null);
       await tester.pumpAndSettle();

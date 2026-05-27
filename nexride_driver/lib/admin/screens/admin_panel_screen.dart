@@ -4638,6 +4638,17 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     ];
 
     Future<void> applyStatus(String status) async {
+      String? suspendReason;
+      if (status == 'suspended') {
+        suspendReason = await _promptAdminReason(
+          title: 'Suspend driver',
+          fieldLabel: 'Reason (shown internally)',
+          minLength: 8,
+        );
+        if (suspendReason == null) {
+          return;
+        }
+      }
       final AdminDriverRecord before = driver;
       await _actionExecutor.run<void>(
         context: context,
@@ -4655,6 +4666,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         invoke: () => _dataService.updateDriverStatus(
           driver: driver,
           status: status,
+          reason: suspendReason ?? '',
         ),
         emitAudit: ({
           required bool success,

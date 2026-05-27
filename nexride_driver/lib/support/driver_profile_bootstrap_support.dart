@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
@@ -99,34 +100,34 @@ Future<Map<String, dynamic>> fetchDriverPricingConfig({
   required String source,
   Duration? readTimeout,
 }) async {
-  const path = 'app_config/pricing';
   final budget = readTimeout ?? kDriverProfileReadTimeout;
-  dispatchVerboseLog('[DriverProfile] pricing fetch started source=$source path=$path');
+  dispatchVerboseLog(
+    '[DriverProfile] pricing fetch started source=$source via=getAppPricingConfig',
+  );
   try {
-    final snapshot = await rootRef.child(path).get().timeout(budget);
-    final rawValue = snapshot.value;
-    if (rawValue is Map) {
-      final pricing = Map<String, dynamic>.from(rawValue);
-      dispatchVerboseLog(
-        '[DriverProfile] pricing fetch completed source=$source path=$path found=true keys=${pricing.keys.length}',
-      );
-      return pricing;
+    final callable = FirebaseFunctions.instanceFor(region: 'us-central1')
+        .httpsCallable('getAppPricingConfig');
+    final result = await callable.call(<String, dynamic>{}).timeout(budget);
+    final data = result.data;
+    if (data is Map) {
+      final mapped = Map<String, dynamic>.from(data);
+      if (mapped['success'] == true) {
+        final pricingRaw = mapped['pricing'];
+        if (pricingRaw is Map) {
+          final pricing = Map<String, dynamic>.from(pricingRaw);
+          dispatchVerboseLog(
+            '[DriverProfile] pricing fetch via getAppPricingConfig source=$source keys=${pricing.keys.length}',
+          );
+          return pricing;
+        }
+      }
     }
-    dispatchVerboseLog(
-      '[DriverProfile] pricing fetch completed source=$source path=$path found=false valueType=${rawValue?.runtimeType ?? 'null'}',
-    );
   } catch (error, stackTrace) {
-    if (isRealtimeDatabasePermissionDenied(error)) {
-      dispatchVerboseLog(
-        '[DriverProfile] pricing config unavailable for source=$source; using embedded defaults.',
-      );
-      return <String, dynamic>{};
-    }
     dispatchVerboseLog(
-      '[DriverProfile] pricing fetch failed source=$source path=$path error=$error',
+      '[DriverProfile] getAppPricingConfig failed source=$source error=$error; using embedded defaults.',
     );
     debugPrintStack(
-      label: '[DriverProfile] pricing fetch stack',
+      label: '[DriverProfile] getAppPricingConfig stack',
       stackTrace: stackTrace,
     );
   }

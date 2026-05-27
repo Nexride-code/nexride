@@ -43,7 +43,12 @@ class RideCloudFunctionsService {
       _call('driverEnroute', <String, dynamic>{'rideId': rideId});
 
   Future<Map<String, dynamic>> driverArrived({required String rideId}) =>
-      _call('driverArrived', <String, dynamic>{'rideId': rideId});
+      _call('driverArrived', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'requestId': rideId,
+        'tripId': rideId,
+      });
 
   Future<Map<String, dynamic>> startTrip({required String rideId}) =>
       _call('startTrip', <String, dynamic>{'rideId': rideId});
@@ -309,6 +314,10 @@ class RideCloudFunctionsService {
         'driverId': driverId,
         'driver_id': driverId,
       });
+
+  /// Fare/pricing config for driver UI (RTDB `app_config/pricing` is not client-readable).
+  Future<Map<String, dynamic>> getAppPricingConfig() =>
+      _call('getAppPricingConfig', <String, dynamic>{});
 
   Future<Map<String, dynamic>> driverStartWalletTopUpFlutterwaveCard({
     required String driverId,

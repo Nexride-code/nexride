@@ -113,6 +113,24 @@ const gwarinpaCand = evaluateDriverMatchCandidate("d4", gwarinpaDriver, gwarinpa
 });
 assert.equal(asokoroCand.allowed, true);
 assert.equal(gwarinpaCand.allowed, true);
+
+const gwarinpaOnlineAvailable = evaluateDriverMatchCandidate(
+  "d-online",
+  {
+    ...gwarinpaDriver,
+    status: "online_available",
+    dispatch_state: "online_available",
+  },
+  gwarinpaRide,
+  gates,
+  now,
+  { useSoft: true },
+);
+assert.equal(
+  gwarinpaOnlineAvailable.allowed,
+  true,
+  `online_available driver must fan out under soft_verification: ${gwarinpaOnlineAvailable.filtered_reason}`,
+);
 assert.equal(asokoroCand.priority_group, PRIORITY_AREA_SAME_MARKET);
 assert.equal(gwarinpaCand.priority_group, PRIORITY_AREA_SAME_CITY);
 const sortedAbuja = sortEligibleCandidates([asokoroCand, gwarinpaCand]);

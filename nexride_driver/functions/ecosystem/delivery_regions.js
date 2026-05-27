@@ -11,6 +11,7 @@ const { logger } = require("firebase-functions");
 const { normUid } = require("../admin_auth");
 const adminPerms = require("../admin_permissions");
 const { writeAdminAuditLog } = require("../admin_audit_log");
+const { normalizeDispatchKey } = require("../dispatch_engine/dispatch_geo_normalizer");
 
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
@@ -1088,7 +1089,9 @@ async function adminUpsertServiceArea(data, context, db) {
   const regionId = trim(data?.region_id ?? data?.regionId, 80);
   const cityId = trim(data?.city_id ?? data?.cityId, 120);
   const state = trim(data?.state, 80);
-  const dispatch_market_id = trim(data?.dispatch_market_id ?? data?.dispatchMarketId, 80);
+  const dispatch_market_id = normalizeDispatchKey(
+    trim(data?.dispatch_market_id ?? data?.dispatchMarketId, 80),
+  );
   if (!regionId || !cityId || !state || !dispatch_market_id) {
     return { success: false, reason: "invalid_payload" };
   }

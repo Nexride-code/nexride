@@ -320,6 +320,9 @@ exports.validateServiceLocation = onCall(rideCallOpts, async (request) =>
 exports.backfillUserRolloutRegions = onCall(rideCallOpts, async (request) =>
   rolloutBackfill.adminBackfillUserRolloutRegions(request.data, callableContext(request), db),
 );
+exports.adminMigrateDispatchCanonicalGeography = onCall(rideCallOpts, async (request) =>
+  ride.adminMigrateDispatchCanonicalGeography(request.data, callableContext(request), db),
+);
 
 // --- Merchant Phase 1 (registration + admin review only; no orders/menus/wallets) ---
 const merchantCallables = require("./merchant/merchant_callables");
@@ -1152,8 +1155,14 @@ exports.adminUpdateWithdrawalStatus = onCall(rideCallOpts, async (request) =>
 exports.adminReviewDriverVerificationCase = onCall(rideCallOpts, async (request) =>
   adminCallables.adminReviewDriverVerificationCase(request.data, callableContext(request), db),
 );
+exports.adminGetAppPricingConfig = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetAppPricingConfig(request.data, callableContext(request), db),
+);
 exports.adminUpdateAppPricingConfig = onCall(rideCallOpts, async (request) =>
   adminCallables.adminUpdateAppPricingConfig(request.data, callableContext(request), db),
+);
+exports.getAppPricingConfig = onCall(rideCallOpts, async (request) =>
+  adminCallables.getAppPricingConfig(request.data, callableContext(request), db),
 );
 exports.adminUpdateDriverSubscriptionStatus = onCall(rideCallOpts, async (request) =>
   adminCallables.adminUpdateDriverSubscriptionStatus(request.data, callableContext(request), db),

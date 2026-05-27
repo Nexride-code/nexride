@@ -178,6 +178,12 @@ exports.sweepDispatchHealth = onSchedule(
     } catch (e) {
       console.log("DISPATCH_SWEEP_RIDE_POINTER_ORPHANS_FAIL", String(e?.message || e));
     }
+    try {
+      const { sweepDispatchIndexes } = require("./dispatch_engine/dispatch_index_engine");
+      await sweepDispatchIndexes(db);
+    } catch (e) {
+      console.log("DISPATCH_INDEX_SWEEP_FAIL", String(e?.message || e));
+    }
   },
 );
 

@@ -76,21 +76,23 @@ class _DriverSubscriptionScreenState extends State<DriverSubscriptionScreen> {
       final bm = normalizedDriverBusinessModel(raw['businessModel']);
 
       if (serverPricing?['success'] != true) {
-        final pricingSnap = await runOptionalRealtimeDatabaseRead<rtdb.DataSnapshot>(
-          source: 'driver_subscription.load_pricing',
-          path: 'app_config/pricing',
-          action: () => _root.child('app_config/pricing').get(),
-        );
-        final p = pricingSnap?.value is Map
-            ? Map<String, dynamic>.from(pricingSnap!.value as Map)
-            : <String, dynamic>{};
-        final w = _firstInt(p['weeklySubscriptionNgn'], p['weekly_subscription_ngn']);
-        final m = _firstInt(p['monthlySubscriptionNgn'], p['monthly_subscription_ngn']);
-        if (w != null && w > 0) {
-          weeklyDisplay = w;
-        }
-        if (m != null && m > 0) {
-          monthlyDisplay = m;
+        try {
+          final appPricing = await _cloud.getAppPricingConfig();
+          if (appPricing['success'] == true) {
+            final p = appPricing['pricing'] is Map
+                ? Map<String, dynamic>.from(appPricing['pricing'] as Map)
+                : <String, dynamic>{};
+            final w = _firstInt(p['weeklySubscriptionNgn'], p['weekly_subscription_ngn']);
+            final m = _firstInt(p['monthlySubscriptionNgn'], p['monthly_subscription_ngn']);
+            if (w != null && w > 0) {
+              weeklyDisplay = w;
+            }
+            if (m != null && m > 0) {
+              monthlyDisplay = m;
+            }
+          }
+        } catch (_) {
+          /* use embedded defaults */
         }
       }
 

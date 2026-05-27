@@ -1,9 +1,8 @@
 import 'package:firebase_database/firebase_database.dart' as rtdb;
+import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
-import '../support/driver_profile_support.dart';
 import '../support/realtime_database_error_support.dart';
-import 'ride_cloud_functions_service.dart';
 import 'support_ticket_bridge_service.dart';
 
 class DriverTripSafetyService {
@@ -13,7 +12,6 @@ class DriverTripSafetyService {
   final rtdb.FirebaseDatabase _database;
 
   rtdb.DatabaseReference get _rootRef => _database.ref();
-  RideCloudFunctionsService get _rideCloud => RideCloudFunctionsService();
   SupportTicketBridgeService get _supportTicketBridge =>
       const SupportTicketBridgeService();
 
@@ -26,50 +24,8 @@ class DriverTripSafetyService {
     required String source,
     Map<String, dynamic>? rideData,
   }) async {
-    final eventRef = _rootRef.child('trip_route_logs/$rideId/events').push();
-    final payload = <String, dynamic>{
-      'trip_route_logs/$rideId/rideId': rideId,
-      'trip_route_logs/$rideId/riderId': riderId,
-      'trip_route_logs/$rideId/driverId': driverId,
-      'trip_route_logs/$rideId/serviceType': serviceType,
-      'trip_route_logs/$rideId/status': status,
-      'trip_route_logs/$rideId/trip_state': rideData?['trip_state'],
-      'trip_route_logs/$rideId/updatedAt': rtdb.ServerValue.timestamp,
-      'trip_route_logs/$rideId/events/${eventRef.key}': <String, dynamic>{
-        'eventId': eventRef.key,
-        'rideId': rideId,
-        'riderId': riderId,
-        'driverId': driverId,
-        'serviceType': serviceType,
-        'status': status,
-        'trip_state': rideData?['trip_state'],
-        'source': source,
-        'pickupAddress': rideData?['pickup_address'],
-        'destinationAddress': rideData?['destination_address'] ??
-            rideData?['final_destination_address'],
-        'createdAt': rtdb.ServerValue.timestamp,
-      },
-      'ride_requests/$rideId/route_log_updated_at': rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_last_event_at':
-          rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_last_event_status': status,
-      'ride_requests/$rideId/route_log_last_event_source': source,
-      'ride_requests/$rideId/has_route_logs': true,
-    };
-
-    await runOptionalRealtimeDatabaseWrite(
-      source: 'trip_safety.logRideStateChange',
-      path: 'trip_route_logs/$rideId+ride_requests/$rideId(route_log)',
-      operation: 'multi_path_update',
-      rideId: rideId,
-      action: () => _rootRef.update(payload),
-    );
-
-    await _syncSharedTripStatus(
-      rideId: rideId,
-      status: status,
-      rideData: rideData,
-    );
+    // ride_requests + route_log mirrors are Cloud Function authority only.
+    return;
   }
 
   Future<void> logCheckpoint({
@@ -105,26 +61,18 @@ class DriverTripSafetyService {
         'updatedAt': rtdb.ServerValue.timestamp,
       },
       'trip_route_logs/$rideId/updatedAt': rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_updated_at': rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_last_checkpoint_at':
-          rtdb.ServerValue.timestamp,
-      'ride_requests/$rideId/route_log_last_checkpoint_status': status,
-      'ride_requests/$rideId/has_route_logs': true,
-      'ride_requests/$rideId/has_route_checkpoints': true,
-      if (status == 'on_trip')
-        'ride_requests/$rideId/has_started_route_checkpoints': true,
-      if (status == 'on_trip')
-        'ride_requests/$rideId/route_log_trip_started_checkpoint_at':
-            rtdb.ServerValue.timestamp,
-      if (status == 'on_trip')
-        'ride_requests/$rideId/route_log_timeout_at': null,
     };
+
+    if (!kDebugMode) {
+      return;
+    }
 
     await runOptionalRealtimeDatabaseWrite(
       source: 'trip_safety.logCheckpoint',
-      path: 'trip_route_logs/$rideId+ride_requests/$rideId(route_log)',
+      path: 'trip_route_logs/$rideId/checkpoints',
       operation: 'multi_path_update',
       rideId: rideId,
+      dedupeKey: 'trip_checkpoint|$rideId|$status|$source',
       action: () => _rootRef.update(payload),
     );
 
@@ -165,26 +113,6 @@ class DriverTripSafetyService {
       'createdAt': rtdb.ServerValue.timestamp,
       'updatedAt': rtdb.ServerValue.timestamp,
     });
-
-    final normalizedFlag = flagType.trim().toLowerCase();
-    final normalizedSeverity = (severity ?? '').trim().toLowerCase();
-    final shouldEscalate =
-        normalizedFlag.contains('sos') ||
-        normalizedSeverity == 'critical' ||
-        normalizedSeverity == 'high';
-    if (shouldEscalate) {
-      try {
-        await _rideCloud.escalateSafetyIncident(
-          rideId: rideId,
-          riderId: riderId,
-          driverId: driverId,
-          serviceType: serviceType,
-          flagType: flagType,
-          details: message,
-          sourceFlagId: flagRef.key ?? '',
-        );
-      } catch (_) {}
-    }
   }
 
   Future<void> createTripDispute({
@@ -392,6 +320,9 @@ class DriverTripSafetyService {
     required Map<String, dynamic> driverRouteBasis,
     required List<String> mismatchReasons,
   }) async {
+    if (!kDebugMode) {
+      return;
+    }
     final checkRef = _rootRef
         .child('trip_route_logs/$rideId/routeConsistency/checks')
         .push();
@@ -441,6 +372,8 @@ class DriverTripSafetyService {
     );
   }
 
+  /// Settlement, commission, and payout fields are written only by Cloud Functions
+  /// (`completeTrip`, payment webhooks, `closeJob`). Client is read-only for mirrors.
   Future<void> updateSettlementHook({
     required String rideId,
     required String riderId,
@@ -457,168 +390,7 @@ class DriverTripSafetyService {
     Map<String, dynamic>? rideData,
     Map<String, dynamic>? settlement,
   }) async {
-    final eventRef =
-        _rootRef.child('trip_settlement_hooks/$rideId/events').push();
-    final amountDue = reportedOutstandingAmountNgn ?? 0;
-    final normalizedEvidence = _map(evidence);
-    final normalizedRideData = _map(rideData);
-    final normalizedSettlement = _map(
-      settlement ?? normalizedRideData['settlement'],
-    );
-    final grossFare = _firstPositiveDouble(<dynamic>[
-      normalizedSettlement['grossFareNgn'],
-      normalizedSettlement['grossFare'],
-      normalizedRideData['grossFare'],
-      normalizedRideData['fare'],
-    ]);
-    final normalizedSettlementStatus = settlementStatus.trim().isEmpty
-        ? 'trip_completed'
-        : settlementStatus.trim();
-    final normalizedReviewStatus = (reviewStatus ?? 'not_required').trim();
-    final modelSnapshot = _map(normalizedSettlement['businessModelSnapshot']);
-    final selectedModel =
-        (modelSnapshot['selectedModel'] ?? modelSnapshot['selected_model'])
-            ?.toString()
-            .trim()
-            .toLowerCase();
-    if (selectedModel == 'subscription' && normalizedSettlement.isNotEmpty) {
-      final grossFromSettlement = _firstPositiveDouble(<dynamic>[
-        normalizedSettlement['grossFareNgn'],
-        normalizedSettlement['grossFare'],
-        grossFare,
-      ]);
-      normalizedSettlement['commissionAmountNgn'] = 0;
-      normalizedSettlement['commissionAmount'] = 0;
-      normalizedSettlement['commission'] = 0;
-      normalizedSettlement['driverPayoutNgn'] = grossFromSettlement;
-      normalizedSettlement['driverPayout'] = grossFromSettlement;
-      normalizedSettlement['netEarningNgn'] = grossFromSettlement;
-      normalizedSettlement['netEarning'] = grossFromSettlement;
-      normalizedSettlement['appliedModel'] = 'subscription';
-      normalizedSettlement['effectiveModel'] = 'subscription';
-    }
-    final countsTowardWallet =
-        driverSettlementCountsTowardWallet(normalizedSettlementStatus);
-    final driverTripRecord = _buildDriverTripRecord(
-      rideId: rideId,
-      riderId: riderId,
-      driverId: driverId,
-      serviceType: serviceType,
-      paymentMethod: paymentMethod,
-      settlementStatus: normalizedSettlementStatus,
-      reviewStatus: normalizedReviewStatus,
-      amountDue: amountDue,
-      grossFare: grossFare,
-      rideData: normalizedRideData,
-      settlement: normalizedSettlement,
-      countsTowardWallet: countsTowardWallet,
-    );
-
-    final safeDriverUpdates = <String, dynamic>{
-      'trip_route_logs/$rideId/settlement': <String, dynamic>{
-        'rideId': rideId,
-        'paymentMethod':
-            paymentMethod.trim().isEmpty ? 'unspecified' : paymentMethod.trim(),
-        'settlementStatus': normalizedSettlementStatus,
-        'completionState': completionState,
-        'reviewStatus': normalizedReviewStatus,
-        'reportedOutstandingAmountNgn': amountDue,
-        if (normalizedSettlement.isNotEmpty) ...normalizedSettlement,
-        'updatedAt': rtdb.ServerValue.timestamp,
-      },
-      if (normalizedSettlement.isNotEmpty) ...<String, dynamic>{
-        'ride_requests/$rideId/settlement': normalizedSettlement,
-        'ride_requests/$rideId/grossFare':
-            normalizedSettlement['grossFareNgn'] ?? grossFare,
-        'ride_requests/$rideId/commission':
-            normalizedSettlement['commissionAmountNgn'] ?? 0,
-        'ride_requests/$rideId/commissionAmount':
-            normalizedSettlement['commissionAmountNgn'] ?? 0,
-        'ride_requests/$rideId/driverPayout':
-            normalizedSettlement['driverPayoutNgn'] ?? 0,
-        'ride_requests/$rideId/netEarning':
-            normalizedSettlement['netEarningNgn'] ?? 0,
-        'ride_requests/$rideId/updated_at': rtdb.ServerValue.timestamp,
-      },
-      if (driverId.trim().isNotEmpty &&
-          driverTripRecord.isNotEmpty) ...<String, dynamic>{
-        'drivers/$driverId/trips/$rideId': driverTripRecord,
-        'drivers/$driverId/earnings/updated_at': rtdb.ServerValue.timestamp,
-        'drivers/$driverId/wallet/last_updated': rtdb.ServerValue.timestamp,
-        'drivers/$driverId/updated_at': rtdb.ServerValue.timestamp,
-      },
-      'trip_route_logs/$rideId/updatedAt': rtdb.ServerValue.timestamp,
-    };
-
-    await runOptionalRealtimeDatabaseWrite(
-      source: 'trip_safety.updateSettlementHook.primary',
-      path: 'trip_route_logs+ride_requests+drivers+driver_trips',
-      operation: 'settlement_multi_path_update',
-      rideId: rideId,
-      action: () => _rootRef.update(safeDriverUpdates),
-    );
-
-    final adminMirrorUpdates = <String, dynamic>{
-      'trip_settlement_hooks/$rideId/rideId': rideId,
-      'trip_settlement_hooks/$rideId/riderId': riderId,
-      'trip_settlement_hooks/$rideId/driverId': driverId,
-      'trip_settlement_hooks/$rideId/serviceType': serviceType,
-      'trip_settlement_hooks/$rideId/paymentMethod':
-          paymentMethod.trim().isEmpty ? 'unspecified' : paymentMethod.trim(),
-      'trip_settlement_hooks/$rideId/settlementStatus':
-          normalizedSettlementStatus,
-      'trip_settlement_hooks/$rideId/completionState': completionState,
-      'trip_settlement_hooks/$rideId/reviewStatus': normalizedReviewStatus,
-      'trip_settlement_hooks/$rideId/reportedOutstandingAmountNgn': amountDue,
-      'trip_settlement_hooks/$rideId/fareEstimateNgn':
-          grossFare > 0 ? grossFare : (normalizedRideData['fare'] ?? 0),
-      if (normalizedSettlement.isNotEmpty)
-        'trip_settlement_hooks/$rideId/settlement': normalizedSettlement,
-      'trip_settlement_hooks/$rideId/supportedSettlementModes': <String>[
-        'card',
-        'flutterwave',
-        'bank_transfer',
-        'online_wallet',
-      ],
-      'trip_settlement_hooks/$rideId/lastSource': source,
-      'trip_settlement_hooks/$rideId/lastNote': (note ?? '').trim(),
-      'trip_settlement_hooks/$rideId/evidence': normalizedEvidence,
-      'trip_settlement_hooks/$rideId/createdAt':
-          normalizedRideData['created_at'] ?? rtdb.ServerValue.timestamp,
-      'trip_settlement_hooks/$rideId/updatedAt': rtdb.ServerValue.timestamp,
-      'trip_settlement_hooks/$rideId/events/${eventRef.key}': <String, dynamic>{
-        'eventId': eventRef.key,
-        'rideId': rideId,
-        'riderId': riderId,
-        'driverId': driverId,
-        'serviceType': serviceType,
-        'source': source,
-        'paymentMethod':
-            paymentMethod.trim().isEmpty ? 'unspecified' : paymentMethod.trim(),
-        'settlementStatus': normalizedSettlementStatus,
-        'completionState': completionState,
-        'reviewStatus': normalizedReviewStatus,
-        'reportedOutstandingAmountNgn': amountDue,
-        'note': (note ?? '').trim(),
-        'evidence': normalizedEvidence,
-        if (normalizedSettlement.isNotEmpty) 'settlement': normalizedSettlement,
-        'createdAt': rtdb.ServerValue.timestamp,
-      },
-      if (driverId.trim().isNotEmpty &&
-          driverTripRecord.isNotEmpty) ...<String, dynamic>{
-        'driver_trips/$driverId/$rideId': driverTripRecord,
-        'driver_earnings/$driverId/records/$rideId': driverTripRecord,
-        'driver_earnings/$driverId/updatedAt': rtdb.ServerValue.timestamp,
-      },
-    };
-
-    try {
-      await _rootRef.update(adminMirrorUpdates);
-    } catch (error) {
-      if (!isRealtimeDatabasePermissionDenied(error)) {
-        rethrow;
-      }
-    }
+    // Backend authority only — no RTDB writes from the driver app.
   }
 
   Future<double> _configuredToleranceMeters() async {
@@ -661,71 +433,6 @@ class DriverTripSafetyService {
     return double.tryParse(value?.toString() ?? '');
   }
 
-  double _firstPositiveDouble(List<dynamic> candidates) {
-    for (final candidate in candidates) {
-      final value = _doubleOrNull(candidate);
-      if (value != null && value > 0) {
-        return value;
-      }
-    }
-    return 0;
-  }
-
-  Map<String, dynamic> _buildDriverTripRecord({
-    required String rideId,
-    required String riderId,
-    required String driverId,
-    required String serviceType,
-    required String paymentMethod,
-    required String settlementStatus,
-    required String reviewStatus,
-    required int amountDue,
-    required double grossFare,
-    required Map<String, dynamic> rideData,
-    required Map<String, dynamic> settlement,
-    required bool countsTowardWallet,
-  }) {
-    if (driverId.trim().isEmpty || grossFare <= 0) {
-      return const <String, dynamic>{};
-    }
-
-    return <String, dynamic>{
-      'rideId': rideId,
-      'trip_id': rideId,
-      'riderId': riderId,
-      'driverId': driverId,
-      'serviceType': serviceType,
-      'paymentMethod':
-          paymentMethod.trim().isEmpty ? 'unspecified' : paymentMethod.trim(),
-      'fare': settlement['grossFareNgn'] ?? grossFare,
-      'grossFare': settlement['grossFareNgn'] ?? grossFare,
-      'commission': settlement['commissionAmountNgn'] ?? 0,
-      'commissionAmount': settlement['commissionAmountNgn'] ?? 0,
-      'driverPayout': settlement['driverPayoutNgn'] ?? 0,
-      'netEarning': settlement['netEarningNgn'] ?? 0,
-      'settlementStatus': settlementStatus,
-      'reviewStatus': reviewStatus,
-      'reportedOutstandingAmountNgn': amountDue,
-      'countsTowardWallet': countsTowardWallet,
-      'city': _text(rideData['market']).isNotEmpty
-          ? _text(rideData['market'])
-          : _text(rideData['city']),
-      'pickup_address': _text(rideData['pickup_address']),
-      'destination_address': _text(rideData['destination_address']).isNotEmpty
-          ? _text(rideData['destination_address'])
-          : _text(rideData['final_destination_address']),
-      'distance_km': _doubleOrNull(rideData['distance_km']) ?? 0,
-      'duration_min': _doubleOrNull(rideData['duration_min']) ?? 0,
-      'fare_breakdown': _map(rideData['fare_breakdown']),
-      'settlement': settlement,
-      'businessModel': _map(settlement['businessModelSnapshot']),
-      'completed_at': rtdb.ServerValue.timestamp,
-      'completedAt': rtdb.ServerValue.timestamp,
-      'timestamp': rtdb.ServerValue.timestamp,
-      'updated_at': rtdb.ServerValue.timestamp,
-      'updatedAt': rtdb.ServerValue.timestamp,
-    };
-  }
 }
 
 class _DriverShareMeta {

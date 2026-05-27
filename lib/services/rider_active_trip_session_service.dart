@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 
+import '../support/nex_trace.dart';
 import '../trip_sync/trip_state_machine.dart';
 import 'rider_ride_cloud_functions_service.dart';
 
@@ -49,37 +50,17 @@ class RiderActiveTripSessionService {
   // A driver-assigned ride that hasn't progressed to arriving/on_trip in 30 min is stale.
   static const Duration _staleAssignedTimeout = Duration(minutes: 30);
 
-  static const Set<String> _activeStatuses = <String>{
-    'requested',
-    'searching',
-    'searching_driver',
-    'matching',
-    // Treat only driver-committed/active-trip states as active for UI gating.
-    'pending_driver_action',
-    'assigned',
-    'accepted',
-    'arriving',
-    'arrived',
-    'on_trip',
-  };
-
-  static const Set<String> _terminalStatuses = <String>{
-    'cancelled',
-    'driver_cancelled',
-    'rider_cancelled',
-    'completed',
-    'expired',
-  };
+  static const Set<String> _restorableTripStates = TripStateMachine.restorableStates;
 
   RiderActiveTripSession? get currentSession => sessionNotifier.value;
 
   /// Cancel before the trip is in progress (matches map-screen policy).
   bool allowsRiderBannerCancel(RiderActiveTripSession session) {
-    final st = session.status.trim().toLowerCase();
-    if (st == 'on_trip') {
+    final canon = TripStateMachine.normalizeTripState(session.tripState);
+    if (canon == TripLifecycleState.onTrip) {
       return false;
     }
-    if (_terminalStatuses.contains(st)) {
+    if (TripStateMachine.isTerminal(canon)) {
       return false;
     }
     return true;
@@ -108,7 +89,8 @@ class RiderActiveTripSessionService {
     if (session == null) {
       return false;
     }
-    return _activeStatuses.contains(session.status);
+    final canon = TripStateMachine.normalizeTripState(session.tripState);
+    return _restorableTripStates.contains(canon);
   }
 
   Future<void> restoreActiveTripForCurrentUser({
@@ -123,34 +105,82 @@ class RiderActiveTripSessionService {
       return;
     }
 
+    NexTrace.log(
+      event: 'SESSION_RESTORE',
+      uid: riderId,
+      role: 'rider',
+      source: source,
+    );
+
     _isRestoring = true;
     try {
+      NexTrace.mark('session_restore_read');
       final snapshot = await _rideRequestsRef
           .orderByChild('rider_id')
           .equalTo(riderId)
           .get();
-      if (!snapshot.exists || snapshot.value is! Map) {
+      NexTrace.rtdbRead(
+        path: 'ride_requests[orderByChild=rider_id]',
+        role: 'rider',
+        source: source,
+        elapsedMs: NexTrace.elapsedMs('session_restore_read'),
+      );
+      final rides = <String, dynamic>{};
+      if (snapshot.exists && snapshot.value is Map) {
+        final raw = Map<Object?, Object?>.from(snapshot.value as Map);
+        raw.forEach((id, value) {
+          if (id != null && value is Map) {
+            rides[id.toString()] = Map<String, dynamic>.from(value);
+          }
+        });
+      }
+      final ptrSnap = await rtdb.FirebaseDatabase.instance
+          .ref('rider_active_trip/$riderId')
+          .get();
+      final ptrVal = ptrSnap.value;
+      if (ptrVal is Map) {
+        final ptrMap = Map<String, dynamic>.from(ptrVal);
+        final ptrRideId = _readText(ptrMap['ride_id'] ?? ptrMap['rideId']);
+        if (ptrRideId.isNotEmpty) {
+          final directSnap = await _rideRequestsRef.child(ptrRideId).get();
+          if (directSnap.exists && directSnap.value is Map) {
+            rides[ptrRideId] =
+                Map<String, dynamic>.from(directSnap.value as Map);
+          }
+        }
+      }
+      if (rides.isEmpty) {
         clearSession(reason: 'restore_no_ride_found', source: source);
         return;
       }
-
-      final rides = Map<Object?, Object?>.from(snapshot.value as Map);
       String? latestRideId;
       Map<String, dynamic>? latestRideData;
       var latestTs = -1;
-      rides.forEach((dynamic rawId, dynamic rawValue) {
-        if (rawValue is! Map) {
+      rides.forEach((rawId, rawValue) {
+        final rideData = rawValue is Map<String, dynamic>
+            ? rawValue
+            : rawValue is Map
+                ? Map<String, dynamic>.from(rawValue)
+                : null;
+        if (rideData == null) {
           return;
         }
-        final rideData = Map<String, dynamic>.from(rawValue);
+        final riderIdOnRide = _readText(rideData['rider_id']);
+        if (riderIdOnRide.isNotEmpty && riderIdOnRide != riderId) {
+          return;
+        }
+        final canon = TripStateMachine.normalizeTripState(rideData['trip_state']);
+        if (TripStateMachine.isTerminal(canon)) {
+          return;
+        }
+        if (!_restorableTripStates.contains(canon)) {
+          return;
+        }
         final status = _canonicalRiderUiStatus(rideData);
-        if (_terminalStatuses.contains(status)) {
-          return;
-        }
-        if (!_activeStatuses.contains(status)) {
-          return;
-        }
-        if (_isStaleSearchingRideForRecovery(status: status, rideData: rideData)) {
+        if (_isStaleSearchingRideForRecovery(
+          tripState: canon,
+          rideData: rideData,
+        )) {
           debugPrint(
             '[RIDER_ACTIVE_TRIP_RESTORE] source=$source '
             'rideId=${rawId?.toString() ?? ''} '
@@ -158,7 +188,7 @@ class RiderActiveTripSessionService {
           );
           return;
         }
-        if (_isStaleAssignedRideForRecovery(status: status, rideData: rideData)) {
+        if (_isStaleAssignedRideForRecovery(tripState: canon, rideData: rideData)) {
           debugPrint(
             '[RIDER_ACTIVE_TRIP_RESTORE] source=$source '
             'rideId=${rawId?.toString() ?? ''} '
@@ -197,14 +227,36 @@ class RiderActiveTripSessionService {
     String rideId, {
     Map<String, dynamic>? seedData,
     String source = 'manual_attach',
+    bool bindRtdbListener = true,
   }) async {
     final normalizedRideId = rideId.trim();
     if (normalizedRideId.isEmpty) {
       return;
     }
-    if (_attachedRideId == normalizedRideId && _rideSubscription != null) {
+    if (seedData != null) {
+      final canon = TripStateMachine.canonicalStateFromSnapshot(seedData);
+      if (TripStateMachine.isTerminal(canon)) {
+        clearSession(
+          reason: 'attach_reject_terminal_seed',
+          source: source,
+        );
+        debugPrint(
+          '[RIDER_ACTIVE_TRIP_ATTACH_REJECTED] rideId=$normalizedRideId '
+          'source=$source canonical=$canon',
+        );
+        return;
+      }
+    }
+    if (_attachedRideId == normalizedRideId &&
+        (_rideSubscription != null || !bindRtdbListener)) {
       if (seedData != null) {
         _emitUpdate(normalizedRideId, seedData, source: source);
+      }
+      if (!bindRtdbListener && _rideSubscription != null) {
+        await releaseRtdbListener(
+          rideId: normalizedRideId,
+          reason: 'map_screen_owns_listener',
+        );
       }
       return;
     }
@@ -213,12 +265,23 @@ class RiderActiveTripSessionService {
     _rideSubscription = null;
     _attachedRideId = normalizedRideId;
     debugPrint(
-      '[RIDER_ACTIVE_TRIP_ATTACH] source=$source rideId=$normalizedRideId',
+      '[RIDER_ACTIVE_TRIP_ATTACH] source=$source rideId=$normalizedRideId '
+      'bindRtdbListener=$bindRtdbListener',
     );
     if (seedData != null) {
       _emitUpdate(normalizedRideId, seedData, source: '$source:seed');
     }
+    if (!bindRtdbListener) {
+      return;
+    }
 
+    NexTrace.rtdbListenerAttach(
+      path: 'ride_requests/$normalizedRideId',
+      listenerOwner: 'RiderActiveTripSessionService',
+      rideId: normalizedRideId,
+      role: 'rider',
+      source: source,
+    );
     _rideSubscription = _rideRequestsRef.child(normalizedRideId).onValue.listen(
       (rtdb.DatabaseEvent event) {
         if (!event.snapshot.exists || event.snapshot.value is! Map) {
@@ -236,6 +299,29 @@ class RiderActiveTripSessionService {
           '[RIDER_ACTIVE_TRIP_UPDATE] source=listener rideId=$normalizedRideId error=$error',
         );
       },
+    );
+  }
+
+  /// MapScreen owns the primary ride listener during an active trip.
+  Future<void> releaseRtdbListener({
+    required String rideId,
+    String reason = 'external_owner',
+  }) async {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    if (_attachedRideId != normalizedRideId || _rideSubscription == null) {
+      return;
+    }
+    await _rideSubscription!.cancel();
+    _rideSubscription = null;
+    NexTrace.rtdbListenerDispose(
+      path: 'ride_requests/$normalizedRideId',
+      listenerOwner: 'RiderActiveTripSessionService',
+      rideId: normalizedRideId,
+      role: 'rider',
+      source: reason,
     );
   }
 
@@ -273,32 +359,23 @@ class RiderActiveTripSessionService {
     required String source,
   }) {
     final status = _canonicalRiderUiStatus(rideData);
-    final tripState = _readText(rideData['trip_state']);
-    // Suppress stale assigned/accepted rides — driver was assigned but never
-    // progressed to arriving/on_trip within the expected window.
-    if (_isStaleAssignedRideForRecovery(status: status, rideData: rideData)) {
+    final tripState = TripStateMachine.normalizeTripState(rideData['trip_state']);
+    if (TripStateMachine.isTerminal(tripState)) {
+      clearSession(
+        reason: 'terminal_trip_state:$tripState',
+        source: source,
+        cancelListener: false,
+      );
+      return;
+    }
+    // Suppress stale assigned rides — driver was assigned but never progressed.
+    if (_isStaleAssignedRideForRecovery(tripState: tripState, rideData: rideData)) {
       debugPrint(
         '[RIDER_ACTIVE_TRIP_UPDATE] source=$source rideId=$rideId status=$status '
         'action=suppress_stale_assigned',
       );
       clearSession(
         reason: 'stale_assigned_suppressed',
-        source: source,
-        cancelListener: false,
-      );
-      return;
-    }
-    if (_terminalStatuses.contains(status)) {
-      if (_readText(rideData['cancel_reason']) == 'driver_cancelled') {
-        debugPrint(
-          '[RIDER_DRIVER_CANCELLED] rideId=$rideId trip_state=$tripState status=$status',
-        );
-      }
-      debugPrint(
-        '[RIDER_TERMINAL_STATE] rideId=$rideId status=$status trip_state=$tripState',
-      );
-      clearSession(
-        reason: 'terminal_state:$status',
         source: source,
         cancelListener: false,
       );
@@ -353,10 +430,10 @@ class RiderActiveTripSessionService {
   }
 
   static bool _isStaleSearchingRideForRecovery({
-    required String status,
+    required String tripState,
     required Map<String, dynamic> rideData,
   }) {
-    if (status != 'searching' && status != 'requested') {
+    if (tripState != TripLifecycleState.searching) {
       return false;
     }
     final driverId = _rideDriverId(rideData);
@@ -374,15 +451,10 @@ class RiderActiveTripSessionService {
   /// A driver-assigned ride is stale when it has been in accepted/assigned state
   /// for longer than [_staleAssignedTimeout] without progressing to arriving or on_trip.
   static bool _isStaleAssignedRideForRecovery({
-    required String status,
+    required String tripState,
     required Map<String, dynamic> rideData,
   }) {
-    const assignedStatuses = <String>{
-      'accepted',
-      'assigned',
-      'pending_driver_action',
-    };
-    if (!assignedStatuses.contains(status)) {
+    if (tripState != TripLifecycleState.assigned) {
       return false;
     }
     final now = DateTime.now().millisecondsSinceEpoch;

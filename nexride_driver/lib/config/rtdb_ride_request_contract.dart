@@ -69,6 +69,22 @@ String? normalizeRideMarketSlug(dynamic rawMarket) {
     return null;
   }
 
+  final slug = spaced.replaceAll(' ', '_');
+  const canonicalDispatchMarkets = <String>{
+    'lagos',
+    'abuja_fct',
+    'imo',
+    'edo',
+    'anambra',
+    'delta',
+  };
+  if (canonicalDispatchMarkets.contains(slug)) {
+    return slug;
+  }
+  if (slug == 'abuja' || slug == 'fct') {
+    return 'abuja_fct';
+  }
+
   bool hasAny(List<String> tokens) {
     for (final token in tokens) {
       if (spaced.contains(token)) {
@@ -99,7 +115,7 @@ String? normalizeRideMarketSlug(dynamic rawMarket) {
     'maitama',
     'asokoro',
   ])) {
-    return 'abuja';
+    return 'abuja_fct';
   }
   if (hasAny(const <String>['delta', 'asaba', 'warri', 'effurun'])) {
     return 'delta';

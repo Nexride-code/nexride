@@ -1,10 +1,7 @@
 import 'dart:async';
 
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 
-import '../firebase_options.dart';
 import '../nex_ride_app.dart';
 import '../services/rider_android_notification_permission.dart';
 import '../services/rider_push_notification_service.dart';
@@ -12,6 +9,7 @@ import '../widgets/rider_startup_error_screen.dart';
 import '../widgets/rider_startup_loading_screen.dart';
 import 'app_crash_guard.dart';
 import 'app_startup_state.dart';
+import 'rider_firebase_init.dart';
 
 /// Boots Firebase after the first frame, then hands off to [NexRideApp].
 class RiderBootstrapApp extends StatefulWidget {
@@ -27,6 +25,7 @@ class _RiderBootstrapAppState extends State<RiderBootstrapApp> {
   StackTrace? _fatalStack;
   bool _renderLogged = false;
   int _attempt = 0;
+  bool _firebaseInitStarted = false;
 
   @override
   void initState() {
@@ -37,6 +36,14 @@ class _RiderBootstrapAppState extends State<RiderBootstrapApp> {
       markRiderAppRendered();
       debugPrint('APP_RENDER_BEGIN');
     });
+    _startFirebaseInit();
+  }
+
+  void _startFirebaseInit() {
+    if (_firebaseInitStarted) {
+      return;
+    }
+    _firebaseInitStarted = true;
     unawaited(_initializeFirebase());
   }
 
@@ -44,18 +51,7 @@ class _RiderBootstrapAppState extends State<RiderBootstrapApp> {
     _attempt += 1;
     debugPrint('FIREBASE_INIT_START attempt=$_attempt');
     try {
-      if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp(
-          options: DefaultFirebaseOptions.currentPlatform,
-        ).timeout(const Duration(seconds: 12));
-      }
-      try {
-        final database = FirebaseDatabase.instance;
-        database.setPersistenceEnabled(true);
-        database.setPersistenceCacheSizeBytes(10000000);
-      } catch (e) {
-        debugPrint('RTDB_PERSISTENCE_NON_FATAL error=$e');
-      }
+      await RiderFirebaseInit.ensure();
 
       debugPrint('FIREBASE_INIT_OK');
       startupStep('firebase_init_ok');
@@ -97,12 +93,14 @@ class _RiderBootstrapAppState extends State<RiderBootstrapApp> {
   }
 
   void _retryBootstrap() {
+    RiderFirebaseInit.resetForRetry();
     setState(() {
       _fatalError = null;
       _fatalStack = null;
       _startupState = null;
+      _firebaseInitStarted = false;
     });
-    unawaited(_initializeFirebase());
+    _startFirebaseInit();
   }
 
   @override

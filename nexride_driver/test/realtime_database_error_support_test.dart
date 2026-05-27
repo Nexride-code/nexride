@@ -32,4 +32,29 @@ void main() {
       expect(isRealtimeDatabasePermissionDenied(error), isFalse);
     });
   });
+
+  group('sanitizeDriverProfileRtdbUpdate', () {
+    test('strips server-authoritative market fields from profile writes', () {
+      final sanitized = sanitizeDriverProfileRtdbUpdate(<String, Object?>{
+        'lat': 6.5,
+        'market': 'lagos',
+        'city': 'lagos',
+        'launch_market_city': 'lagos',
+        'service_area': <String, Object?>{
+          'country': 'nigeria',
+          'market': 'lagos',
+          'canonical_market_id': 'lagos',
+          'area': 'yaba',
+        },
+      });
+
+      expect(sanitized.containsKey('market'), isFalse);
+      expect(sanitized.containsKey('city'), isFalse);
+      expect(sanitized['launch_market_city'], 'lagos');
+      final serviceArea = sanitized['service_area'] as Map<String, Object?>;
+      expect(serviceArea.containsKey('market'), isFalse);
+      expect(serviceArea.containsKey('canonical_market_id'), isFalse);
+      expect(serviceArea['area'], 'yaba');
+    });
+  });
 }

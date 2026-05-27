@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../config/rtdb_ride_request_contract.dart';
 import '../admin_config.dart';
 import '../models/admin_models.dart';
 import '../services/admin_data_service.dart';
@@ -183,7 +184,10 @@ class _AdminServiceAreasScreenState extends State<AdminServiceAreasScreen> {
           : _text(existing['country']),
     );
     final dispatchCtrl = TextEditingController(
-      text: existing == null ? '' : _text(existing['dispatch_market_id']),
+      text: existing == null
+          ? ''
+          : (normalizeRideMarketSlug(existing['dispatch_market_id']) ??
+              _text(existing['dispatch_market_id'])),
     );
     final latCtrl = TextEditingController(
       text: _asDouble(existing?['center_lat'])?.toString() ?? '',
@@ -267,7 +271,8 @@ class _AdminServiceAreasScreenState extends State<AdminServiceAreasScreen> {
                         controller: dispatchCtrl,
                         decoration: const InputDecoration(
                           labelText: 'Dispatch market id',
-                          helperText: 'Must match RTDB market_pool for discovery',
+                          helperText:
+                              'Canonical dispatch market (e.g. abuja_fct, lagos)',
                         ),
                       ),
                       TextField(
@@ -404,6 +409,8 @@ class _AdminServiceAreasScreenState extends State<AdminServiceAreasScreen> {
     final lng = double.tryParse(outLng ?? '');
     final radius = double.tryParse(outRadius ?? '');
 
+    final canonicalDispatch =
+        normalizeRideMarketSlug(dispatch) ?? dispatch.trim().toLowerCase();
     final payload = <String, dynamic>{
       'region_id': regionId,
       'city_id': cityId,
@@ -412,7 +419,7 @@ class _AdminServiceAreasScreenState extends State<AdminServiceAreasScreen> {
       'country': (outCountry ?? '').trim().isEmpty
           ? 'Nigeria'
           : (outCountry ?? '').trim(),
-      'dispatch_market_id': dispatch,
+      'dispatch_market_id': canonicalDispatch,
       if (lat != null) 'center_lat': lat,
       if (lng != null) 'center_lng': lng,
       'service_radius_km': radius ?? 25,

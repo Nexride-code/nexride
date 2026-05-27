@@ -3,6 +3,49 @@
  */
 
 const { locationModeLabel, normalizeAvailabilityMode } = require("./driver_location_paths");
+const {
+  normalizeDispatchKey,
+  resolveCanonicalDispatchMarket,
+  assertDriverCanonicalFieldsAligned,
+} = require("./dispatch_engine/dispatch_geo_normalizer");
+const {
+  resolveDriverCoordsForDispatch,
+  DISPATCH_ONLINE_LOCATION_GRACE_MS,
+} = require("./dispatch_engine/dispatch_driver_location");
+const {
+  DISPATCH_MODE_GPS,
+  DISPATCH_MODE_SERVICE_AREA,
+  normalizeDispatchAvailabilityMode,
+  resolveDispatchAvailabilityMode,
+} = require("./dispatch_engine/dispatch_availability_modes");
+const {
+  logMatchEligible,
+  logMatchReject,
+} = require("./dispatch_engine/dispatch_observability");
+
+/** Must stay aligned with setDriverOnline + dispatch_index_engine availability sets. */
+const DRIVER_OFFER_AVAILABLE_STATUSES = new Set([
+  "available",
+  "online_available",
+  "online",
+]);
+const DRIVER_OFFER_AVAILABLE_DISPATCH_STATES = new Set([
+  "",
+  "available",
+  "online_available",
+  "online",
+]);
+
+function driverOfferStatusAllowsDispatch(raw) {
+  const st = String(raw ?? "").trim().toLowerCase();
+  if (!st) return true;
+  return DRIVER_OFFER_AVAILABLE_STATUSES.has(st);
+}
+
+function driverOfferDispatchStateAllowsDispatch(raw) {
+  const ds = String(raw ?? "").trim().toLowerCase();
+  return DRIVER_OFFER_AVAILABLE_DISPATCH_STATES.has(ds);
+}
 
 function normUid(uid) {
   return String(uid ?? "").trim();
@@ -13,83 +56,65 @@ function boolTrue(v) {
 }
 
 function canonicalMarketSlug(raw) {
-  return String(raw ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_");
+  return normalizeDispatchKey(raw);
 }
 
-/** @param {unknown} raw */
+/** Legacy Flutter tokens for exports. */
 function normalizeDriverAvailabilityMode(raw) {
-  const m = String(raw ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/-/g, "_");
-  if (m === "current_location" || m === "gps" || m === "current") return "current_location";
-  if (m === "service_area" || m === "servicearea" || m === "city") return "service_area";
-  if (m === "offline") return "offline";
+  const mode = normalizeDispatchAvailabilityMode(raw);
+  if (mode === DISPATCH_MODE_GPS) return "current_location";
+  if (mode === DISPATCH_MODE_SERVICE_AREA) return "service_area";
+  if (mode === "offline") return "offline";
   return "";
 }
 
-/**
- * Resolve dispatch availability mode from RTDB driver row (Flutter writes `location_mode`).
- * @param {Record<string, unknown>} driverProfile
- */
+/** @deprecated use resolveDispatchAvailabilityMode — kept for exports */
 function resolveDriverAvailabilityMode(driverProfile) {
+  const mode = resolveDispatchAvailabilityMode(driverProfile);
+  if (mode === DISPATCH_MODE_GPS) return "current_location";
+  if (mode === DISPATCH_MODE_SERVICE_AREA) return "service_area";
+  return mode;
+}
+
+/**
+ * Service-area drivers match on canonical market; city is used for ranking only.
+ * @param {Record<string, unknown>} driverProfile
+ * @param {Record<string, unknown>} ridePayload
+ */
+function driverServiceAreaCoversRide(driverProfile, ridePayload) {
   const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
-  const fromMode = normalizeAvailabilityMode(
-    d.driver_availability_mode ?? d.availability_mode ?? "",
-  );
-  if (fromMode) return fromMode;
-  const loc = String(d.location_mode ?? "").trim().toLowerCase();
-  if (loc === "area") return "service_area";
-  if (loc === "gps") return "current_location";
-  return normalizeDriverAvailabilityMode(loc);
+  const hasArea =
+    Boolean(
+      String(
+        d.service_area_id ??
+          d.canonical_service_area_id ??
+          d.selected_service_area_id ??
+          d.service_area_city_id ??
+          d.rollout_city_id ??
+          "",
+      ).trim(),
+    ) || Boolean(d.service_area && typeof d.service_area === "object");
+  return hasArea;
 }
 
-function driverMarketSlugs(driverProfile) {
-  const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
-  const slugs = new Set();
-  for (const key of [
-    "dispatch_market_id",
-    "rollout_dispatch_market_id",
-    "dispatch_market",
-    "market_pool",
-    "market",
-    "city",
-    "launch_market_city",
-  ]) {
-    const s = canonicalMarketSlug(d[key]);
-    if (s) slugs.add(s);
+function driverRideMarketsAligned(driverProfile, ridePayload, auditCtx = {}) {
+  const rideMarket = rideDispatchMarketId(ridePayload);
+  const driverMarket = driverDispatchMarketId(driverProfile);
+  if (!rideMarket) return false;
+  if (!driverMarket) return false;
+  const aligned = rideMarket === driverMarket;
+  if (!aligned && auditCtx.logMismatch) {
+    logMatchReject("market_mismatch", {
+      rideId: auditCtx.rideId,
+      driverId: auditCtx.driverId,
+      detail: `ride=${rideMarket} driver=${driverMarket}`,
+    });
+    try {
+      const { recordMarketMismatch } = require("./dispatch_engine/dispatch_production_metrics");
+      recordMarketMismatch();
+    } catch (_) {}
   }
-  return slugs;
-}
-
-function rideMarketSlugs(ridePayload) {
-  const r = ridePayload && typeof ridePayload === "object" ? ridePayload : {};
-  const slugs = new Set();
-  for (const key of [
-    "market_pool",
-    "market",
-    "dispatch_market_id",
-    "resolved_dispatch_market_id",
-  ]) {
-    const s = canonicalMarketSlug(r[key]);
-    if (s) slugs.add(s);
-  }
-  return slugs;
-}
-
-function driverRideMarketsAligned(driverProfile, ridePayload) {
-  const rideSlugs = rideMarketSlugs(ridePayload);
-  if (rideSlugs.size === 0) return true;
-  const driverSlugs = driverMarketSlugs(driverProfile);
-  if (driverSlugs.size === 0) return true;
-  for (const rs of rideSlugs) {
-    if (driverSlugs.has(rs)) return true;
-  }
-  return false;
+  return aligned;
 }
 
 const STALE_DRIVER_LOCATION_MS = 12 * 60 * 1000;
@@ -140,27 +165,16 @@ function pickupCoordsFromRide(ridePayload) {
  * @param {Record<string, unknown>} driverProfile
  * @returns {{ lat: number, lng: number }}
  */
-function driverLastKnownCoords(driverProfile) {
-  const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
-  const ll = d.last_location && typeof d.last_location === "object" ? d.last_location : {};
-  const lat0 = Number(ll.lat ?? ll.latitude ?? "");
-  const lng0 = Number(ll.lng ?? ll.longitude ?? "");
-  if (
-    Number.isFinite(lat0) &&
-    Number.isFinite(lng0) &&
-    !(lat0 === 0 && lng0 === 0)
-  ) {
-    return { lat: lat0, lng: lng0 };
-  }
-  const lat = Number(d.lat ?? d.latitude ?? "");
-  const lng = Number(d.lng ?? d.longitude ?? "");
-  return { lat, lng };
+function driverLastKnownCoords(driverProfile, nowMs = Date.now()) {
+  const resolved = resolveDriverCoordsForDispatch(driverProfile, nowMs);
+  return { lat: resolved.lat, lng: resolved.lng };
 }
 
 function driverDispatchMarketId(driverProfile) {
   const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
-  return canonicalMarketSlug(
-    d.dispatch_market_id ??
+  return normalizeDispatchKey(
+    d.canonical_market_id ??
+      d.dispatch_market_id ??
       d.rollout_dispatch_market_id ??
       d.dispatch_market ??
       d.market_pool ??
@@ -170,10 +184,7 @@ function driverDispatchMarketId(driverProfile) {
 }
 
 function rideDispatchMarketId(ridePayload) {
-  const r = ridePayload && typeof ridePayload === "object" ? ridePayload : {};
-  return canonicalMarketSlug(
-    r.dispatch_market_id ?? r.market_pool ?? r.market ?? r.resolved_dispatch_market_id ?? "",
-  );
+  return resolveCanonicalDispatchMarket(ridePayload);
 }
 
 /**
@@ -238,69 +249,92 @@ function logMatchLocationSource(logger, driverId, driverProfile, ridePayload, ge
  * @param {number} nowMs
  * @returns {{ ok: true } | { ok: false, log: string, detail: string }}
  */
-function evaluateDriverGeoAndMode(driverProfile, ridePayload, nowMs) {
+function evaluateDriverGeoAndMode(driverProfile, ridePayload, nowMs, auditCtx = {}) {
   const d = driverProfile && typeof driverProfile === "object" ? driverProfile : {};
-  const mode = resolveDriverAvailabilityMode(d);
-  const rideM = rideDispatchMarketId(ridePayload);
-  const driverM = driverDispatchMarketId(d);
+  const mode = resolveDispatchAvailabilityMode(d);
+  const rideId = String(auditCtx.rideId ?? ridePayload?.ride_id ?? "").trim();
+  const driverId = String(auditCtx.driverId ?? "").trim();
+  const audit = { rideId, driverId, mode };
 
   if (!mode) {
-    if (!driverRideMarketsAligned(d, ridePayload)) {
-      return { ok: false, log: "DRIVER_FILTERED_MARKET", detail: "dispatch_market_mismatch" };
+    if (!driverRideMarketsAligned(d, ridePayload, { ...auditCtx, logMismatch: true })) {
+      return { ok: false, log: "DRIVER_FILTERED_MARKET", detail: "market_mismatch" };
     }
     return { ok: true, log: "GEO_LEGACY", detail: "skipped" };
   }
   if (mode === "offline") {
+    logMatchReject("unavailable", { ...audit, detail: "offline_mode" });
     return { ok: false, log: "DRIVER_FILTERED_MODE", detail: "offline_mode" };
   }
 
-  if (!driverRideMarketsAligned(d, ridePayload)) {
-    return { ok: false, log: "DRIVER_FILTERED_MARKET", detail: "dispatch_market_mismatch" };
+  if (!driverRideMarketsAligned(d, ridePayload, { ...auditCtx, logMismatch: true })) {
+    return { ok: false, log: "DRIVER_FILTERED_MARKET", detail: "market_mismatch" };
   }
 
-  const pickup = pickupCoordsFromRide(ridePayload);
-  const pickupOk = Number.isFinite(pickup.lat) && Number.isFinite(pickup.lng);
+  assertDriverCanonicalFieldsAligned(d, driverId);
 
-  if (mode === "service_area") {
-    const sel = String(
-      d.selected_service_area_id ??
-        d.service_area_city_id ??
-        d.rollout_city_id ??
-        d.service_city_id ??
-        "",
-    ).trim();
-    if (!sel) {
-      return { ok: false, log: "DRIVER_FILTERED_SERVICE_AREA", detail: "service_area_required" };
+  if (mode === DISPATCH_MODE_SERVICE_AREA) {
+    if (!driverServiceAreaCoversRide(d, ridePayload)) {
+      logMatchReject("service_area_mismatch", audit);
+      return {
+        ok: false,
+        log: "DRIVER_FILTERED_SERVICE_AREA",
+        detail: "service_area_mismatch",
+      };
     }
-    const drv = driverLastKnownCoords(d);
-    if (!Number.isFinite(drv.lat) || !Number.isFinite(drv.lng)) {
-      return { ok: false, log: "DRIVER_FILTERED_LOCATION", detail: "area_center_required" };
-    }
-    // Area mode: same dispatch_market_id is sufficient (e.g. Asokoro driver ↔ Gwarinpa rider in abuja_fct).
-    // Sub-city mismatch may affect ranking later but must not block fan-out.
-    return { ok: true, log: "GEO_AREA_MARKET", detail: rideM && driverM ? "dispatch_market_match" : "market_aligned" };
+    logMatchEligible(DISPATCH_MODE_SERVICE_AREA, audit);
+    return {
+      ok: true,
+      log: "GEO_SERVICE_AREA",
+      detail: "service_area_market_match_no_gps_required",
+    };
   }
 
-  if (mode === "current_location") {
+  if (mode === DISPATCH_MODE_GPS) {
+    const pickup = pickupCoordsFromRide(ridePayload);
+    const pickupOk = Number.isFinite(pickup.lat) && Number.isFinite(pickup.lng);
     if (!pickupOk) {
       return { ok: true, log: "GEO_PICKUP_MISSING", detail: "pickup_unavailable" };
     }
-    const drv = driverLastKnownCoords(d);
-    if (!Number.isFinite(drv.lat) || !Number.isFinite(drv.lng)) {
-      return { ok: false, log: "DRIVER_FILTERED_LOCATION", detail: "location_required" };
+    const resolved = resolveDriverCoordsForDispatch(d, nowMs);
+    if (!Number.isFinite(resolved.lat) || !Number.isFinite(resolved.lng)) {
+      logMatchReject("gps_unavailable_for_gps_mode", {
+        ...audit,
+        detail: "coords_missing",
+      });
+      return {
+        ok: false,
+        log: "DRIVER_FILTERED_LOCATION",
+        detail: "gps_unavailable_for_gps_mode",
+      };
     }
-    const ts = Number(d.last_location_updated_at ?? 0) || 0;
-    if (ts > 0 && nowMs - ts > STALE_DRIVER_LOCATION_MS) {
+    const ts = Number(d.last_location_updated_at ?? d.last_location_ts ?? 0) || 0;
+    if (
+      !resolved.inGrace &&
+      ts > 0 &&
+      nowMs - ts > STALE_DRIVER_LOCATION_MS
+    ) {
+      logMatchReject("gps_unavailable_for_gps_mode", { ...audit, detail: "stale_gps" });
       return { ok: false, log: "DRIVER_FILTERED_STALE_GPS", detail: "stale_location" };
     }
-    const dist = haversineKm(drv.lat, drv.lng, pickup.lat, pickup.lng);
+    const dist = haversineKm(resolved.lat, resolved.lng, pickup.lat, pickup.lng);
     if (!Number.isFinite(dist)) {
+      logMatchReject("gps_unavailable_for_gps_mode", { ...audit, detail: "location_invalid" });
       return { ok: false, log: "DRIVER_FILTERED_LOCATION", detail: "location_invalid" };
     }
     if (dist > MAX_DRIVER_PICKUP_DISTANCE_KM) {
-      return { ok: false, log: "DRIVER_FILTERED_DISTANCE", detail: "too_far" };
+      logMatchReject("geo_radius_fail", { ...audit, detail: `distance_km=${dist.toFixed(2)}` });
+      try {
+        const { recordGeoReject } = require("./dispatch_engine/dispatch_production_metrics");
+        recordGeoReject();
+      } catch (_) {}
+      return { ok: false, log: "DRIVER_FILTERED_DISTANCE", detail: "geo_radius_fail" };
     }
-    return { ok: true };
+    logMatchEligible(DISPATCH_MODE_GPS, {
+      ...audit,
+      detail: `coord_source=${resolved.source}`,
+    });
+    return { ok: true, log: "GEO_GPS", detail: resolved.source };
   }
 
   return { ok: true, log: "GEO_UNKNOWN_MODE", detail: "skipped" };
@@ -322,9 +356,9 @@ function evaluateDriverForOfferSoft(driverProfile, ridePayload, gates = {}) {
   if (suspended) {
     return { ok: false, log: "DRIVER_FILTERED_SUSPENDED", detail: "suspended" };
   }
-  const rideSlugs = rideMarketSlugs(ridePayload);
-  if (rideSlugs.size === 0) {
-    return { ok: false, log: "NO_RIDE_MARKET", detail: "missing" };
+  const rideMarket = rideDispatchMarketId(ridePayload);
+  if (!rideMarket) {
+    return { ok: false, log: "NO_RIDE_MARKET", detail: "missing_canonical_market" };
   }
   if (!driverRideMarketsAligned(d, ridePayload)) {
     return { ok: false, log: "DRIVER_FILTERED_MARKET_SOFT", detail: "market_mismatch" };
@@ -335,11 +369,11 @@ function evaluateDriverForOfferSoft(driverProfile, ridePayload, gates = {}) {
     return { ok: false, log: "NOT_ONLINE", detail: "session_off" };
   }
   const st = String(d.status ?? "").trim().toLowerCase();
-  if (st && st !== "available") {
+  if (!driverOfferStatusAllowsDispatch(st)) {
     return { ok: false, log: "STATUS_NOT_AVAILABLE", detail: st };
   }
   const ds = String(d.dispatch_state ?? "").trim().toLowerCase();
-  if (ds && ds !== "available") {
+  if (!driverOfferDispatchStateAllowsDispatch(ds)) {
     return { ok: false, log: "DISPATCH_STATE_NOT_AVAILABLE", detail: ds };
   }
   const verifyGates = {
@@ -487,14 +521,21 @@ function buildDriverFanoutFilterTrace(driverId, profile, ridePayload, gates, now
   };
   if (snap.suspended) {
     trace.filtered_reason = "suspended";
+    logMatchReject("unavailable", { driverId: d, rideId: ridePayload?.ride_id, detail: "suspended" });
     return trace;
   }
   const { STALE_DRIVER_HEARTBEAT_MS } = require("./driver_active_pointer_guard");
   const lastSeen =
     Number(ctx.driverLastSeenMs ?? prof.last_active_at ?? prof.last_seen_at ?? 0) || 0;
-  if (lastSeen > 0 && nowMs - lastSeen > STALE_DRIVER_HEARTBEAT_MS) {
+  const dispatchHb =
+    Number(prof.last_dispatch_heartbeat ?? prof.presence_heartbeat_at ?? 0) || 0;
+  const hbForStale = Math.max(lastSeen, dispatchHb);
+  const inOnlineGrace =
+    dispatchHb > 0 && nowMs - dispatchHb <= DISPATCH_ONLINE_LOCATION_GRACE_MS;
+  if (hbForStale > 0 && nowMs - hbForStale > STALE_DRIVER_HEARTBEAT_MS && !inOnlineGrace) {
     trace.filtered_reason = "stale_heartbeat";
-    trace.driver_last_seen_ms = lastSeen;
+    trace.driver_last_seen_ms = hbForStale;
+    logMatchReject("unavailable", { driverId: d, rideId: ridePayload?.ride_id, detail: trace.filtered_reason });
     return trace;
   }
   const vc = evaluateCarRideVehicleAndCapability(prof, ridePayload);
@@ -516,17 +557,13 @@ function buildDriverFanoutFilterTrace(driverId, profile, ridePayload, gates, now
     const sessionOnline =
       prof.isOnline === true || prof.is_online === true || prof.online === true;
     const ds = String(prof.dispatch_state ?? "").trim().toLowerCase();
-    if (ds && ds !== "available" && ds !== "online_available") {
+    if (!driverOfferDispatchStateAllowsDispatch(ds)) {
       trace.filtered_reason = `dispatch_state_not_available:${ds}`;
       return trace;
     }
     if (!sessionOnline) {
       const st = String(prof.status ?? "").trim().toLowerCase();
-      if (
-        st &&
-        st !== "available" &&
-        st !== "online_available"
-      ) {
+      if (!driverOfferStatusAllowsDispatch(st)) {
         trace.filtered_reason = `status_not_available:${st}`;
         return trace;
       }
@@ -539,7 +576,10 @@ function buildDriverFanoutFilterTrace(driverId, profile, ridePayload, gates, now
       return trace;
     }
   }
-  const geo = evaluateDriverGeoAndMode(prof, ridePayload, nowMs);
+  const geo = evaluateDriverGeoAndMode(prof, ridePayload, nowMs, {
+    rideId: ridePayload?.ride_id,
+    driverId: d,
+  });
   if (!geo.ok) {
     trace.filtered_reason = `${geo.log}:${geo.detail}`;
     return trace;
@@ -590,27 +630,20 @@ function summarizeDriverForFanout(driverId, profile) {
     String(d.driver_status ?? "")
       .trim()
       .toLowerCase() === "suspended";
-  const dm = String(
-    d.dispatch_market_id ?? d.dispatch_market ?? d.market_pool ?? d.market ?? "",
-  )
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_");
+  const dm = normalizeDispatchKey(
+    d.canonical_market_id ??
+      d.dispatch_market_id ??
+      d.dispatch_market ??
+      d.market_pool ??
+      d.market ??
+      "",
+  );
   const status = String(d.status ?? "").trim().toLowerCase();
   const dispatchState = String(d.dispatch_state ?? "").trim().toLowerCase();
   const approved =
     boolTrue(d.nexride_verified) || hasApprovedDocuments(d.verification);
-  const market_pool = String(d.market_pool ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_");
-  const market = String(d.market ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_");
+  const market_pool = normalizeDispatchKey(d.market_pool ?? "");
+  const market = normalizeDispatchKey(d.market ?? "");
   const city = String(d.city ?? "").trim();
   const availabilityMode = normalizeDriverAvailabilityMode(
     d.driver_availability_mode ?? d.availability_mode ?? "",
@@ -719,8 +752,6 @@ module.exports = {
   normalizeDriverAvailabilityMode,
   resolveDriverAvailabilityMode,
   driverRideMarketsAligned,
-  rideMarketSlugs,
-  driverMarketSlugs,
   evaluateDriverForOffer,
   evaluateDriverForOfferSoft,
   evaluateDriverVerificationForOffer,

@@ -3,56 +3,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import '../support/friendly_firebase_errors.dart';
-import '../support/ride_chat_moderation.dart';
 import '../support/ride_chat_support.dart';
 
 enum DriverRideChatImageSource { camera, gallery }
-
-class _ChatStatusIndicator extends StatelessWidget {
-  const _ChatStatusIndicator({
-    required this.status,
-    required this.isRead,
-    required this.color,
-    this.readColor,
-    this.failedColor,
-  });
-
-  final String status;
-  final bool isRead;
-  final Color color;
-  final Color? readColor;
-  final Color? failedColor;
-
-  @override
-  Widget build(BuildContext context) {
-    if (status == 'sending' || status == 'pending') {
-      return SizedBox(
-        width: 12,
-        height: 12,
-        child: CircularProgressIndicator(
-          strokeWidth: 1.4,
-          valueColor: AlwaysStoppedAnimation<Color>(color),
-        ),
-      );
-    }
-    if (status == 'failed') {
-      return Icon(
-        Icons.error_outline,
-        size: 13,
-        color: failedColor ?? color,
-      );
-    }
-    if (isRead) {
-      return Icon(
-        Icons.done_all,
-        size: 14,
-        color: readColor ?? color,
-      );
-    }
-    return Icon(Icons.check, size: 14, color: color);
-  }
-}
 
 class DriverRideChatSheet extends StatefulWidget {
   const DriverRideChatSheet({
@@ -69,8 +22,6 @@ class DriverRideChatSheet extends StatefulWidget {
     this.showCallButton = false,
     this.isCallButtonEnabled = true,
     this.isCallButtonBusy = false,
-    this.peerName = '',
-    this.peerSubtitle = '',
   });
 
   final String rideId;
@@ -87,8 +38,6 @@ class DriverRideChatSheet extends StatefulWidget {
   final bool showCallButton;
   final bool isCallButtonEnabled;
   final bool isCallButtonBusy;
-  final String peerName;
-  final String peerSubtitle;
 
   @override
   State<DriverRideChatSheet> createState() => _DriverRideChatSheetState();
@@ -96,12 +45,8 @@ class DriverRideChatSheet extends StatefulWidget {
 
 class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
   final TextEditingController _messageController = TextEditingController();
-  final FocusNode _messageFocusNode = FocusNode();
   final ScrollController _scrollController = ScrollController();
   String _lastMessageListSignature = '';
-  bool _isSending = false;
-  bool _showHydratingSkeleton = true;
-  Timer? _hydrateFallbackTimer;
 
   String _messageListSignature(List<RideChatMessage> messages) {
     if (messages.isEmpty) {
@@ -124,22 +69,9 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
     _messageController.text = widget.initialDraft;
     _lastMessageListSignature =
         _messageListSignature(widget.messagesListenable.value);
-    if (widget.messagesListenable.value.isNotEmpty) {
-      _showHydratingSkeleton = false;
-    }
     widget.messagesListenable.addListener(_onRemoteMessagesChanged);
     WidgetsBinding.instance
         .addPostFrameCallback((_) => _scrollToBottom(animated: false));
-    _hydrateFallbackTimer = Timer(const Duration(milliseconds: 900), () {
-      if (!mounted) {
-        return;
-      }
-      if (_showHydratingSkeleton) {
-        setState(() {
-          _showHydratingSkeleton = false;
-        });
-      }
-    });
   }
 
   @override
@@ -155,26 +87,14 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
 
   @override
   void dispose() {
-    _hydrateFallbackTimer?.cancel();
-    _hydrateFallbackTimer = null;
     widget.messagesListenable.removeListener(_onRemoteMessagesChanged);
     _messageController.dispose();
-    _messageFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   void _onRemoteMessagesChanged() {
     final messages = widget.messagesListenable.value;
-    if (_showHydratingSkeleton) {
-      if (mounted) {
-        setState(() {
-          _showHydratingSkeleton = false;
-        });
-      } else {
-        _showHydratingSkeleton = false;
-      }
-    }
     final nextSig = _messageListSignature(messages);
     if (nextSig != _lastMessageListSignature) {
       _lastMessageListSignature = nextSig;
@@ -182,78 +102,29 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
     }
   }
 
-  Widget _buildHydratingSkeleton() {
-    return ListView.builder(
-      padding: const EdgeInsets.all(14),
-      itemCount: 4,
-      itemBuilder: (context, index) {
-        final alignRight = index.isOdd;
-        return Align(
-          alignment:
-              alignRight ? Alignment.centerRight : Alignment.centerLeft,
-          child: Container(
-            width: MediaQuery.of(context).size.width * (alignRight ? 0.45 : 0.55),
-            height: 44,
-            margin: const EdgeInsets.only(bottom: 10),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.06),
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Future<bool> _confirmModerationWarning(RideChatModerationWarning warning) async {
-    final proceed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Safety check'),
-        content: Text(
-          '$rideChatModerationDialogBody\n\nDetected: ${warning.reason}.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Edit message'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Send anyway'),
-          ),
-        ],
-      ),
-    );
-    return proceed == true;
-  }
-
   Future<void> _handleSend() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty || _isSending) {
+    if (text.isEmpty) {
       return;
-    }
-
-    final moderation = scanRideChatMessage(text);
-    if (moderation != null) {
-      final proceed = await _confirmModerationWarning(moderation);
-      if (!proceed || !mounted) {
-        return;
-      }
     }
 
     if (!mounted) {
       return;
     }
-    setState(() {
-      _isSending = true;
-    });
+
+    final tapMs = DateTime.now().millisecondsSinceEpoch;
+    debugPrint(
+      'CHAT_LATENCY_SEND_TAP role=driver rideId=${widget.rideId} tapMs=$tapMs',
+    );
     _messageController.clear();
     widget.onDraftChanged?.call('');
     _scrollToBottom(animated: true);
+    unawaited(_deliverSendResult(widget.onSendMessage(widget.rideId, text)));
+  }
 
+  Future<void> _deliverSendResult(Future<String?> sendFuture) async {
     try {
-      final errorMessage = await widget.onSendMessage(widget.rideId, text);
+      final errorMessage = await sendFuture;
       if (!mounted) {
         return;
       }
@@ -261,19 +132,9 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
         final messenger = ScaffoldMessenger.maybeOf(context);
         messenger?.hideCurrentSnackBar();
         messenger?.showSnackBar(
-          SnackBar(
-            content: Text(errorMessage),
-            action: SnackBarAction(
-              label: 'Retry',
-              onPressed: () {
-                unawaited(_handleSend());
-              },
-            ),
-          ),
+          SnackBar(content: Text(errorMessage)),
         );
-        return;
       }
-      // Optimistic local message is already visible; no additional UI action needed.
     } catch (_) {
       if (!mounted) {
         return;
@@ -281,24 +142,8 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
       final messenger = ScaffoldMessenger.maybeOf(context);
       messenger?.hideCurrentSnackBar();
       messenger?.showSnackBar(
-        SnackBar(
-          content: const Text('Unable to send message right now.'),
-          action: SnackBarAction(
-            label: 'Retry',
-            onPressed: () {
-              unawaited(_handleSend());
-            },
-          ),
-        ),
+        const SnackBar(content: Text('Unable to send message right now.')),
       );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isSending = false;
-        });
-      } else {
-        _isSending = false;
-      }
     }
   }
 
@@ -309,9 +154,7 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
     }
     final messenger = ScaffoldMessenger.maybeOf(context);
     messenger?.hideCurrentSnackBar();
-    messenger?.showSnackBar(
-      SnackBar(content: Text(coerceUserFacingMessage(error))),
-    );
+    messenger?.showSnackBar(SnackBar(content: Text(error)));
   }
 
   Future<void> _handleImageSend() async {
@@ -346,55 +189,7 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
     }
     final messenger = ScaffoldMessenger.maybeOf(context);
     messenger?.hideCurrentSnackBar();
-    messenger?.showSnackBar(
-      SnackBar(content: Text(coerceUserFacingMessage(error))),
-    );
-  }
-
-  String get _headerTitle {
-    final name = widget.peerName.trim();
-    return name.isEmpty ? 'Ride Chat' : name;
-  }
-
-  String _formatMessageTime(int createdAtMs) {
-    if (createdAtMs <= 0) {
-      return '';
-    }
-    final dt = DateTime.fromMillisecondsSinceEpoch(createdAtMs).toLocal();
-    final hour = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
-    final minute = dt.minute.toString().padLeft(2, '0');
-    final period = dt.hour >= 12 ? 'PM' : 'AM';
-    return '$hour:$minute $period';
-  }
-
-  Widget _buildSafetyBanner() {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF3F6F9),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFDCE3EA)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Icon(Icons.shield_outlined, size: 18, color: Color(0xFF4B5563)),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              rideChatSafetyBannerText,
-              style: const TextStyle(
-                fontSize: 11.5,
-                height: 1.35,
-                color: Color(0xFF374151),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
+    messenger?.showSnackBar(SnackBar(content: Text(error)));
   }
 
   void _scrollToBottom({required bool animated}) {
@@ -418,81 +213,96 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
     });
   }
 
+  Widget _buildSafetyBanner() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F6F9),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFDCE3EA)),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.shield_outlined, size: 18, color: Color(0xFF4B5563)),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              rideChatSafetyBannerText,
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.35,
+                color: Color(0xFF374151),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final sheetHeight = MediaQuery.of(context).size.height * 0.72;
-    final subtitle = widget.peerSubtitle.trim();
-
-    final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
-
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
         child: SizedBox(
-          height: sheetHeight,
+          height: MediaQuery.of(context).size.height * 0.58,
           child: Column(
             children: [
               Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _headerTitle,
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        if (subtitle.isNotEmpty) ...[
-                          const SizedBox(height: 2),
-                          Text(
-                            subtitle,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: Color(0xFF6B7280),
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ],
+                  const Expanded(
+                    child: Text(
+                      'Ride Chat',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
                   if (widget.showCallButton)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: OutlinedButton.icon(
+                    Container(
+                      margin: const EdgeInsets.only(right: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF7E7AE),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: IconButton(
                         onPressed: widget.isCallButtonEnabled &&
                                 !widget.isCallButtonBusy
                             ? widget.onStartVoiceCall
                             : null,
+                        tooltip: 'Call rider',
                         icon: widget.isCallButtonBusy
                             ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Color(0xFF1F2937),
+                                ),
                               )
-                            : const Icon(Icons.call_outlined, size: 18),
-                        label: const Text('Call'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: const Color(0xFF1F2937),
-                          side: const BorderSide(color: Color(0xFF1F2937)),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                        ),
+                            : const Icon(
+                                Icons.call_outlined,
+                                color: Color(0xFF1F2937),
+                              ),
                       ),
                     ),
                   IconButton(
                     onPressed: () => Navigator.of(context).pop(),
                     icon: const Icon(Icons.close),
-                    tooltip: 'Close',
                   ),
                 ],
               ),
+              const SizedBox(height: 8),
               _buildSafetyBanner(),
               Expanded(
                 child: DecoratedBox(
@@ -506,7 +316,7 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                       if (messages.isEmpty) {
                         return const Center(
                           child: Text(
-                            'No messages yet',
+                            'Reply to your rider here.',
                             style: TextStyle(color: Colors.black54),
                           ),
                         );
@@ -518,33 +328,6 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                         itemCount: messages.length,
                         itemBuilder: (context, index) {
                           final message = messages[index];
-                          if (message.senderRole == 'system') {
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 12),
-                              child: Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.all(14),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFFFF8EC),
-                                  borderRadius: BorderRadius.circular(14),
-                                  border: Border.all(
-                                    color: const Color(0xFFE7C776),
-                                  ),
-                                ),
-                                child: Text(
-                                  message.text,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .bodySmall
-                                      ?.copyWith(
-                                        color: const Color(0xFF4D3E1A),
-                                        height: 1.4,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                ),
-                              ),
-                            );
-                          }
                           final isMine = message.isSentBy(widget.currentUserId);
 
                           return Align(
@@ -559,7 +342,7 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                               ),
                               constraints: BoxConstraints(
                                 maxWidth:
-                                    MediaQuery.of(context).size.width * 0.75,
+                                    MediaQuery.of(context).size.width * 0.72,
                               ),
                               decoration: BoxDecoration(
                                 color: isMine
@@ -579,7 +362,6 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                                           ? Colors.white
                                           : Colors.black87,
                                     ),
-                                    softWrap: true,
                                   ),
                                   if (message.hasImage) ...[
                                     const SizedBox(height: 8),
@@ -609,29 +391,11 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                                       ),
                                     ),
                                   ],
-                                  if (message.createdAt > 0) ...[
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      _formatMessageTime(message.createdAt),
-                                      style: const TextStyle(
-                                        fontSize: 10,
-                                        color: Color(0xFF9CA3AF),
-                                      ),
-                                    ),
-                                  ],
                                   if (isMine) ...[
                                     const SizedBox(height: 6),
                                     Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        _ChatStatusIndicator(
-                                          status: message.status,
-                                          isRead: message.isRead,
-                                          color: Colors.white70,
-                                          readColor: const Color(0xFF7CD1FF),
-                                          failedColor: const Color(0xFFFFB4A6),
-                                        ),
-                                        const SizedBox(width: 4),
                                         Flexible(
                                           child: Text(
                                             message.deliveryLabel,
@@ -654,8 +418,9 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                                               visualDensity:
                                                   VisualDensity.compact,
                                             ),
-                                            onPressed: () =>
-                                                unawaited(_handleRetry(message)),
+                                            onPressed: () => unawaited(
+                                              _handleRetry(message),
+                                            ),
                                             child: const Text(
                                               'Retry',
                                               style: TextStyle(
@@ -680,16 +445,13 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                   ),
                 ),
               ),
-              Padding(
-                padding: EdgeInsets.only(top: 12, bottom: keyboardInset + 12),
-                child: Row(
+              const SizedBox(height: 12),
+              Row(
                 children: [
                   Expanded(
                     child: TextField(
                       controller: _messageController,
-                      focusNode: _messageFocusNode,
                       textInputAction: TextInputAction.send,
-                      enabled: !_isSending,
                       onChanged: widget.onDraftChanged,
                       onSubmitted: (_) => unawaited(_handleSend()),
                       decoration: InputDecoration(
@@ -698,9 +460,7 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                         fillColor: const Color(0xFFF4F4F4),
                         prefixIcon: IconButton(
                           tooltip: 'Attach photo',
-                          onPressed: _isSending
-                              ? null
-                              : () => unawaited(_handleImageSend()),
+                          onPressed: () => unawaited(_handleImageSend()),
                           icon: const Icon(Icons.photo_camera_outlined),
                         ),
                         border: OutlineInputBorder(
@@ -722,21 +482,11 @@ class _DriverRideChatSheetState extends State<DriverRideChatSheet> {
                           borderRadius: BorderRadius.circular(16),
                         ),
                       ),
-                      onPressed: _isSending ? null : () => unawaited(_handleSend()),
-                      child: _isSending
-                          ? const SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.black,
-                              ),
-                            )
-                          : const Icon(Icons.send, color: Colors.black),
+                      onPressed: () => unawaited(_handleSend()),
+                      child: const Icon(Icons.send, color: Colors.black),
                     ),
                   ),
                 ],
-              ),
               ),
             ],
           ),

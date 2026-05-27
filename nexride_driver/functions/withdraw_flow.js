@@ -258,14 +258,22 @@ async function approveWithdrawal(data, context, db) {
     }
   }
 
-  await ref.update({
+  const payoutReference = String(
+    data?.payout_reference ?? data?.payoutReference ?? data?.reference ?? "",
+  ).trim();
+  const patch = {
     status,
     updated_at: now,
     processedAt: now,
     processed_at: now,
     reviewed_by: adminUid,
     admin_note: adminNote || null,
-  });
+  };
+  if (payoutReference) {
+    patch.payoutReference = payoutReference;
+    patch.payout_reference = payoutReference;
+  }
+  await ref.update(patch);
 
   await writeAdminAuditLog(db, {
     actor_uid: adminUid,

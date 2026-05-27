@@ -6,6 +6,9 @@
 "use strict";
 
 const { dispatchVerboseLog } = require("./dispatch_engine/dispatch_production_log");
+const {
+  removeDriverFromDispatchIndexWhenUnavailable,
+} = require("./dispatch_engine/dispatch_index_engine");
 const { rideDocumentIsTerminal } = require("./ride_pointer_orphans");
 const { repairDriverDispatchBlockers } = require("./repair_driver_dispatch_blockers");
 const { isSearchingRide } = require("./driver_active_pointer_guard");
@@ -152,6 +155,9 @@ async function clearStaleDriverTripSummary(db, driverId, now = Date.now()) {
     updates[`drivers/${d}/availability_refreshed_at`] = now;
     updates[`drivers/${d}/updated_at`] = now;
     await db.ref().update(updates);
+    try {
+      await removeDriverFromDispatchIndexWhenUnavailable(db, d, "stale_profile_cleared");
+    } catch (_) {}
   }
 
   return { cleared };

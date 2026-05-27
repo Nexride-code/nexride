@@ -626,6 +626,7 @@ async function adminUnsuspendUser(data, context, db) {
       admin_unsuspended_at: now,
       admin_unsuspended_by: adminUid,
       updated_at: now,
+      "trustSummary/accountStatus": "active",
     });
   }
   await adminAuditLog.writeAdminAuditLog(db, {
@@ -655,14 +656,96 @@ async function adminUpdateUserStatus(data, context, db) {
   const _rbac_adminUpdateUserStatus = await requireAdmin(db, context, "adminUpdateUserStatus");
   if (_rbac_adminUpdateUserStatus) return _rbac_adminUpdateUserStatus;
   const uid = normUid(data?.uid ?? data?.userId);
-  const status = trim(data?.status, 80);
-  if (!uid || !status) return { success: false, reason: "invalid_input" };
+  const role = trim(data?.role ?? data?.userRole, 16).toLowerCase() || "rider";
+  const statusRaw = trim(data?.status ?? data?.accountStatus, 80);
+  if (!uid || !statusRaw) return { success: false, reason: "invalid_input" };
+  const now = Date.now();
+  const adminUid = normUid(context.auth.uid);
+  const status = statusRaw.toLowerCase();
+
+  if (role === "driver") {
+    const normalizedAccountStatus =
+      status === "suspended"
+        ? "suspended"
+        : status === "inactive" || status === "deactivated"
+          ? "deactivated"
+          : "active";
+    const shouldForceOffline =
+      normalizedAccountStatus === "suspended" || normalizedAccountStatus === "deactivated";
+    const nextOperationalStatus =
+      normalizedAccountStatus === "suspended"
+        ? "suspended"
+        : normalizedAccountStatus === "deactivated"
+          ? "inactive"
+          : "idle";
+    const prevSnap = await db.ref(`drivers/${uid}`).get();
+    const prev = prevSnap.val() && typeof prevSnap.val() === "object" ? prevSnap.val() : {};
+    const updates = {
+      status: nextOperationalStatus,
+      accountStatus: normalizedAccountStatus,
+      account_status: normalizedAccountStatus,
+      updated_at: now,
+    };
+    if (shouldForceOffline) {
+      Object.assign(updates, {
+        isOnline: false,
+        is_online: false,
+        online: false,
+        isAvailable: false,
+        available: false,
+        online_session_started_at: null,
+        dispatch_state: "offline",
+        driver_availability_mode: "offline",
+      });
+    }
+    await db.ref(`drivers/${uid}`).update(updates);
+    if (shouldForceOffline) {
+      try {
+        await db.ref(`online_drivers/${uid}`).remove();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    await adminAuditLog.writeAdminAuditLog(db, {
+      actor_uid: adminUid,
+      action: "update_driver_account_status",
+      entity_type: "driver",
+      entity_id: uid,
+      before: {
+        account_status: prev.account_status ?? prev.accountStatus ?? null,
+        status: prev.status ?? null,
+      },
+      after: {
+        account_status: normalizedAccountStatus,
+        status: nextOperationalStatus,
+      },
+      reason: trim(data?.reason ?? data?.note, 500) || null,
+      source: "production_ops.adminUpdateUserStatus",
+      type: "admin_update_driver_account_status",
+      created_at: now,
+    });
+    return { success: true, uid, role, status: normalizedAccountStatus };
+  }
+
   await db.ref(`users/${uid}`).update({
     account_status: status,
     status,
-    updated_at: Date.now(),
+    updated_at: now,
+    "trustSummary/accountStatus": status,
   });
-  return { success: true, uid, status };
+  await adminAuditLog.writeAdminAuditLog(db, {
+    actor_uid: adminUid,
+    action: "update_rider_account_status",
+    entity_type: "rider",
+    entity_id: uid,
+    before: {},
+    after: { status, account_status: status },
+    reason: trim(data?.reason ?? data?.note, 500) || null,
+    source: "production_ops.adminUpdateUserStatus",
+    type: "admin_update_rider_account_status",
+    created_at: now,
+  });
+  return { success: true, uid, role, status };
 }
 
 async function adminBlockUserTrips(data, context, db) {
@@ -789,12 +872,45 @@ async function driverConfirmBankTransferPayment(data, context, db) {
   if (!uid) return { success: false, reason: "unauthorized" };
   const reference = trim(data?.reference ?? data?.tx_ref, 200);
   if (!reference) return { success: false, reason: "invalid_reference" };
+  const rideId = trim(data?.rideId ?? data?.ride_id, 80);
   await db.ref(`payment_transactions/${reference}`).update({
     driver_marked_paid: true,
     driver_marked_paid_at: Date.now(),
     driver_marked_paid_by: uid,
   });
-  return { success: true, reference };
+  if (rideId) {
+    const rideRef = db.ref(`ride_requests/${rideId}`);
+    let reason = "unknown";
+    const tx = await rideRef.transaction((cur) => {
+      if (!cur || typeof cur !== "object") {
+        reason = "ride_missing";
+        return;
+      }
+      const assigned = normUid(cur.driver_id ?? cur.matched_driver_id);
+      if (assigned !== uid) {
+        reason = "not_assigned_driver";
+        return;
+      }
+      const now = Date.now();
+      return {
+        ...cur,
+        payment_confirmed: true,
+        payment_status: "confirmed",
+        driver_marked_paid: true,
+        updated_at: now,
+      };
+    });
+    if (!tx.committed) {
+      return { success: false, reason };
+    }
+    try {
+      const { syncLiveJobMirror } = require("./live_job_mirror");
+      await syncLiveJobMirror(db, rideId);
+    } catch (_) {
+      /* mirror best-effort */
+    }
+  }
+  return { success: true, reference, rideId: rideId || null };
 }
 
 async function driverReportBankTransferNotReceived(data, context, db) {

@@ -20,6 +20,9 @@ class RiderPushNotificationService {
   StreamSubscription<String>? _tokenRefreshSubscription;
   bool _initialized = false;
 
+  /// Optional hook for [MapScreen] to refresh active ride on foreground FCM.
+  void Function(Map<String, String> data)? onForegroundData;
+
   Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;
@@ -35,7 +38,17 @@ class RiderPushNotificationService {
       );
 
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      debugPrint('RIDER_PUSH_FOREGROUND type=${message.data['type'] ?? ''}');
+      final data = Map<String, String>.from(
+        message.data.map(
+          (key, value) => MapEntry(key, value?.toString() ?? ''),
+        ),
+      );
+      final rideId = _rideIdFromPushData(data);
+      debugPrint(
+        'RIDER_PUSH_FOREGROUND type=${data['type'] ?? ''} '
+        'rideId=$rideId',
+      );
+      onForegroundData?.call(data);
     });
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
       debugPrint('RIDER_PUSH_OPENED type=${message.data['type'] ?? ''}');
@@ -81,5 +94,23 @@ class RiderPushNotificationService {
   Future<void> dispose() async {
     await _tokenRefreshSubscription?.cancel();
     _tokenRefreshSubscription = null;
+    onForegroundData = null;
+  }
+
+  static String _rideIdFromPushData(Map<String, String> data) {
+    for (final key in <String>[
+      'rideId',
+      'ride_id',
+      'requestId',
+      'request_id',
+      'tripId',
+      'trip_id',
+    ]) {
+      final value = data[key]?.trim() ?? '';
+      if (value.isNotEmpty) {
+        return value;
+      }
+    }
+    return '';
   }
 }

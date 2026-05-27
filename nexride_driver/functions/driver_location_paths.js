@@ -4,12 +4,10 @@
 
 "use strict";
 
+const { normalizeDispatchKey } = require("./dispatch_engine/dispatch_geo_normalizer");
+
 function canonicalDispatchMarket(raw) {
-  return String(raw ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "_");
+  return normalizeDispatchKey(raw);
 }
 
 function normalizeAvailabilityMode(raw) {

@@ -67,6 +67,43 @@ function logWebhookVerification({ requestId, verified, reason }) {
   });
 }
 
+/**
+ * Structured stabilization trace (matches Flutter NexTrace format).
+ */
+function traceLog({
+  event,
+  rideId = "",
+  uid = "",
+  role = "",
+  path = "",
+  trip_state = "",
+  status = "",
+  listener_owner = "",
+  source = "",
+  elapsedMs = "",
+  extra = null,
+}) {
+  const lines = [
+    "[TRACE]",
+    `event=${event || ""}`,
+    `rideId=${rideId || ""}`,
+    `uid=${uid || ""}`,
+    `role=${role || ""}`,
+    `path=${path || ""}`,
+    `trip_state=${trip_state || ""}`,
+    `status=${status || ""}`,
+    `listener_owner=${listener_owner || ""}`,
+    `source=${source || ""}`,
+    `elapsedMs=${elapsedMs ?? ""}`,
+  ];
+  if (extra && typeof extra === "object") {
+    for (const [k, v] of Object.entries(extra)) {
+      lines.push(`${k}=${v ?? ""}`);
+    }
+  }
+  logger.info(lines.join("\n"));
+}
+
 module.exports = {
   newRequestId,
   logEvent,
@@ -74,4 +111,5 @@ module.exports = {
   logCallableEnd,
   logPaymentSummary,
   logWebhookVerification,
+  traceLog,
 };

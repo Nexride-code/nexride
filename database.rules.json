@@ -30,50 +30,42 @@
       }
     },
 
-    "account_security": {
+    "drivers": {
+      ".indexOn": [
+        "dispatch_market",
+        "market_pool",
+        "market",
+        "city",
+        "subscription_pending",
+        "subscription_status"
+      ],
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": false
-      }
-    },
-
-    "admins": {
-      "$uid": {
-        ".read": "auth != null && auth.uid === $uid",
-        ".write": false
-      }
-    },
-
-    "support_staff": {
-      ".read": "auth != null && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))",
-      ".write": false,
-      "$uid": {
-        ".read": "auth != null && auth.uid === $uid",
-        ".write": false,
-        "displayName": {
-          ".write": "auth != null && auth.uid === $uid",
-          ".validate": "newData.isString() && newData.val().length <= 200"
-        },
-        "accessMode": {
-          ".write": "auth != null && auth.uid === $uid",
-          ".validate": "newData.isString() && newData.val().length <= 200"
-        },
-        "lastActiveAt": {
-          ".write": "auth != null && auth.uid === $uid",
-          ".validate": "newData.isNumber() && newData.val() >= 0"
-        },
-        "updatedAt": {
-          ".write": "auth != null && auth.uid === $uid",
-          ".validate": "newData.isNumber() && newData.val() >= 0"
+        ".write": "auth != null && auth.uid === $uid",
+        "canonical_market_id": { ".write": false },
+        "dispatch_market_id": { ".write": false },
+        "resolved_dispatch_market_id": { ".write": false },
+        "market_pool": { ".write": false },
+        "market": { ".write": false },
+        "city": { ".write": false },
+        "dispatch_market": { ".write": false },
+        "service_area": {
+          "canonical_market_id": { ".write": false },
+          "market": { ".write": false },
+          "dispatch_market_id": { ".write": false }
         }
       }
     },
-
-    "drivers": {
-      ".indexOn": ["dispatch_market", "market_pool", "market", "city"],
-      "$uid": {
-        ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid"
+    "dispatch_index": {
+      ".read": "auth != null",
+      ".write": false,
+      "$market": {
+        ".read": "auth != null",
+        ".write": false,
+        "$driverId": {
+          ".read": "auth != null",
+          ".write": false
+        }
       }
     },
     "driver_presence": {
@@ -84,7 +76,13 @@
     },
     "online_drivers": {
       "$uid": {
-        ".read": "auth != null && auth.uid === $uid",
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "driver_locations": {
+      "$uid": {
+        ".read": "auth != null",
         ".write": "auth != null && auth.uid === $uid"
       }
     },
@@ -177,6 +175,10 @@
     },
 
     "app_config": {
+      "legal_policy_versions": {
+        ".read": "auth != null",
+        ".write": false
+      },
       "nexride_official_bank_account": {
         ".read": false,
         ".write": false
@@ -254,13 +256,15 @@
     "rider_active_rides": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid"
+        ".write": false
       }
     },
     "rider_active_trip": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid"
+        ".write": false,
+        "trip_state": { ".write": false },
+        "phase": { ".write": false }
       }
     },
     "user_active_delivery": {
@@ -279,16 +283,54 @@
     "ride_requests": {
       ".indexOn": [
         "rider_id",
+        "riderId",
         "driver_id",
+        "driverId",
         "matched_driver_id",
+        "matchedDriverId",
         "status",
         "trip_state",
-        "updated_at"
+        "updated_at",
+        "payment_status"
       ],
-      ".read": "auth != null && ((query.orderByChild == 'rider_id' && query.equalTo == auth.uid) || (query.orderByChild == 'driver_id' && query.equalTo == auth.uid) || (query.orderByChild == 'matched_driver_id' && query.equalTo == auth.uid))",
+      ".read": "auth != null && ((query.orderByChild == 'rider_id' && query.equalTo == auth.uid) || (query.orderByChild == 'riderId' && query.equalTo == auth.uid) || (query.orderByChild == 'driver_id' && query.equalTo == auth.uid) || (query.orderByChild == 'driverId' && query.equalTo == auth.uid) || (query.orderByChild == 'matched_driver_id' && query.equalTo == auth.uid) || (query.orderByChild == 'matchedDriverId' && query.equalTo == auth.uid))",
       "$rideId": {
-        ".read": "auth != null && ((data.child('rider_id').val() === auth.uid) || (data.child('riderId').val() === auth.uid) || (data.child('driver_id').val() === auth.uid) || (data.child('driverId').val() === auth.uid) || (data.child('matched_driver_id').val() === auth.uid) || (data.child('matchedDriverId').val() === auth.uid) || root.child('driver_offer_queue/' + auth.uid + '/' + $rideId).exists())",
-        ".write": false
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "trip_state": { ".write": false },
+        "status": { ".write": false },
+        "request_status": { ".write": false },
+        "phase": { ".write": false },
+        "driver_id": { ".write": false },
+        "driverId": { ".write": false },
+        "matched_driver_id": { ".write": false },
+        "matchedDriverId": { ".write": false },
+        "assigned_driver_id": { ".write": false },
+        "assignedDriverId": { ".write": false },
+        "accepted_driver_id": { ".write": false },
+        "acceptedDriverId": { ".write": false },
+        "driver_arrived": { ".write": false },
+        "driverArrived": { ".write": false },
+        "canonical_market_id": { ".write": false },
+        "dispatch_market_id": { ".write": false },
+        "resolved_dispatch_market_id": { ".write": false },
+        "market_pool": { ".write": false },
+        "market": { ".write": false },
+        "city": { ".write": false },
+        "dispatch_market": { ".write": false },
+        "service_area": {
+          "canonical_market_id": { ".write": false },
+          "market": { ".write": false },
+          "dispatch_market_id": { ".write": false }
+        },
+        "pickup": {
+          "market": { ".write": false },
+          "canonical_market_id": { ".write": false }
+        },
+        "destination": {
+          "market": { ".write": false },
+          "canonical_market_id": { ".write": false }
+        }
       }
     },
 
@@ -327,41 +369,34 @@
       }
     },
 
-    "ride_chats": {
+    "liveJobs": {
+      "$jobId": {
+        ".read": "auth != null",
+        ".write": false
+      }
+    },
+    "liveDrivers": {
+      "$driverId": {
+        ".read": "auth != null",
+        ".write": false
+      }
+    },
+
+        "ride_chats": {
       "$rideId": {
-        ".read": false,
-        ".write": false,
-        "meta": {
-          ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
-          ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))"
-        },
-        "participants": {
-          ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
-          "$participantUid": {
-            ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
-            ".write": "auth != null && auth.uid === $participantUid && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))"
-          }
-        },
+        ".read": "auth != null",
+        ".write": "auth != null",
         "messages": {
-          ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
-          ".write": false,
-          ".indexOn": ["createdAt", "created_at", "timestamp"],
           "$messageId": {
-            ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
-            ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid)) && newData.child('senderId').val() === auth.uid && (newData.child('senderRole').val() === 'rider' || newData.child('senderRole').val() === 'driver')",
-            ".validate": "newData.hasChild('senderId') && newData.child('senderId').val() === auth.uid && (newData.hasChild('timestamp') || newData.hasChild('createdAt')) && (newData.child('senderRole').val() === 'rider' || newData.child('senderRole').val() === 'driver')"
-          }
-        },
-        "unread": {
-          "$uid": {
-            ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
-            ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))"
+            ".read": "auth != null",
+            ".write": "auth != null",
+            ".indexOn": ["createdAt", "created_at", "created_at_client", "timestamp"]
           }
         }
       }
     },
 
-    "calls": {
+"calls": {
       ".indexOn": [
         "receiverId",
         "receiver_id",
@@ -373,12 +408,12 @@
         "updatedAt"
       ],
       "$rideId": {
-        ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid) || (data.exists() && ((data.child('callerId').val() === auth.uid) || (data.child('receiverId').val() === auth.uid) || (data.child('rider_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid))))",
-        ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
+        ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/assigned_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/assignedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid) || (data.exists() && ((data.child('callerId').val() === auth.uid) || (data.child('receiverId').val() === auth.uid) || (data.child('rider_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid))))",
+        ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/assigned_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/assignedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
         "participants": {
           "$participantId": {
-            ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
-            ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))"
+            ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/assigned_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/assignedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))",
+            ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/assigned_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/assignedDriverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/accepted_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/acceptedDriverId').val() === auth.uid))"
           }
         }
       }
@@ -415,43 +450,72 @@
       }
     },
 
+    "trip_settlement_hooks": {
+      ".indexOn": ["driver_id", "driverId", "updated_at", "updatedAt"],
+      "$hookId": {
+        ".read": "auth != null && ((data.child('driver_id').val() === auth.uid) || (data.child('driverId').val() === auth.uid) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))",
+        ".write": false
+      }
+    },
+    "driver_trips": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "rider_trips": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "support_logs": {
+      "$ticketId": {
+        "$logId": {
+          ".read": "auth != null && ((root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))",
+          ".write": false
+        }
+      }
+    },
+
     "support_queue": {
       "$rideId": {
-        ".read": "auth != null && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager') || (data.child('rider_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid))",
-        ".write": "auth != null && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager') || (data.child('rider_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid))"
+        ".read": "auth != null && ((root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (data.child('rider_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid))",
+        ".write": "auth != null && ((root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (data.child('rider_id').val() === auth.uid) || (data.child('driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid))"
       }
     },
     "admin_rides": {
       "$rideId": {
-        ".read": "auth != null && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))",
-        ".write": "auth != null && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager') || (root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid))"
+        ".read": "auth != null && ((root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))",
+        ".write": "auth != null && ((root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid))"
       }
     },
 
     "support_tickets": {
       ".indexOn": ["createdByUserId", "tripId", "status", "updatedAt"],
-      ".read": "auth != null && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))",
       "$ticketId": {
-        ".read": "auth != null && ((data.child('createdByUserId').val() === auth.uid) || (auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))",
-        ".write": "auth != null && ((!data.exists() && newData.child('createdByUserId').val() === auth.uid) || (data.child('createdByUserId').val() === auth.uid) || (auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))"
+        ".read": "auth != null && ((data.child('createdByUserId').val() === auth.uid) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))",
+        ".write": "auth != null && ((!data.exists() && newData.child('createdByUserId').val() === auth.uid) || (data.child('createdByUserId').val() === auth.uid) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))"
       }
     },
     "support_ticket_messages": {
       "$ticketId": {
         "$messageId": {
-          ".read": "auth != null && ((root.child('support_tickets/' + $ticketId + '/createdByUserId').val() === auth.uid) || (auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))",
-          ".write": "auth != null && ((root.child('support_tickets/' + $ticketId + '/createdByUserId').val() === auth.uid) || (auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))"
+          ".read": "auth != null && ((root.child('support_tickets/' + $ticketId + '/createdByUserId').val() === auth.uid) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))",
+          ".write": "auth != null && ((root.child('support_tickets/' + $ticketId + '/createdByUserId').val() === auth.uid) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support'))"
         }
       }
     },
 
-    "support_logs": {
-      ".read": "auth != null && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))",
-      "$ticketId": {
-        "$logId": {
-          ".write": "auth != null && newData.child('actorId').val() === auth.uid && ((auth.token.admin === true) || (auth.token.support === true) || (auth.token.support_staff === true) || (auth.token.role === 'admin') || (auth.token.role === 'support') || (auth.token.role === 'support_agent') || (auth.token.role === 'support_manager') || (root.child('admins/' + auth.uid).val() === true) || (root.child('users/' + auth.uid + '/role').val() === 'admin') || (root.child('users/' + auth.uid + '/role').val() === 'support') || (root.child('users/' + auth.uid + '/role').val() === 'support_agent') || (root.child('users/' + auth.uid + '/role').val() === 'support_manager'))"
-        }
-      }
+    "admin_audit_logs": {
+      ".read": false,
+      ".write": false,
+      ".indexOn": ["driver_id", "created_at"]
+    },
+    "verification_audits": {
+      ".read": false,
+      ".write": false,
+      ".indexOn": ["driverId", "driver_id", "createdAt", "created_at"]
     },
 
     "merchant_public_teaser": {

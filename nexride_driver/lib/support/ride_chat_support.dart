@@ -1,3 +1,40 @@
+import 'dart:async';
+
+import 'package:firebase_database/firebase_database.dart';
+
+/// Max wait for a single chat message RTDB [.set] (UI stays enabled regardless).
+const Duration kRideChatRtdbWriteTimeout = Duration(seconds: 8);
+
+/// Writes one chat message node with precise latency logs (Firebase [.set] only).
+Future<void> persistRideChatMessageToRtdb({
+  required DatabaseReference messageNode,
+  required Map<String, dynamic> payload,
+  required String role,
+  required String rideId,
+  required String messageId,
+  required void Function(String line) logLine,
+}) async {
+  final beginMs = DateTime.now().millisecondsSinceEpoch;
+  logLine(
+    'CHAT_WRITE_BEGIN_NOW role=$role rideId=$rideId messageId=$messageId ms=$beginMs',
+  );
+  try {
+    await messageNode.set(payload).timeout(kRideChatRtdbWriteTimeout);
+    final durationMs = DateTime.now().millisecondsSinceEpoch - beginMs;
+    logLine(
+      'CHAT_WRITE_END_NOW role=$role rideId=$rideId messageId=$messageId '
+      'durationMs=$durationMs',
+    );
+  } on TimeoutException {
+    final durationMs = DateTime.now().millisecondsSinceEpoch - beginMs;
+    logLine(
+      'CHAT_WRITE_TIMEOUT role=$role rideId=$rideId messageId=$messageId '
+      'durationMs=$durationMs',
+    );
+    rethrow;
+  }
+}
+
 class RideChatMessage {
   const RideChatMessage({
     required this.id,
@@ -35,9 +72,6 @@ class RideChatMessage {
     if (status == 'pending' || status == 'sending') {
       return 'Sending…';
     }
-    if (isRead) {
-      return 'Read';
-    }
     if (status == 'failed') {
       return 'Failed';
     }
@@ -62,62 +96,224 @@ String canonicalRideChatMessagesPath(String rideId) {
   return 'ride_chats/$normalizedRideId/messages';
 }
 
-String canonicalRideChatMetaPath(String rideId) {
-  final normalizedRideId = rideId.trim();
-  return 'ride_chats/$normalizedRideId/meta';
-}
-
-String canonicalRideChatUnreadCountPath(String rideId, String uid) {
-  final r = rideId.trim();
-  final u = uid.trim();
-  return 'ride_chats/$r/unread/$u/count';
-}
-
-String canonicalRideChatUnreadUpdatedAtPath(String rideId, String uid) {
-  final r = rideId.trim();
-  final u = uid.trim();
-  return 'ride_chats/$r/unread/$u/updated_at';
-}
-
-String canonicalRideChatParticipantPath(String rideId, String uid) {
-  final r = rideId.trim();
-  final u = uid.trim();
-  return 'ride_chats/$r/participants/$u';
-}
+/// Max messages kept in memory per ride chat session.
+const int kMaxRideChatMessagesInMemory = 100;
 
 const String rideChatSafetyBannerText =
     'For your safety, keep communication respectful. Do not share private '
     'contact or payment details. Harassment, threats, sexual content, or abuse '
     'are prohibited. Report unsafe behavior immediately.';
 
-/// RTDB paths for chat session bootstrap (requires ride_chats meta/participants rules).
-Map<String, dynamic> buildRideChatInitUpdates({
-  required String rideId,
-  required String riderId,
-  required String driverId,
+String rideChatClientMessageIdFromMap(
+  Map<String, dynamic> map, {
+  required String fallbackMessageId,
 }) {
-  final normalizedRideId = rideId.trim();
-  final normalizedRiderId = riderId.trim();
-  final normalizedDriverId = driverId.trim();
-  if (normalizedRideId.isEmpty) {
-    return <String, dynamic>{};
+  final explicit = (map['client_message_id'] ?? map['clientMessageId'])
+      ?.toString()
+      .trim();
+  if (explicit != null && explicit.isNotEmpty) {
+    return explicit;
   }
-  final updates = <String, dynamic>{
-    'ride_chats/$normalizedRideId/meta/ride_id': normalizedRideId,
-    'ride_chats/$normalizedRideId/meta/status': 'active',
-    'ride_chats/$normalizedRideId/meta/updated_at': DateTime.now().millisecondsSinceEpoch,
+  return fallbackMessageId;
+}
+
+bool rideChatStatusIsPending(String status) {
+  final normalized = status.trim().toLowerCase();
+  return normalized == 'sending' || normalized == 'pending';
+}
+
+bool sameRideChatMessageSnapshot(RideChatMessage a, RideChatMessage b) {
+  return a.id == b.id &&
+      a.text == b.text &&
+      a.status == b.status &&
+      a.createdAt == b.createdAt &&
+      a.senderId == b.senderId &&
+      a.senderRole == b.senderRole &&
+      a.imageUrl == b.imageUrl &&
+      a.isRead == b.isRead;
+}
+
+/// Resolves the local map key for an own-message RTDB echo (same push id / client id).
+String? findRideChatLocalMapKey({
+  required Map<String, RideChatMessage> byId,
+  required String snapshotMessageId,
+  required RideChatMessage incoming,
+}) {
+  final snapId = snapshotMessageId.trim();
+  if (snapId.isNotEmpty && byId.containsKey(snapId)) {
+    return snapId;
+  }
+  final clientId = incoming.localTempId.trim();
+  if (clientId.isNotEmpty && byId.containsKey(clientId)) {
+    return clientId;
+  }
+  for (final entry in byId.entries) {
+    final local = entry.value.localTempId.trim();
+    if (local.isEmpty) {
+      continue;
+    }
+    if (local == snapId || local == clientId || entry.key == clientId) {
+      return entry.key;
+    }
+  }
+  return null;
+}
+
+RideChatMessage mergeRideChatReconcile({
+  required RideChatMessage existing,
+  required RideChatMessage incoming,
+  required String snapshotMessageId,
+}) {
+  final resolvedId = snapshotMessageId.trim().isNotEmpty
+      ? snapshotMessageId.trim()
+      : incoming.id;
+  final resolvedStatus = rideChatStatusIsPending(incoming.status) &&
+          rideChatStatusIsPending(existing.status)
+      ? existing.status
+      : (rideChatStatusIsPending(existing.status) ? 'sent' : incoming.status);
+  return RideChatMessage(
+    id: resolvedId,
+    rideId: incoming.rideId,
+    messageId: incoming.messageId.isNotEmpty ? incoming.messageId : resolvedId,
+    senderId: incoming.senderId.isNotEmpty ? incoming.senderId : existing.senderId,
+    senderRole:
+        incoming.senderRole.isNotEmpty ? incoming.senderRole : existing.senderRole,
+    type: incoming.type.isNotEmpty ? incoming.type : existing.type,
+    text: incoming.text.isNotEmpty ? incoming.text : existing.text,
+    imageUrl: incoming.imageUrl.isNotEmpty ? incoming.imageUrl : existing.imageUrl,
+    createdAt: existing.createdAt > 0 ? existing.createdAt : incoming.createdAt,
+    status: resolvedStatus,
+    isRead: incoming.isRead || existing.isRead,
+    localTempId: existing.localTempId.isNotEmpty
+        ? existing.localTempId
+        : incoming.localTempId,
+  );
+}
+
+class RideChatMapApplyResult {
+  const RideChatMapApplyResult({
+    required this.applied,
+    required this.skippedDuplicate,
+    this.reconciledLocalKey,
+    this.oldStatus,
+    this.newStatus,
+  });
+
+  final bool applied;
+  final bool skippedDuplicate;
+  final String? reconciledLocalKey;
+  final String? oldStatus;
+  final String? newStatus;
+}
+
+/// Applies an RTDB child event to the in-memory chat map (own-message reconcile aware).
+RideChatMapApplyResult applyIncomingRideChatToMap({
+  required Map<String, RideChatMessage> byId,
+  required String snapshotMessageId,
+  required RideChatMessage incoming,
+  required bool isIncoming,
+}) {
+  final snapId = snapshotMessageId.trim();
+  if (snapId.isEmpty) {
+    return const RideChatMapApplyResult(applied: false, skippedDuplicate: false);
+  }
+
+  if (isIncoming) {
+    byId[snapId] = incoming;
+    return const RideChatMapApplyResult(applied: true, skippedDuplicate: false);
+  }
+
+  final localKey = findRideChatLocalMapKey(
+    byId: byId,
+    snapshotMessageId: snapId,
+    incoming: incoming,
+  );
+  if (localKey != null) {
+    final existing = byId[localKey]!;
+    if (rideChatStatusIsPending(existing.status) &&
+        !rideChatStatusIsPending(incoming.status)) {
+      final merged = mergeRideChatReconcile(
+        existing: existing,
+        incoming: incoming,
+        snapshotMessageId: snapId,
+      );
+      if (localKey != snapId) {
+        byId.remove(localKey);
+      }
+      byId[snapId] = merged;
+      return RideChatMapApplyResult(
+        applied: true,
+        skippedDuplicate: false,
+        reconciledLocalKey: localKey,
+        oldStatus: existing.status,
+        newStatus: merged.status,
+      );
+    }
+    if (sameRideChatMessageSnapshot(existing, incoming)) {
+      return RideChatMapApplyResult(
+        applied: false,
+        skippedDuplicate: true,
+        reconciledLocalKey: localKey,
+        oldStatus: existing.status,
+        newStatus: incoming.status,
+      );
+    }
+    if (localKey != snapId) {
+      byId.remove(localKey);
+    }
+    byId[snapId] = incoming;
+    return RideChatMapApplyResult(
+      applied: true,
+      skippedDuplicate: false,
+      reconciledLocalKey: localKey,
+      oldStatus: existing.status,
+      newStatus: incoming.status,
+    );
+  }
+
+  byId[snapId] = incoming;
+  return const RideChatMapApplyResult(applied: true, skippedDuplicate: false);
+}
+
+String formatRideChatKnownIds(Iterable<String> ids, {int max = 12}) {
+  final list = ids.map((id) => id.trim()).where((id) => id.isNotEmpty).toList();
+  if (list.length <= max) {
+    return list.join(',');
+  }
+  return '${list.take(max).join(',')}…(+${list.length - max})';
+}
+
+/// Pure append-only chat payload — single `.set()`, no side effects.
+Map<String, dynamic> buildPureAppendChatPayload({
+  required String messageId,
+  required String rideId,
+  required String senderId,
+  required String senderRole,
+  required String text,
+  String type = 'text',
+  int? clientCreatedAtMs,
+}) {
+  final clientCreatedAt =
+      clientCreatedAtMs ?? DateTime.now().millisecondsSinceEpoch;
+  return <String, dynamic>{
+    'id': messageId,
+    'message_id': messageId,
+    'ride_id': rideId,
+    'senderId': senderId,
+    'sender_id': senderId,
+    'senderRole': senderRole,
+    'sender_role': senderRole,
+    'text': text.trim(),
+    'type': type,
+    'status': 'sent',
+    'client_message_id': messageId,
+    'client_messageId': messageId,
+    'created_at_client': clientCreatedAt,
+    'createdAt': clientCreatedAt,
+    'created_at': clientCreatedAt,
+    'timestamp': clientCreatedAt,
+    'server_ack': true,
   };
-  if (normalizedRiderId.isNotEmpty) {
-    updates['ride_chats/$normalizedRideId/meta/rider_id'] = normalizedRiderId;
-    updates['ride_chats/$normalizedRideId/participants/$normalizedRiderId'] =
-        <String, dynamic>{'role': 'rider', 'joined_at': DateTime.now().millisecondsSinceEpoch};
-  }
-  if (normalizedDriverId.isNotEmpty) {
-    updates['ride_chats/$normalizedRideId/meta/driver_id'] = normalizedDriverId;
-    updates['ride_chats/$normalizedRideId/participants/$normalizedDriverId'] =
-        <String, dynamic>{'role': 'driver', 'joined_at': DateTime.now().millisecondsSinceEpoch};
-  }
-  return updates;
 }
 
 RideChatMessage? parseRideChatMessageEntry({
@@ -171,7 +367,10 @@ RideChatMessage? parseRideChatMessageEntry({
       createdAt: createdAt,
       status: status,
       isRead: map['read'] == true,
-      localTempId: (map['localTempId'] ?? map['local_temp_id'])?.toString().trim() ?? '',
+      localTempId: rideChatClientMessageIdFromMap(
+        map,
+        fallbackMessageId: messageId,
+      ),
     );
   } catch (_) {
     return null;
@@ -190,6 +389,20 @@ List<RideChatMessage> sortedRideChatMessagesFromMap(
     return a.id.compareTo(b.id);
   });
   return List<RideChatMessage>.unmodifiable(list);
+}
+
+void trimRideChatMessagesById(
+  Map<String, RideChatMessage> byId, {
+  int maxCount = kMaxRideChatMessagesInMemory,
+}) {
+  if (byId.length <= maxCount) {
+    return;
+  }
+  final sorted = sortedRideChatMessagesFromMap(byId);
+  final removeCount = sorted.length - maxCount;
+  for (var i = 0; i < removeCount; i++) {
+    byId.remove(sorted[i].id);
+  }
 }
 
 RideChatSnapshot parseRideChatSnapshot({
@@ -257,7 +470,10 @@ RideChatSnapshot parseRideChatSnapshot({
           createdAt: createdAt,
           status: status,
           isRead: map['read'] == true,
-          localTempId: (map['localTempId'] ?? map['local_temp_id'])?.toString().trim() ?? '',
+          localTempId: rideChatClientMessageIdFromMap(
+            map,
+            fallbackMessageId: messageId,
+          ),
         ),
       );
     } catch (_) {
@@ -307,9 +523,6 @@ String _normalizeSenderRole(dynamic value) {
   final normalized = value?.toString().trim().toLowerCase() ?? '';
   if (normalized == 'rider' || normalized == 'driver') {
     return normalized;
-  }
-  if (normalized == 'system' || normalized == 'nexride' || normalized == 'support') {
-    return 'system';
   }
   return 'unknown';
 }

@@ -28,6 +28,16 @@ class RoadRouteResult {
       errorMessage == null && points.length >= 2 && distanceMeters > 0;
 }
 
+class _CachedRoadRoute {
+  const _CachedRoadRoute({
+    required this.result,
+    required this.expiresAtMs,
+  });
+
+  final RoadRouteResult result;
+  final int expiresAtMs;
+}
+
 class RoadRouteService {
   RoadRouteService({
     http.Client? client,
@@ -75,41 +85,87 @@ class RoadRouteService {
   final Uri _googleDirectionsBaseUri;
   final String _googleMapsApiKey;
 
+  static const Duration _cacheTtl = Duration(seconds: 30);
+  final Map<String, _CachedRoadRoute> _routeCache =
+      <String, _CachedRoadRoute>{};
+  final Map<String, Future<RoadRouteResult>> _inFlightRoutes =
+      <String, Future<RoadRouteResult>>{};
+
+  String _routeCacheKey(LatLng origin, LatLng destination) {
+    // Round to reduce jitter from tiny location changes.
+    final oLat = origin.latitude.toStringAsFixed(5);
+    final oLng = origin.longitude.toStringAsFixed(5);
+    final dLat = destination.latitude.toStringAsFixed(5);
+    final dLng = destination.longitude.toStringAsFixed(5);
+    return '$oLat,$oLng|$dLat,$dLng';
+  }
+
   Future<RoadRouteResult> fetchDrivingRoute({
     required LatLng origin,
     required LatLng destination,
   }) async {
+    final key = _routeCacheKey(origin, destination);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    final cached = _routeCache[key];
+    if (cached != null && cached.expiresAtMs > nowMs) {
+      return cached.result;
+    }
+
+    final inFlight = _inFlightRoutes[key];
+    if (inFlight != null) {
+      return inFlight;
+    }
+
+    final future = () async {
+      try {
+        final googleResult = await _safeFetchRoute(
+          provider: 'google',
+          action: () => _fetchGoogleDrivingRoute(
+            origin: origin,
+            destination: destination,
+          ),
+        );
+        if (googleResult.hasRoute) {
+          return googleResult;
+        }
+
+        if (kDebugMode) {
+          debugPrint(
+            '[DriverRoadRouteService] Google route unavailable, retrying with OSRM fallback error=${googleResult.errorMessage}',
+          );
+        }
+
+        final osrmResult = await _safeFetchRoute(
+          provider: 'osrm',
+          action: () => _fetchOsrmDrivingRoute(
+            origin: origin,
+            destination: destination,
+          ),
+        );
+        if (osrmResult.hasRoute) {
+          return osrmResult;
+        }
+
+        return osrmResult.errorMessage != null ? osrmResult : googleResult;
+      } catch (error) {
+        if (kDebugMode) {
+          debugPrint('[DriverRoadRouteService] route fetch wrapper error=$error');
+        }
+        return const RoadRouteResult.error(_routeUnavailableMessage);
+      }
+    }();
+
+    _inFlightRoutes[key] = future;
     try {
-      final googleResult = await _safeFetchRoute(
-        provider: 'google',
-        action: () => _fetchGoogleDrivingRoute(
-          origin: origin,
-          destination: destination,
-        ),
+      final result = await future;
+      _routeCache[key] = _CachedRoadRoute(
+        result: result,
+        expiresAtMs: nowMs + _cacheTtl.inMilliseconds,
       );
-      if (googleResult.hasRoute) {
-        return googleResult;
-      }
-
-      debugPrint(
-        '[DriverRoadRouteService] Google route unavailable, retrying with OSRM fallback error=${googleResult.errorMessage}',
-      );
-
-      final osrmResult = await _safeFetchRoute(
-        provider: 'osrm',
-        action: () => _fetchOsrmDrivingRoute(
-          origin: origin,
-          destination: destination,
-        ),
-      );
-      if (osrmResult.hasRoute) {
-        return osrmResult;
-      }
-
-      return osrmResult.errorMessage != null ? osrmResult : googleResult;
-    } catch (error) {
-      debugPrint('[DriverRoadRouteService] route fetch wrapper error=$error');
-      return const RoadRouteResult.error(_routeUnavailableMessage);
+      return result;
+    } finally {
+      _inFlightRoutes.remove(key);
     }
   }
 
@@ -149,9 +205,11 @@ class RoadRouteService {
       origin: origin,
       destination: destination,
     );
-    debugPrint(
-      '[DriverRoadRouteService] google request uri=$requestUri origin=${origin.latitude},${origin.longitude} destination=${destination.latitude},${destination.longitude}',
-    );
+    if (kDebugMode) {
+      debugPrint(
+        '[DriverRoadRouteService] google request uri=$requestUri origin=${origin.latitude},${origin.longitude} destination=${destination.latitude},${destination.longitude}',
+      );
+    }
 
     try {
       final response = await _client.get(

@@ -4,10 +4,20 @@ import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 
+import '../support/realtime_database_error_support.dart';
 import '../support/startup_rtdb_support.dart';
 import 'rider_ride_cloud_functions_service.dart';
 
-enum RideCallStatus { ringing, accepted, declined, ended, missed, cancelled }
+enum RideCallStatus {
+  ringing,
+  joined,
+  ended,
+  /// Legacy RTDB tokens mapped to [joined].
+  accepted,
+  declined,
+  missed,
+  cancelled,
+}
 
 /// UI-facing phase of the local Agora RTC engine.
 ///
@@ -58,7 +68,8 @@ class RideCallSession {
 
   bool get isCalling => status == RideCallStatus.ringing;
   bool get isRinging => isCalling;
-  bool get isAccepted => status == RideCallStatus.accepted;
+  bool get isAccepted =>
+      status == RideCallStatus.joined || status == RideCallStatus.accepted;
   bool get isTerminal =>
       status == RideCallStatus.declined ||
       status == RideCallStatus.ended ||
@@ -80,7 +91,9 @@ class RideCallSession {
       return null;
     }
 
-    final status = _parseStatus(map['status']?.toString());
+    final status = _parseStatus(
+      map['state']?.toString() ?? map['status']?.toString(),
+    );
     if (status == null) {
       return null;
     }
@@ -140,6 +153,38 @@ class OutgoingCallRequestResult {
   final RideCallSession? session;
 }
 
+/// Why a participant RTDB write is requested (controls throttle + dedupe).
+enum ParticipantUpdateKind {
+  callLifecycle,
+  avState,
+  foreground,
+  rtcConnection,
+}
+
+class _ParticipantLogicalState {
+  const _ParticipantLogicalState({
+    required this.joined,
+    required this.muted,
+    required this.speaker,
+    this.foreground,
+    this.connectionState,
+  });
+
+  final bool joined;
+  final bool muted;
+  final bool speaker;
+  final bool? foreground;
+  final String? connectionState;
+
+  bool isEquivalentTo(_ParticipantLogicalState other) {
+    return joined == other.joined &&
+        muted == other.muted &&
+        speaker == other.speaker &&
+        foreground == other.foreground &&
+        connectionState == other.connectionState;
+  }
+}
+
 class _VoiceJoinRequest {
   const _VoiceJoinRequest({
     required this.rideId,
@@ -174,6 +219,15 @@ class CallService {
   final String _agoraChannelPrefix = _resolveChannelPrefix();
   final Set<String> _syncedRideIds = <String>{};
   final Set<String> _syncedReceiverIds = <String>{};
+  static const Duration _kParticipantWriteThrottle = Duration(seconds: 10);
+  static const Set<String> _rtcConnectionStatesWorthPersisting = <String>{
+    'connected',
+    'disconnected',
+    'connection_lost',
+  };
+  final Map<String, _ParticipantLogicalState> _lastParticipantLogicalState =
+      <String, _ParticipantLogicalState>{};
+  final Map<String, DateTime> _lastParticipantWriteAt = <String, DateTime>{};
 
   RtcEngine? _engine;
   RtcEngineEventHandler? _eventHandler;
@@ -260,9 +314,8 @@ class CallService {
   }
 
   Stream<rtdb.DatabaseEvent> observeCallsForReceiver(String receiverId) {
-    final normalizedReceiverId = receiverId.trim();
-    unawaited(_keepReceiverCallsSynced(normalizedReceiverId));
-    return _callsByReceiverQuery(normalizedReceiverId).onValue;
+    // Prefer observeCall(rideId): root /calls queries are denied for clients.
+    return _callsByReceiverQuery(receiverId.trim()).onValue;
   }
 
   Future<RideCallSession?> fetchCall(String rideId) async {
@@ -288,7 +341,6 @@ class CallService {
 
   Future<List<RideCallSession>> fetchCallsForReceiver(String receiverId) async {
     final normalizedReceiverId = receiverId.trim();
-    await _keepReceiverCallsSynced(normalizedReceiverId);
     final snapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
       source: 'call_service.fetch_calls_for_receiver',
       path: 'calls[orderByChild=receiverId,equalTo=$normalizedReceiverId]',
@@ -454,6 +506,8 @@ class CallService {
     required bool speaker,
     bool? foreground,
     String? connectionState,
+    ParticipantUpdateKind updateKind = ParticipantUpdateKind.avState,
+    bool force = false,
   }) async {
     final normalizedRideId = rideId.trim();
     final normalizedUid = uid.trim();
@@ -461,7 +515,57 @@ class CallService {
       return;
     }
 
-    await _keepRideCallSynced(normalizedRideId);
+    final normalizedConnectionState = connectionState?.trim();
+    final effectiveConnectionState =
+        normalizedConnectionState != null &&
+                normalizedConnectionState.isNotEmpty
+            ? normalizedConnectionState
+            : null;
+
+    if (updateKind == ParticipantUpdateKind.rtcConnection) {
+      final cs = effectiveConnectionState ?? '';
+      if (cs.isNotEmpty &&
+          !_rtcConnectionStatesWorthPersisting.contains(cs)) {
+        return;
+      }
+      if (_lastJoinRequest == null) {
+        return;
+      }
+    }
+
+    final participantPath =
+        'calls/$normalizedRideId/participants/${_participantKey(normalizedUid)}';
+    final cacheKey = '$normalizedRideId|${normalizedUid}';
+    final nextLogical = _ParticipantLogicalState(
+      joined: joined,
+      muted: muted,
+      speaker: speaker,
+      foreground: foreground,
+      connectionState: effectiveConnectionState,
+    );
+    final previousLogical = _lastParticipantLogicalState[cacheKey];
+
+    if (!force &&
+        previousLogical != null &&
+        previousLogical.isEquivalentTo(nextLogical)) {
+      debugPrint(
+        'CALL_PARTICIPANT_UPDATE_SKIP_UNCHANGED path=$participantPath',
+      );
+      return;
+    }
+
+    final lastWriteAt = _lastParticipantWriteAt[cacheKey];
+    final now = DateTime.now();
+    if (!force &&
+        updateKind != ParticipantUpdateKind.callLifecycle &&
+        lastWriteAt != null &&
+        now.difference(lastWriteAt) < _kParticipantWriteThrottle) {
+      debugPrint(
+        'CALL_PARTICIPANT_UPDATE_SKIP_THROTTLED path=$participantPath '
+        'kind=${updateKind.name} ageMs=${now.difference(lastWriteAt).inMilliseconds}',
+      );
+      return;
+    }
 
     final payload = <String, Object?>{
       'uid': normalizedUid,
@@ -474,14 +578,61 @@ class CallService {
     if (foreground != null) {
       payload['foreground'] = foreground;
     }
-
-    final normalizedConnectionState = connectionState?.trim();
-    if (normalizedConnectionState != null &&
-        normalizedConnectionState.isNotEmpty) {
-      payload['connectionState'] = normalizedConnectionState;
+    if (effectiveConnectionState != null) {
+      payload['connectionState'] = effectiveConnectionState;
     }
 
-    await _participantRef(normalizedRideId, normalizedUid).update(payload);
+    debugPrint(
+      'CALL_PARTICIPANT_UPDATE path=$participantPath kind=${updateKind.name}',
+    );
+
+    try {
+      await _participantRef(normalizedRideId, normalizedUid)
+          .update(payload)
+          .timeout(const Duration(seconds: 12));
+      _lastParticipantLogicalState[cacheKey] = nextLogical;
+      _lastParticipantWriteAt[cacheKey] = now;
+    } on TimeoutException {
+      debugPrint(
+        'CALL_PARTICIPANT_UPDATE_TIMEOUT path=$participantPath '
+        'kind=${updateKind.name}',
+      );
+    } catch (error) {
+      if (isRealtimeDatabasePermissionDenied(error)) {
+        debugPrint(
+          'CALL_PARTICIPANT_UPDATE_DENIED path=$participantPath error=$error',
+        );
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  void clearParticipantWriteCache({String? rideId, String? uid}) {
+    if (rideId == null && uid == null) {
+      _lastParticipantLogicalState.clear();
+      _lastParticipantWriteAt.clear();
+      return;
+    }
+    final ridePrefix = rideId?.trim();
+    final uidKey = uid?.trim();
+    final keys = _lastParticipantLogicalState.keys.toList();
+    for (final key in keys) {
+      final parts = key.split('|');
+      if (parts.length != 2) {
+        continue;
+      }
+      if (ridePrefix != null &&
+          ridePrefix.isNotEmpty &&
+          parts[0] != ridePrefix) {
+        continue;
+      }
+      if (uidKey != null && uidKey.isNotEmpty && parts[1] != uidKey) {
+        continue;
+      }
+      _lastParticipantLogicalState.remove(key);
+      _lastParticipantWriteAt.remove(key);
+    }
   }
 
   Future<void> ensureJoinedVoiceChannel({
@@ -589,7 +740,12 @@ class CallService {
     _joinWatchdogTimer = null;
     _reconnectInProgress = false;
     _reconnectAttempt = 0;
+    final endedRideId = _lastJoinRequest?.rideId;
+    final endedUid = _lastJoinRequest?.uid;
     _lastJoinRequest = null;
+    if (endedRideId != null && endedUid != null) {
+      clearParticipantWriteCache(rideId: endedRideId, uid: endedUid);
+    }
     _setPhase(AgoraConnectionPhase.idle);
 
     if (_engine == null || _joinedChannelId == null) {
@@ -1271,6 +1427,7 @@ class CallService {
         muted: request.muted,
         speaker: request.speakerOn,
         connectionState: connectionState,
+        updateKind: ParticipantUpdateKind.rtcConnection,
       );
     } catch (error) {
       debugPrint(
@@ -1370,8 +1527,10 @@ RideCallStatus? _parseStatus(String? raw) {
     case 'calling':
     case 'ringing':
       return RideCallStatus.ringing;
+    case 'joined':
     case 'accepted':
-      return RideCallStatus.accepted;
+    case 'connected':
+      return RideCallStatus.joined;
     case 'rejected':
     case 'declined':
       return RideCallStatus.declined;

@@ -28,6 +28,16 @@ class RoadRouteResult {
       errorMessage == null && points.length >= 2 && distanceMeters > 0;
 }
 
+class _CachedRoadRoute {
+  const _CachedRoadRoute({
+    required this.result,
+    required this.expiresAtMs,
+  });
+
+  final RoadRouteResult result;
+  final int expiresAtMs;
+}
+
 class RoadRouteService {
   RoadRouteService({http.Client? client, Uri? routingBaseUri})
     : this.withConfig(client: client, routingBaseUri: routingBaseUri);
@@ -68,33 +78,74 @@ class RoadRouteService {
   final Uri _googleDirectionsBaseUri;
   final String _googleMapsApiKey;
 
+  static const Duration _cacheTtl = Duration(seconds: 30);
+  final Map<String, _CachedRoadRoute> _routeCache =
+      <String, _CachedRoadRoute>{};
+  final Map<String, Future<RoadRouteResult>> _inFlightRoutes =
+      <String, Future<RoadRouteResult>>{};
+
+  String _routeCacheKey(LatLng origin, LatLng destination) {
+    final oLat = origin.latitude.toStringAsFixed(5);
+    final oLng = origin.longitude.toStringAsFixed(5);
+    final dLat = destination.latitude.toStringAsFixed(5);
+    final dLng = destination.longitude.toStringAsFixed(5);
+    return '$oLat,$oLng|$dLat,$dLng';
+  }
+
   Future<RoadRouteResult> fetchDrivingRoute({
     required LatLng origin,
     required LatLng destination,
   }) async {
-    final googleResult = await _fetchGoogleDrivingRoute(
-      origin: origin,
-      destination: destination,
-    );
-    if (googleResult.hasRoute) {
-      return googleResult;
+    final key = _routeCacheKey(origin, destination);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    final cached = _routeCache[key];
+    if (cached != null && cached.expiresAtMs > nowMs) {
+      return cached.result;
     }
 
-    if (_googleMapsApiKey.isNotEmpty) {
-      debugPrint(
-        '[RoadRouteService] Google route unavailable, retrying with OSRM fallback error=${googleResult.errorMessage}',
+    final inFlight = _inFlightRoutes[key];
+    if (inFlight != null) {
+      return inFlight;
+    }
+
+    final future = () async {
+      final googleResult = await _fetchGoogleDrivingRoute(
+        origin: origin,
+        destination: destination,
       );
-    }
+      if (googleResult.hasRoute) {
+        return googleResult;
+      }
 
-    final osrmResult = await _fetchOsrmDrivingRoute(
-      origin: origin,
-      destination: destination,
-    );
-    if (osrmResult.hasRoute) {
-      return osrmResult;
-    }
+      if (_googleMapsApiKey.isNotEmpty && kDebugMode) {
+        debugPrint(
+          '[RoadRouteService] Google route unavailable, retrying with OSRM fallback error=${googleResult.errorMessage}',
+        );
+      }
 
-    return googleResult.errorMessage != null ? googleResult : osrmResult;
+      final osrmResult = await _fetchOsrmDrivingRoute(
+        origin: origin,
+        destination: destination,
+      );
+      if (osrmResult.hasRoute) {
+        return osrmResult;
+      }
+
+      return googleResult.errorMessage != null ? googleResult : osrmResult;
+    }();
+
+    _inFlightRoutes[key] = future;
+    try {
+      final result = await future;
+      _routeCache[key] = _CachedRoadRoute(
+        result: result,
+        expiresAtMs: nowMs + _cacheTtl.inMilliseconds,
+      );
+      return result;
+    } finally {
+      _inFlightRoutes.remove(key);
+    }
   }
 
   Future<RoadRouteResult> _fetchGoogleDrivingRoute({
@@ -111,9 +162,11 @@ class RoadRouteService {
       origin: origin,
       destination: destination,
     );
-    debugPrint(
-      '[RoadRouteService] google request uri=$requestUri origin=${origin.latitude},${origin.longitude} destination=${destination.latitude},${destination.longitude}',
-    );
+    if (kDebugMode) {
+      debugPrint(
+        '[RoadRouteService] google request uri=$requestUri origin=${origin.latitude},${origin.longitude} destination=${destination.latitude},${destination.longitude}',
+      );
+    }
 
     try {
       final response = await _client

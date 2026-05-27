@@ -117,7 +117,8 @@ void main() {
       await tester.enterText(find.byType(TextField), 'Checking in');
       await tester.tap(find.byType(ElevatedButton));
       await tester.pump();
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.byIcon(Icons.send), findsOneWidget);
 
       completer.complete(
         'Sending this message took too long. Please try again.',
@@ -145,7 +146,6 @@ void main() {
         home: Scaffold(
           body: DriverRideChatSheet(
             rideId: 'ride-safe',
-            peerName: 'Alex Rider',
             currentUserId: 'driver-1',
             messagesListenable: messages,
             onSendMessage: (String rideId, String text) async => null,
@@ -164,7 +164,7 @@ void main() {
       ),
     );
 
-    expect(find.text('Alex Rider'), findsOneWidget);
+    expect(find.text('Ride Chat'), findsOneWidget);
     expect(find.textContaining('sexual content'), findsOneWidget);
     expect(find.text('No messages yet'), findsOneWidget);
 

@@ -36,6 +36,7 @@ const {
   authUserToProfileRow,
 } = require("./admin_rider_classification");
 const adminAuditLog = require("./admin_audit_log");
+const adminBusinessMutations = require("./admin_business_mutations");
 
 function nowMs() {
   return Date.now();
@@ -3720,4 +3721,12 @@ module.exports = {
   adminListPaymentIntents,
   adminGetPaymentDiagnostics,
   adminExpireStaleVaPaymentIntents,
+  adminUpdateWithdrawalStatus: adminBusinessMutations.adminUpdateWithdrawalStatus,
+  adminReviewDriverVerificationCase:
+    adminBusinessMutations.adminReviewDriverVerificationCase,
+  adminGetAppPricingConfig: adminBusinessMutations.adminGetAppPricingConfig,
+  getAppPricingConfig: adminBusinessMutations.getAppPricingConfig,
+  adminUpdateAppPricingConfig: adminBusinessMutations.adminUpdateAppPricingConfig,
+  adminUpdateDriverSubscriptionStatus:
+    adminBusinessMutations.adminUpdateDriverSubscriptionStatus,
 };

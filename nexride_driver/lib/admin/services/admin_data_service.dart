@@ -246,8 +246,7 @@ class AdminDataService {
           adminEmail: adminEmail,
         ),
         Future.value(const <String, dynamic>{}), // skip GPS bulk on panel load
-        _safeMapAt(
-          'app_config',
+        _fetchAppConfigForAdmin(
           adminUid: adminUid,
           adminEmail: adminEmail,
         ),
@@ -448,9 +447,19 @@ class AdminDataService {
       totalCommissionsEarned: 0,
       subscriptionRevenue: 0,
     );
-    final pricingConfig = _buildPricingConfig(const <String, dynamic>{});
+    Map<String, dynamic> appConfigData = const <String, dynamic>{};
+    try {
+      appConfigData = await fetchAppConfigViaCallable();
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchAppConfigViaCallable failed: $error');
+      debugPrintStack(
+        label: '[AdminData] fetchAppConfigViaCallable stack',
+        stackTrace: stackTrace,
+      );
+    }
+    final pricingConfig = _buildPricingConfig(appConfigData);
     final settings = _buildOperationalSettings(
-      appConfigData: const <String, dynamic>{},
+      appConfigData: appConfigData,
       pricingConfig: pricingConfig,
       adminEmail: adminEmail,
     );
@@ -1541,37 +1550,97 @@ class AdminDataService {
     required String riderId,
     required String status,
   }) async {
-    await _rootRef.child('users/$riderId').update(<String, dynamic>{
-      'status': status,
-      'updatedAt': rtdb.ServerValue.timestamp,
-      'trustSummary/accountStatus': status,
+    final normalized = status.trim().toLowerCase();
+    if (normalized == 'active') {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminUnsuspendUser',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'uid': riderId,
+        'userId': riderId,
+        'role': 'rider',
+      });
+      ensureAdminCallableSuccess(_map(result.data));
+      return;
+    }
+
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminUpdateUserStatus',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'uid': riderId,
+      'userId': riderId,
+      'role': 'rider',
+      'status': normalized,
     });
+    ensureAdminCallableSuccess(_map(result.data));
   }
 
   Future<void> updateDriverStatus({
     required AdminDriverRecord driver,
     required String status,
+    String reason = '',
   }) async {
     final normalizedAccountStatus = _normalizedAdminDriverAccountStatus(status);
-    final shouldForceOffline = normalizedAccountStatus == 'suspended' ||
-        normalizedAccountStatus == 'deactivated';
-    final nextOperationalStatus = switch (normalizedAccountStatus) {
-      'suspended' => 'suspended',
-      'deactivated' => 'inactive',
-      _ => _reactivatedDriverOperationalStatus(driver),
-    };
-    await _rootRef.child('drivers/${driver.id}').update(<String, dynamic>{
-      'status': nextOperationalStatus,
-      'accountStatus': normalizedAccountStatus,
-      'account_status': normalizedAccountStatus,
-      'updated_at': rtdb.ServerValue.timestamp,
-      if (shouldForceOffline) ...<String, dynamic>{
-        'isOnline': false,
-        'isAvailable': false,
-        'available': false,
-        'online_session_started_at': null,
-      },
+
+    if (normalizedAccountStatus == 'active') {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminUnsuspendUser',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'uid': driver.id,
+        'userId': driver.id,
+        'role': 'driver',
+        if (reason.trim().isNotEmpty) 'reason': reason.trim(),
+      });
+      ensureAdminCallableSuccess(_map(result.data));
+      return;
+    }
+
+    if (normalizedAccountStatus == 'suspended') {
+      final note = reason.trim();
+      if (note.length < 8) {
+        throw StateError('suspend_reason_required_min_8_chars');
+      }
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminSuspendAccount',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'uid': driver.id,
+        'userId': driver.id,
+        'role': 'driver',
+        'reason': note,
+      });
+      ensureAdminCallableSuccess(_map(result.data));
+      return;
+    }
+
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminUpdateUserStatus',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'uid': driver.id,
+      'userId': driver.id,
+      'role': 'driver',
+      'status': normalizedAccountStatus,
+      if (reason.trim().isNotEmpty) 'reason': reason.trim(),
     });
+    ensureAdminCallableSuccess(_map(result.data));
   }
 
   String _normalizedAdminDriverAccountStatus(String rawStatus) {
@@ -1581,17 +1650,6 @@ class AdminDataService {
       'inactive' || 'deactivated' => 'deactivated',
       _ => 'active',
     };
-  }
-
-  String _reactivatedDriverOperationalStatus(AdminDriverRecord driver) {
-    final normalizedOperationalStatus = driver.status.trim().toLowerCase();
-    if (normalizedOperationalStatus.isEmpty ||
-        normalizedOperationalStatus == 'inactive' ||
-        normalizedOperationalStatus == 'deactivated' ||
-        normalizedOperationalStatus == 'suspended') {
-      return driver.isOnline ? 'idle' : 'offline';
-    }
-    return normalizedOperationalStatus;
   }
 
   Future<void> updateWithdrawal({
@@ -1604,71 +1662,24 @@ class AdminDataService {
     final reference = payoutReference.trim();
     final noteValue = note.trim();
 
-    if (normalizedStatus == 'paid') {
-      final callable = FirebaseFunctions.instanceFor(
-        region: 'us-central1',
-      ).httpsCallable(
-        'adminApproveWithdrawal',
-        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
-      );
-      final result = await callable.call(<String, dynamic>{
-        'withdrawalId': withdrawal.id,
-        'withdrawal_id': withdrawal.id,
-        if (noteValue.isNotEmpty) 'adminNote': noteValue,
-        if (noteValue.isNotEmpty) 'admin_note': noteValue,
-      });
-      final data = _map(result.data);
-      ensureAdminCallableSuccess(data);
-      if (reference.isNotEmpty) {
-        await _rootRef.child('withdraw_requests/${withdrawal.id}').update(<String, dynamic>{
-          'payoutReference': reference,
-          'payout_reference': reference,
-        });
-      }
-      return;
-    }
-
-    if (normalizedStatus == 'rejected') {
-      final callable = FirebaseFunctions.instanceFor(
-        region: 'us-central1',
-      ).httpsCallable(
-        'adminRejectWithdrawal',
-        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
-      );
-      final result = await callable.call(<String, dynamic>{
-        'withdrawalId': withdrawal.id,
-        'withdrawal_id': withdrawal.id,
-        if (noteValue.isNotEmpty) 'adminNote': noteValue,
-        if (noteValue.isNotEmpty) 'admin_note': noteValue,
-      });
-      final data = _map(result.data);
-      ensureAdminCallableSuccess(data);
-      return;
-    }
-
-    final updates = <String, dynamic>{};
-    final sourcePaths = withdrawal.sourcePaths.isNotEmpty
-        ? withdrawal.sourcePaths
-        : <String>['withdraw_requests/${withdrawal.id}'];
-
-    for (final path in sourcePaths) {
-      updates['$path/status'] = normalizedStatus;
-      updates['$path/updatedAt'] = rtdb.ServerValue.timestamp;
-      updates['$path/updated_at'] = rtdb.ServerValue.timestamp;
-      if (normalizedStatus == 'processing') {
-        updates['$path/processedAt'] = rtdb.ServerValue.timestamp;
-      }
-      if (reference.isNotEmpty) {
-        updates['$path/payoutReference'] = reference;
-        updates['$path/payout_reference'] = reference;
-      }
-      if (noteValue.isNotEmpty) {
-        updates['$path/note'] = noteValue;
-        updates['$path/adminNote'] = noteValue;
-      }
-    }
-
-    await _rootRef.update(updates);
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminUpdateWithdrawalStatus',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawalId': withdrawal.id,
+      'withdrawal_id': withdrawal.id,
+      'status': normalizedStatus,
+      if (reference.isNotEmpty) 'payoutReference': reference,
+      if (reference.isNotEmpty) 'payout_reference': reference,
+      if (noteValue.isNotEmpty) 'adminNote': noteValue,
+      if (noteValue.isNotEmpty) 'admin_note': noteValue,
+      if (withdrawal.sourcePaths.isNotEmpty) 'sourcePaths': withdrawal.sourcePaths,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
   }
 
   Future<void> reviewVerificationCase({
@@ -1677,100 +1688,42 @@ class AdminDataService {
     required String reviewedBy,
     String note = '',
   }) async {
-    final normalized = normalizedDriverVerification(verificationCase.rawData);
-    final currentDocuments = _map(normalized['documents']);
-    final nextDocuments = <String, dynamic>{};
-    final actionValue = action.trim().toLowerCase();
-
-    for (final entry in currentDocuments.entries) {
-      final document = _map(entry.value);
-      final status = _text(document['status']).toLowerCase();
-      final nextStatus = switch (actionValue) {
-        'approve' => status == 'missing' ? 'missing' : 'approved',
-        'reject' => status == 'missing' ? 'missing' : 'rejected',
-        'resubmit' => status == 'missing' ? 'missing' : 'rejected',
-        _ => status,
-      };
-
-      nextDocuments[entry.key] = <String, dynamic>{
-        ...document,
-        'status': nextStatus,
-        'reviewNote': note.trim(),
-        'reviewedAt': rtdb.ServerValue.timestamp,
-        'reviewedBy': reviewedBy.trim(),
-        'failureReason': actionValue == 'reject' || actionValue == 'resubmit'
-            ? (note.trim().isNotEmpty
-                ? note.trim()
-                : actionValue == 'resubmit'
-                    ? 'resubmission_required'
-                    : 'rejected_by_admin')
-            : '',
-        'updatedAt': rtdb.ServerValue.timestamp,
-        'result': actionValue == 'approve'
-            ? 'approved'
-            : actionValue == 'reject'
-                ? 'rejected'
-                : actionValue == 'resubmit'
-                    ? 'resubmission_required'
-                    : document['result'],
-      };
-    }
-
-    final nextVerification = normalizedDriverVerification(
-      <String, dynamic>{
-        ...normalized,
-        'documents': nextDocuments,
-        'lastReviewedAt': rtdb.ServerValue.timestamp,
-        'reviewedBy': reviewedBy.trim(),
-        'updatedAt': rtdb.ServerValue.timestamp,
-      },
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminReviewDriverVerificationCase',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
     );
+    final result = await callable.call(<String, dynamic>{
+      'driverId': verificationCase.driverId,
+      'driver_id': verificationCase.driverId,
+      'action': action.trim().toLowerCase(),
+      'note': note.trim(),
+      'reviewedBy': reviewedBy.trim(),
+      'reviewed_by': reviewedBy.trim(),
+      'verificationCase': verificationCase.rawData,
+      'verification_case': verificationCase.rawData,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+  }
 
-    final auditRef = _rootRef.child('verification_audits').push();
-    final updates = <String, dynamic>{
-      'drivers/${verificationCase.driverId}/verification': nextVerification,
-      'drivers/${verificationCase.driverId}/updated_at':
-          rtdb.ServerValue.timestamp,
-      'driver_verifications/${verificationCase.driverId}': <String, dynamic>{
-        ...verificationCase.rawData,
-        ...nextVerification,
-        'driverId': verificationCase.driverId,
-        'driverName': verificationCase.driverName,
-        'phone': verificationCase.phone,
-        'email': verificationCase.email,
-        'reviewedBy': reviewedBy.trim(),
-        'reviewedAt': rtdb.ServerValue.timestamp,
-        'updatedAt': rtdb.ServerValue.timestamp,
-      },
-      'verification_audits/${auditRef.key}': <String, dynamic>{
-        'auditId': auditRef.key,
-        'driverId': verificationCase.driverId,
-        'action': switch (actionValue) {
-          'approve' => 'verification_approved',
-          'reject' => 'verification_rejected',
-          'resubmit' => 'verification_resubmission_requested',
-          _ => 'verification_review_updated',
-        },
-        'status': nextVerification['status'],
-        'result': nextVerification['result'],
-        'failureReason': note.trim(),
-        'reviewedBy': reviewedBy.trim(),
-        'reviewedAt': rtdb.ServerValue.timestamp,
-        'createdAt': rtdb.ServerValue.timestamp,
-        'updatedAt': rtdb.ServerValue.timestamp,
-      },
+  /// Backend-authoritative pricing read (replaces direct RTDB `app_config` reads for admin UI).
+  Future<Map<String, dynamic>> fetchAppConfigViaCallable() async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminGetAppPricingConfig',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{});
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return <String, dynamic>{
+      'pricing': _map(data['pricing']),
+      'city_enablement': _map(data['city_enablement']),
+      'nexride_dispatch': _map(data['nexride_dispatch']),
     };
-
-    for (final entry in nextDocuments.entries) {
-      updates['driver_documents/${verificationCase.driverId}/${entry.key}'] =
-          <String, dynamic>{
-        ..._map(entry.value),
-        'driverId': verificationCase.driverId,
-        'driverName': verificationCase.driverName,
-      };
-    }
-
-    await _rootRef.update(updates);
   }
 
   Future<void> updatePricingConfig({
@@ -1779,116 +1732,34 @@ class AdminDataService {
     required int weeklySubscriptionNgn,
     required int monthlySubscriptionNgn,
   }) async {
-    const int driverBatchSize = 150;
-    const int maxDriversToScan = 25000;
-    final t0 = DateTime.now().millisecondsSinceEpoch;
-
-    final normalizedCities = <String, dynamic>{
-      for (final city in cities)
-        _pricingCityStorageKey(city.city): <String, dynamic>{
-          'city': city.city,
-          'baseFareNgn': city.baseFareNgn,
-          'perKmNgn': city.perKmNgn,
-          'perMinuteNgn': city.perMinuteNgn,
-          'minimumFareNgn': city.minimumFareNgn,
-          'enabled': city.enabled,
-        },
-    };
-    final pricingSnapshot = <String, dynamic>{
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminUpdateAppPricingConfig',
+      options: HttpsCallableOptions(timeout: const Duration(minutes: 3)),
+    );
+    final result = await callable.call(<String, dynamic>{
       'commissionRate': commissionRate,
       'weeklySubscriptionNgn': weeklySubscriptionNgn,
       'monthlySubscriptionNgn': monthlySubscriptionNgn,
-      'updatedAt': rtdb.ServerValue.timestamp,
-    };
-    final appConfigUpdates = <String, dynamic>{
-      'app_config/pricing': <String, dynamic>{
-        'cities': normalizedCities,
-        ...pricingSnapshot,
-      },
-      'app_config/city_enablement': <String, dynamic>{
-        for (final city in cities) _pricingCityStorageKey(city.city): city.enabled,
-      },
-    };
-
-    await _rootRef.update(appConfigUpdates);
-
-    var processed = 0;
-    String? pageCursor;
-    while (processed < maxDriversToScan) {
-      rtdb.Query pageQuery =
-          _rootRef.child('drivers').orderByKey().limitToFirst(driverBatchSize);
-      if (pageCursor != null && pageCursor.isNotEmpty) {
-        pageQuery = _rootRef
-            .child('drivers')
-            .orderByKey()
-            .startAfter(pageCursor)
-            .limitToFirst(driverBatchSize);
-      }
-      final snap = await pageQuery.get();
-      if (!snap.exists || snap.value == null) {
-        break;
-      }
-      final raw = snap.value;
-      if (raw is! Map) {
-        break;
-      }
-      final chunk = Map<Object?, Object?>.from(raw);
-      if (chunk.isEmpty) {
-        break;
-      }
-
-      final batchUpdates = <String, dynamic>{};
-      for (final MapEntry<Object?, Object?> e in chunk.entries) {
-        final driverId = e.key?.toString().trim() ?? '';
-        if (driverId.isEmpty) {
-          continue;
-        }
-        final driverProfile = _map(e.value);
-        final nextBusinessModel = normalizedDriverBusinessModel(
-          <String, dynamic>{
-            ..._map(
-              driverProfile['businessModel'] ?? driverProfile['business_model'],
-            ),
-            'pricingSnapshot': pricingSnapshot,
-            'updatedAt': rtdb.ServerValue.timestamp,
-          },
-        );
-        batchUpdates['drivers/$driverId/businessModel'] = nextBusinessModel;
-        batchUpdates['drivers/$driverId/updated_at'] = rtdb.ServerValue.timestamp;
-        batchUpdates['driver_business_models/$driverId'] =
-            buildDriverBusinessModelAdminPayload(
-          driverId: driverId,
-          driverProfile: driverProfile,
-          businessModel: nextBusinessModel,
-        );
-      }
-      if (batchUpdates.isNotEmpty) {
-        await _rootRef.update(batchUpdates);
-      }
-
-      final sortedKeys = chunk.keys.map((k) => k.toString()).toList()..sort();
-      pageCursor = sortedKeys.last;
-      processed += chunk.length;
-
-      debugPrint(
-        '[AdminPerf] updatePricingConfig driver batch size=${chunk.length} '
-        'processedTotal=$processed elapsedMs=${DateTime.now().millisecondsSinceEpoch - t0}',
-      );
-
-      if (chunk.length < driverBatchSize) {
-        break;
-      }
-    }
-
-    if (processed >= maxDriversToScan) {
-      debugPrint(
-        '[AdminPerf] updatePricingConfig capped at maxDriversToScan=$maxDriversToScan '
-        '(remaining drivers were not updated in this run).',
-      );
-    }
+      'cities': cities
+          .map(
+            (city) => <String, dynamic>{
+              'city': city.city,
+              'baseFareNgn': city.baseFareNgn,
+              'perKmNgn': city.perKmNgn,
+              'perMinuteNgn': city.perMinuteNgn,
+              'minimumFareNgn': city.minimumFareNgn,
+              'enabled': city.enabled,
+            },
+          )
+          .toList(),
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
     debugPrint(
-      '[AdminPerf] updatePricingConfig complete driversProcessed=$processed '
-      'elapsedMs=${DateTime.now().millisecondsSinceEpoch - t0}',
+      '[AdminPerf] updatePricingConfig callable ok '
+      'drivers_processed=${data['drivers_processed'] ?? data['driversProcessed']}',
     );
   }
 
@@ -1896,38 +1767,20 @@ class AdminDataService {
     required AdminSubscriptionRecord subscription,
     required String status,
   }) async {
-    final driverPath = 'drivers/${subscription.driverId}/businessModel';
-    final currentSnapshot = await _rootRef.child(driverPath).get();
-    final currentBusinessModel =
-        normalizedDriverBusinessModel(currentSnapshot.value);
-    final nextBusinessModel = normalizedDriverBusinessModel(
-      <String, dynamic>{
-        ...currentBusinessModel,
-        'selectedModel': 'subscription',
-        'commissionExempt': status == 'active',
-        'commission_exempt': status == 'active',
-        'subscription': <String, dynamic>{
-          ..._map(currentBusinessModel['subscription']),
-          'status': status,
-          'updatedAt': rtdb.ServerValue.timestamp,
-        },
-      },
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminUpdateDriverSubscriptionStatus',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
     );
-
-    final driverSnapshot =
-        await _rootRef.child('drivers/${subscription.driverId}').get();
-    final driverProfile = _map(driverSnapshot.value);
-
-    await _rootRef.update(<String, dynamic>{
-      driverPath: nextBusinessModel,
-      'drivers/${subscription.driverId}/updated_at': rtdb.ServerValue.timestamp,
-      'driver_business_models/${subscription.driverId}':
-          buildDriverBusinessModelAdminPayload(
-        driverId: subscription.driverId,
-        driverProfile: driverProfile,
-        businessModel: nextBusinessModel,
-      ),
+    final result = await callable.call(<String, dynamic>{
+      'driverId': subscription.driverId,
+      'driver_id': subscription.driverId,
+      'status': status,
+      'subscriptionStatus': status,
     });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
   }
 
   Future<void> reviewSubscriptionRequest({
@@ -2196,6 +2049,32 @@ class AdminDataService {
           )
           .toList(growable: false),
     };
+  }
+
+  Future<Map<String, dynamic>> _fetchAppConfigForAdmin({
+    required String adminUid,
+    required String adminEmail,
+  }) async {
+    try {
+      final viaCallable = await fetchAppConfigViaCallable();
+      debugPrint(
+        '[AdminData] app_config loaded via adminGetAppPricingConfig adminUid=$adminUid',
+      );
+      return viaCallable;
+    } catch (error, stackTrace) {
+      debugPrint(
+        '[AdminData] adminGetAppPricingConfig failed; falling back to RTDB app_config: $error',
+      );
+      debugPrintStack(
+        label: '[AdminData] app_config callable fallback stack',
+        stackTrace: stackTrace,
+      );
+      return _safeMapAt(
+        'app_config',
+        adminUid: adminUid,
+        adminEmail: adminEmail,
+      );
+    }
   }
 
   Future<Map<String, dynamic>> _safeMapAt(
