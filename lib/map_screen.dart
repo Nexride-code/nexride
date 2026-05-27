@@ -20,6 +20,7 @@ import 'config/rider_trip_status_messages.dart';
 import 'config/rtdb_ride_request_contract.dart';
 import 'services/call_permissions.dart';
 import 'services/call_service.dart';
+import 'support/call_trace_support.dart';
 import 'services/dispatch_photo_upload_service.dart';
 import 'services/native_places_service.dart';
 import 'services/road_route_service.dart';
@@ -128,7 +129,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final rtdb.DatabaseReference _usersRef = rtdb.FirebaseDatabase.instance.ref(
     'users',
   );
-  final CallService _callService = CallService();
+  final CallService _callService = CallService(callTraceRole: 'rider');
   final CallPermissions _callPermissions = const CallPermissions();
   final RiderAlertSoundService _alertSoundService = RiderAlertSoundService();
   final RiderActiveTripSessionService _activeTripSessionService =
@@ -4903,6 +4904,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
       if (_isIncomingCall(nextSession) &&
           previousStatus != RideCallStatus.ringing) {
+        callTraceLog(
+          'CALL_INCOMING_RECEIVED',
+          rideId: rideId,
+          role: 'rider',
+        );
         _logRideCall(
           'incoming call shown rideId=$rideId caller=${nextSession.callerUid}',
         );
@@ -4975,7 +4981,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required String uid,
   }) async {
     try {
-      _logRideCall('[CALL_JOIN_START] rideId=$rideId');
       await _callService.ensureJoinedVoiceChannel(
         channelId: rideId,
         uid: uid,
@@ -4988,7 +4993,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         ),
       );
       _callJoinedChannel = true;
-      _logRideCall('[CALL_JOIN_OK] rideId=$rideId');
       await _callService.updateParticipantState(
         rideId: rideId,
         uid: uid,
@@ -5150,6 +5154,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _callJoinedChannel = false;
     _removeCallOverlayEntry();
 
+    if (hadVisibleCallState) {
+      callTraceLog(
+        'CALL_END_LOCAL_CLEANUP_OK',
+        rideId: rideId,
+        role: 'rider',
+      );
+    }
+
     if (logCleanup && hadVisibleCallState) {
       _logRideCall('local cleanup completed rideId=$rideId');
     }
@@ -5182,6 +5194,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     _setStartingVoiceCall(true);
     try {
+      callTraceLog('CALL_START_TAP', rideId: rideId, role: 'rider');
       _logRideCall('RIDE_CALL_START rideId=$rideId initiator=rider');
       if (_currentCallSession != null && !_currentCallSession!.isTerminal) {
         _refreshCallOverlayEntry();
@@ -5251,6 +5264,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
+    callTraceLog('CALL_ACCEPT_TAP', rideId: session.rideId, role: 'rider');
+
     if (!_callService.hasRtcConfiguration) {
       _logRideCall('[CALL_CONFIG_MISSING] rideId=${session.rideId}');
       _showSnackBar(_callService.unavailableUserMessage);
@@ -5298,6 +5313,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
+    callTraceLog('CALL_END_TAP', rideId: session.rideId, role: 'rider');
+
     await _callService.declineCall(
       rideId: session.rideId,
       endedBy: 'rider',
@@ -5311,6 +5328,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
+    callTraceLog('CALL_END_TAP', rideId: session.rideId, role: 'rider');
+
     await _callService.cancelOutgoingCall(
       rideId: session.rideId,
       endedBy: 'rider',
@@ -5323,6 +5342,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (session == null || !session.isAccepted) {
       return;
     }
+
+    callTraceLog('CALL_END_TAP', rideId: session.rideId, role: 'rider');
 
     await _callService.endAcceptedCall(
       rideId: session.rideId,

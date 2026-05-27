@@ -26,6 +26,7 @@ import '../services/rollout_catalog_hydration.dart';
 import '../services/driver_rollout_profile_store.dart';
 import '../services/call_permissions.dart';
 import '../services/call_service.dart';
+import '../support/call_trace_support.dart';
 import '../services/dispatch_photo_upload_service.dart';
 import '../services/driver_alert_sound_service.dart';
 import '../services/local_backend_simulation_service.dart';
@@ -281,7 +282,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       rtdb.FirebaseDatabase.instance.ref('ride_requests');
   final rtdb.DatabaseReference _driversRef =
       rtdb.FirebaseDatabase.instance.ref('drivers');
-  final CallService _callService = CallService();
+  final CallService _callService = CallService(callTraceRole: 'driver');
   final CallPermissions _callPermissions = const CallPermissions();
   final ImagePicker _dispatchPhotoPicker = ImagePicker();
   final DispatchPhotoUploadService _dispatchPhotoUploadService =
@@ -5790,6 +5791,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
       if (_isIncomingCall(nextSession) &&
           previousStatus != RideCallStatus.ringing) {
+        callTraceLog(
+          'CALL_INCOMING_RECEIVED',
+          rideId: rideId,
+          role: 'driver',
+        );
         _logRideCall(
           'incoming call shown rideId=$rideId caller=${nextSession.callerUid}',
         );
@@ -5867,7 +5873,6 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     try {
-      _logRideCall('[CALL_JOIN_START] rideId=$rideId');
       await _callService.ensureJoinedVoiceChannel(
         channelId: rideId,
         uid: uid,
@@ -5875,7 +5880,6 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         muted: _callMuted,
       );
       _callJoinedChannel = true;
-      _logRideCall('[CALL_JOIN_OK] rideId=$rideId');
       await _updateParticipantStateSafely(
         source: 'join_accepted_call',
         rideId: rideId,
@@ -6040,6 +6044,14 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _callJoinedChannel = false;
     _removeCallOverlayEntry();
 
+    if (hadVisibleCallState) {
+      callTraceLog(
+        'CALL_END_LOCAL_CLEANUP_OK',
+        rideId: rideId,
+        role: 'driver',
+      );
+    }
+
     if (logCleanup && hadVisibleCallState) {
       _logRideCall('local cleanup completed rideId=$rideId');
     }
@@ -6077,6 +6089,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
     _setStartingVoiceCall(true);
     try {
+      callTraceLog('CALL_START_TAP', rideId: rideId, role: 'driver');
       _logRideCall('[CALL_START] rideId=$rideId initiator=driver');
       if (_currentCallSession != null && !_currentCallSession!.isTerminal) {
         _refreshCallOverlayEntry();
@@ -6160,6 +6173,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return;
     }
 
+    callTraceLog('CALL_ACCEPT_TAP', rideId: session.rideId, role: 'driver');
+
     if (!_callService.hasRtcConfiguration) {
       _logRideCall('[CALL_CONFIG_MISSING] rideId=${session.rideId}');
       _showSnackBarSafely(
@@ -6227,6 +6242,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return;
     }
 
+    callTraceLog('CALL_END_TAP', rideId: session.rideId, role: 'driver');
+
     await _callService.declineCall(
       rideId: session.rideId,
       endedBy: 'driver',
@@ -6242,6 +6259,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return;
     }
 
+    callTraceLog('CALL_END_TAP', rideId: session.rideId, role: 'driver');
+
     await _callService.cancelOutgoingCall(
       rideId: session.rideId,
       endedBy: 'driver',
@@ -6256,6 +6275,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         !_canWriteParticipantStateForSession(session)) {
       return;
     }
+
+    callTraceLog('CALL_END_TAP', rideId: session.rideId, role: 'driver');
 
     await _callService.endAcceptedCall(
       rideId: session.rideId,

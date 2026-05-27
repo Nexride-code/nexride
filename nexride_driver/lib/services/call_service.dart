@@ -4,6 +4,7 @@ import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/foundation.dart';
 
+import '../support/call_trace_support.dart';
 import '../support/realtime_database_error_support.dart';
 import 'ride_cloud_functions_service.dart';
 
@@ -207,9 +208,12 @@ class CallService {
   CallService({
     rtdb.FirebaseDatabase? database,
     String? agoraAppId,
+    String callTraceRole = '',
   })  : _database = database ?? rtdb.FirebaseDatabase.instance,
-        _defaultAgoraAppId = _resolveAgoraAppId(agoraAppId);
+        _defaultAgoraAppId = _resolveAgoraAppId(agoraAppId),
+        _callTraceRole = callTraceRole.trim();
 
+  final String _callTraceRole;
   final rtdb.FirebaseDatabase _database;
   final String _defaultAgoraAppId;
   String? _callableAgoraAppId;
@@ -238,6 +242,7 @@ class CallService {
   int _reconnectAttempt = 0;
   Timer? _reconnectTimer;
   Timer? _reconnectWatchdogTimer;
+  DateTime? _joinAttemptStartedAt;
   Timer? _joinWatchdogTimer;
   String? _joinedChannelId;
   String? _cachedTokenChannelId;
@@ -304,6 +309,50 @@ class CallService {
       return normalizedRideId;
     }
     return '${_agoraChannelPrefix}_$normalizedRideId';
+  }
+
+  void _callTrace(
+    String event, {
+    required String rideId,
+    String? channel,
+    String? uid,
+    int? remoteUid,
+    String? error,
+    int? elapsedMs,
+    bool? speakerOn,
+    bool? muted,
+  }) {
+    if (_callTraceRole.isEmpty) {
+      return;
+    }
+    callTraceLog(
+      event,
+      rideId: rideId,
+      role: _callTraceRole,
+      channel: channel ?? _activeTraceChannel(rideId),
+      uid: uid ?? _lastJoinRequest?.uid,
+      remoteUid: remoteUid,
+      error: error,
+      elapsedMs: elapsedMs,
+      speakerOn: speakerOn,
+      muted: muted,
+    );
+  }
+
+  String? _activeTraceChannel(String rideId) {
+    final joinChannel = _lastJoinRequest?.agoraChannelId.trim();
+    if (joinChannel != null && joinChannel.isNotEmpty) {
+      return joinChannel;
+    }
+    final callable = _callableAgoraChannelName?.trim();
+    if (callable != null && callable.isNotEmpty) {
+      return callable;
+    }
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return null;
+    }
+    return channelForRide(normalizedRideId);
   }
 
   Stream<rtdb.DatabaseEvent> observeCall(String rideId) {
@@ -417,6 +466,10 @@ class CallService {
       );
     }
 
+    if (transaction.committed) {
+      _callTrace('CALL_SIGNAL_WRITE_OK', rideId: normalizedRideId);
+    }
+
     return OutgoingCallRequestResult(
       created: transaction.committed,
       session: await fetchCall(normalizedRideId),
@@ -424,7 +477,7 @@ class CallService {
   }
 
   Future<bool> acceptCall({required String rideId, String? receiverId}) async {
-    return _transitionCallStatus(
+    final committed = await _transitionCallStatus(
       rideId: rideId,
       nextStatus: 'accepted',
       allowedStatuses: const <String>{'calling', 'ringing'},
@@ -432,6 +485,10 @@ class CallService {
       requiredParticipantId: receiverId,
       setAcceptedAt: true,
     );
+    if (committed) {
+      _callTrace('CALL_SIGNAL_WRITE_OK', rideId: rideId);
+    }
+    return committed;
   }
 
   Future<void> declineCall({
@@ -439,7 +496,7 @@ class CallService {
     required String endedBy,
     String? receiverId,
   }) async {
-    await _transitionCallStatus(
+    final committed = await _transitionCallStatus(
       rideId: rideId,
       nextStatus: 'declined',
       endedBy: endedBy,
@@ -447,6 +504,9 @@ class CallService {
       requiredParticipantId: receiverId,
       allowedStatuses: const <String>{'calling', 'ringing'},
     );
+    if (committed) {
+      _callTrace('CALL_END_RTDB_OK', rideId: rideId);
+    }
   }
 
   Future<void> cancelOutgoingCall({
@@ -454,7 +514,7 @@ class CallService {
     required String endedBy,
     String? callerId,
   }) async {
-    await _transitionCallStatus(
+    final committed = await _transitionCallStatus(
       rideId: rideId,
       nextStatus: 'cancelled',
       endedBy: endedBy,
@@ -462,30 +522,39 @@ class CallService {
       requiredParticipantId: callerId,
       allowedStatuses: const <String>{'calling', 'ringing'},
     );
+    if (committed) {
+      _callTrace('CALL_END_RTDB_OK', rideId: rideId);
+    }
   }
 
   Future<void> endAcceptedCall({
     required String rideId,
     required String endedBy,
   }) async {
-    await _transitionCallStatus(
+    final committed = await _transitionCallStatus(
       rideId: rideId,
       nextStatus: 'ended',
       endedBy: endedBy,
       allowedStatuses: const <String>{'accepted'},
     );
+    if (committed) {
+      _callTrace('CALL_END_RTDB_OK', rideId: rideId);
+    }
   }
 
   Future<void> endCallForRideLifecycle({
     required String rideId,
     required String endedBy,
   }) async {
-    await _transitionCallStatus(
+    final committed = await _transitionCallStatus(
       rideId: rideId,
       nextStatus: 'ended',
       endedBy: endedBy,
       allowedStatuses: const <String>{'calling', 'ringing', 'accepted'},
     );
+    if (committed) {
+      _callTrace('CALL_END_RTDB_OK', rideId: rideId);
+    }
   }
 
   Future<void> markMissedIfUnanswered({required String rideId}) async {
@@ -705,25 +774,52 @@ class CallService {
       muted: muted,
     );
 
-    debugPrint('[CALL_JOIN_START] rideId=$normalizedRide');
+    _joinAttemptStartedAt = DateTime.now();
+    _callTrace(
+      'CALL_JOIN_START',
+      rideId: normalizedRide,
+      channel: _lastJoinRequest?.agoraChannelId,
+      uid: uid,
+    );
     debugPrint('[CALL_SERVICE] using agora appId: $desiredAgoraAppId');
     _setPhase(AgoraConnectionPhase.connecting);
 
     try {
       await _engine!.setEnableSpeakerphone(speakerOn);
       await _engine!.muteLocalAudioStream(muted);
+      _callTrace(
+        'CALL_AUDIO_ROUTE',
+        rideId: normalizedRide,
+        speakerOn: speakerOn,
+        muted: muted,
+      );
       await _joinChannelWithToken(token: token, request: _lastJoinRequest!);
       _joinWatchdogTimer?.cancel();
       _joinWatchdogTimer = Timer(const Duration(seconds: 15), () {
         if (_connectionState != ConnectionStateType.connectionStateConnected) {
           const failureMessage = 'Could not connect call. Please try again.';
           _lastAgoraErrorMessage = failureMessage;
-          debugPrint('[CALL_JOIN_TIMEOUT] rideId=$normalizedRide');
+          final startedAt = _joinAttemptStartedAt;
+          _callTrace(
+            'CALL_JOIN_TIMEOUT',
+            rideId: normalizedRide,
+            channel: _lastJoinRequest?.agoraChannelId,
+            uid: uid,
+            elapsedMs: startedAt == null
+                ? null
+                : DateTime.now().difference(startedAt).inMilliseconds,
+          );
           _setPhase(AgoraConnectionPhase.failed, error: failureMessage);
         }
       });
     } catch (error) {
-      debugPrint('[CALL_JOIN_FAIL] rideId=$normalizedRide error=$error');
+      _callTrace(
+        'CALL_JOIN_FAIL',
+        rideId: normalizedRide,
+        channel: _lastJoinRequest?.agoraChannelId,
+        uid: uid,
+        error: error.toString(),
+      );
       _setPhase(
         AgoraConnectionPhase.failed,
         error: 'Could not connect call. Please try again.',
@@ -764,6 +860,15 @@ class CallService {
     }
     await _engine!.muteLocalAudioStream(muted);
     _updateJoinRequest(muted: muted);
+    final rideId = _lastJoinRequest?.rideId ?? '';
+    if (rideId.isNotEmpty) {
+      _callTrace(
+        'CALL_AUDIO_ROUTE',
+        rideId: rideId,
+        muted: muted,
+        speakerOn: _lastJoinRequest?.speakerOn,
+      );
+    }
   }
 
   Future<void> setSpeakerOn(bool enabled) async {
@@ -772,6 +877,15 @@ class CallService {
     }
     await _engine!.setEnableSpeakerphone(enabled);
     _updateJoinRequest(speakerOn: enabled);
+    final rideId = _lastJoinRequest?.rideId ?? '';
+    if (rideId.isNotEmpty) {
+      _callTrace(
+        'CALL_AUDIO_ROUTE',
+        rideId: rideId,
+        speakerOn: enabled,
+        muted: _lastJoinRequest?.muted,
+      );
+    }
   }
 
   Future<void> dispose() async {
@@ -834,7 +948,12 @@ class CallService {
       return _cachedToken;
     }
 
-    debugPrint('RIDE_CALL_TOKEN_REQUEST rideId=$rideId uid=$agoraUid');
+    _callTrace(
+      'CALL_TOKEN_REQUEST_START',
+      rideId: rideId,
+      channel: channelForRide(rideId),
+      uid: agoraUid,
+    );
     debugPrint('[CALL_SERVICE] invoking getRideCallRtcToken rideId=$rideId');
 
     Future<Map<String, dynamic>> requestToken({required bool force}) {
@@ -890,7 +1009,12 @@ class CallService {
         _cachedTokenUserId = normalizedUserId;
         _cachedToken = token;
 
-        debugPrint('RIDE_CALL_TOKEN_SUCCESS rideId=$rideId source=callable');
+        _callTrace(
+          'CALL_TOKEN_REQUEST_OK',
+          rideId: rideId,
+          channel: _callableAgoraChannelName ?? channelForRide(rideId),
+          uid: (_joinRtcUidOverride ?? _cachedJoinRtcUid)?.toString() ?? agoraUid,
+        );
         return token;
       }
 
@@ -976,7 +1100,6 @@ class CallService {
     final engine = _engine ?? createAgoraRtcEngine();
     final handler = RtcEngineEventHandler(
       onJoinChannelSuccess: (connection, elapsed) {
-        debugPrint('[CALL_JOINED] elapsed=${elapsed}ms');
         final agoraCh = connection.channelId?.trim() ?? '';
         if (agoraCh.isNotEmpty) {
           _joinedChannelId = agoraCh;
@@ -987,13 +1110,20 @@ class CallService {
           _joinWatchdogTimer?.cancel();
           _joinWatchdogTimer = null;
           _setPhase(AgoraConnectionPhase.connected);
+          final firebaseRide = _lastJoinRequest?.rideId ?? '';
+          _callTrace(
+            'CALL_JOIN_OK',
+            rideId: firebaseRide,
+            channel: agoraCh,
+            uid: _lastJoinRequest?.uid,
+            elapsedMs: elapsed,
+          );
           unawaited(
             _syncRtcParticipantState(
               joined: true,
               connectionState: 'connected',
             ),
           );
-          final firebaseRide = _lastJoinRequest?.rideId ?? '';
           debugPrint(
             '[RideCall] join success rideId=$firebaseRide agoraChannel=$agoraCh',
           );
@@ -1169,7 +1299,16 @@ class CallService {
         debugPrint('[RideCall] agora error code=$err message=$msg');
       },
       onUserJoined: (connection, remoteUid, elapsed) {
-        debugPrint('[CALL_REMOTE_JOINED] uid=$remoteUid');
+        final firebaseRide = _lastJoinRequest?.rideId ?? '';
+        if (firebaseRide.isNotEmpty) {
+          _callTrace(
+            'CALL_REMOTE_JOINED',
+            rideId: firebaseRide,
+            channel: connection.channelId,
+            remoteUid: remoteUid,
+            elapsedMs: elapsed,
+          );
+        }
       },
       onUserOffline: (connection, remoteUid, reason) {
         debugPrint('[CALL_REMOTE_LEFT] uid=$remoteUid reason=$reason');
