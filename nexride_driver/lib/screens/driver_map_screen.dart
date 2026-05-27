@@ -6419,112 +6419,80 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     final isIncoming = _isIncomingCall(session);
     final isOutgoing = _isOutgoingCall(session);
     final title = _riderName.isEmpty ? 'Rider' : _riderName;
-    final subtitle = isIncoming
-        ? 'Incoming call'
-        : isOutgoing
-            ? 'Calling...'
-            : _formatCallDuration(_callDuration);
+    final subtitle = isOutgoing
+        ? 'Calling...'
+        : _formatCallDuration(_callDuration);
 
-    if (isIncoming) {
+    if (isIncoming && !session.isAccepted) {
       return Material(
-        color: const Color(0xFF08111F),
+        color: Colors.transparent,
         child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 28, 24, 34),
-            child: Column(
-              children: [
-                Row(
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxWidth: 520),
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF111827),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: _gold.withValues(alpha: 0.35)),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x44000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 7,
+                    Text(
+                      'Incoming ride call',
+                      style: TextStyle(
+                        color: _gold.withValues(alpha: 0.95),
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
                       ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(999),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 20,
                       ),
-                      child: const Text(
-                        'Incoming ride call',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontWeight: FontWeight.w600,
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildCallActionButton(
+                            label: 'Decline',
+                            icon: Icons.call_end_rounded,
+                            backgroundColor: const Color(0xFFE85D4C),
+                            onPressed: _declineIncomingCall,
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _buildCallActionButton(
+                            label: 'Accept',
+                            icon: Icons.call_rounded,
+                            backgroundColor: const Color(0xFF22A45D),
+                            onPressed: _acceptIncomingCall,
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
-                const Spacer(),
-                Container(
-                  width: 110,
-                  height: 110,
-                  decoration: BoxDecoration(
-                    color: _gold.withValues(alpha: 0.18),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: _gold.withValues(alpha: 0.45),
-                      width: 1.5,
-                    ),
-                  ),
-                  child: Icon(
-                    Icons.call_rounded,
-                    size: 46,
-                    color: _gold,
-                  ),
-                ),
-                const SizedBox(height: 28),
-                Text(
-                  title,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontSize: 30,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  subtitle,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white70,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Ride ID: ${session.rideId}',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white.withValues(alpha: 0.48),
-                  ),
-                ),
-                const Spacer(),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _buildCallActionButton(
-                        label: 'Decline',
-                        icon: Icons.call_end_rounded,
-                        backgroundColor: const Color(0xFFE85D4C),
-                        onPressed: _declineIncomingCall,
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: _buildCallActionButton(
-                        label: 'Accept',
-                        icon: Icons.call_rounded,
-                        backgroundColor: const Color(0xFF22A45D),
-                        onPressed: _acceptIncomingCall,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+              ),
             ),
           ),
         ),
@@ -6532,7 +6500,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     return Material(
-      color: Colors.black.withValues(alpha: 0.58),
+      color: const Color(0xFF08111F),
       child: SafeArea(
         child: Center(
           child: Padding(
@@ -14402,8 +14370,81 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     );
   }
 
+  String? _resolvedActiveCancelRideId() {
+    final candidates = <String?>[
+      _currentRideId,
+      _valueAsText(_currentRideData?['rideId']).isEmpty
+          ? null
+          : _valueAsText(_currentRideData?['rideId']),
+      _valueAsText(_currentRideData?['ride_id']).isEmpty
+          ? null
+          : _valueAsText(_currentRideData?['ride_id']),
+      _driverActiveRideId,
+      _sessionTrackedRideId,
+      _activeRideListenerRideId,
+      _callListenerRideId,
+    ];
+    for (final candidate in candidates) {
+      final rideId = candidate?.trim();
+      if (rideId != null && rideId.isNotEmpty && _isValidRideId(rideId)) {
+        return rideId;
+      }
+    }
+    return null;
+  }
+
+  Future<String?> _resolveCancelRideIdForDriver() async {
+    final localRideId = _resolvedActiveCancelRideId();
+    if (localRideId != null) {
+      return localRideId;
+    }
+    final driverId = _effectiveDriverId.trim();
+    if (driverId.isEmpty) {
+      return null;
+    }
+    try {
+      final snapshot =
+          await _driversRef.root.child('driver_active_ride/$driverId').get();
+      final marker = _asStringDynamicMap(snapshot.value);
+      final pointerRideId = _valueAsText(
+        marker?['ride_id'] ?? marker?['rideId'],
+      );
+      if (pointerRideId.isNotEmpty && _isValidRideId(pointerRideId)) {
+        return pointerRideId;
+      }
+    } catch (error) {
+      _log('driver cancel rideId resolve pointer failed error=$error');
+    }
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _fetchRideRequestForCancel(String rideId) async {
+    try {
+      final snapshot = await _rideRequestsRef.child(rideId).get();
+      return _asStringDynamicMap(snapshot.value);
+    } catch (error) {
+      _log('driver cancel ride fetch failed rideId=$rideId error=$error');
+      return null;
+    }
+  }
+
+  bool _rideDataIsNonTerminalForCancel(Map<String, dynamic>? rideData) {
+    if (rideData == null || rideData.isEmpty) {
+      return false;
+    }
+    final canonical = TripStateMachine.canonicalStateFromSnapshot(rideData);
+    return !TripStateMachine.isTerminal(canonical);
+  }
+
   Future<void> cancelActiveRide() async {
-    final currentRideId = _currentRideId;
+    final currentRideId = await _resolveCancelRideIdForDriver();
+    if (currentRideId != null &&
+        _currentRideId != currentRideId &&
+        mounted) {
+      _setStateSafely(() {
+        _currentRideId = currentRideId;
+      });
+    }
     final serviceType = _serviceTypeKey(_currentRideData?['service_type']);
     final invalidReason = currentRideId == null
         ? 'missing_ride_id'
@@ -14460,10 +14501,48 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     );
 
     try {
-      final cloud = await _rideCloud.cancelRideRequest(
+      var cloud = await _rideCloud.cancelRideRequest(
         rideId: currentRideId,
         cancelReason: cancelReason.trim(),
       );
+      if (!rideCallableSucceeded(cloud)) {
+        final failReason = rideCallableReason(cloud).trim().toLowerCase();
+        if (failReason == 'ride_missing') {
+          final refreshedRide = await _fetchRideRequestForCancel(currentRideId);
+          if (_rideDataIsNonTerminalForCancel(refreshedRide)) {
+            _log(
+              '[CANCEL] actor=driver rideId=$currentRideId '
+              'retry after ride_missing refresh',
+            );
+            cloud = await _rideCloud.cancelRideRequest(
+              rideId: currentRideId,
+              cancelReason: cancelReason.trim(),
+            );
+          } else {
+            await _commitRideAndDriverState(
+              rideId: currentRideId,
+              rideUpdates: const <String, dynamic>{},
+              driverUpdates: _buildDriverPresenceUpdate(
+                status: 'idle',
+                isAvailable: true,
+              ),
+              clearActiveRide: true,
+            );
+            await _clearActiveRideState(
+              reason: 'cancel_ride_missing',
+              resetTripState: true,
+            );
+            _showSnackBarSafely(
+              const SnackBar(
+                content: Text(
+                  'Trip is no longer active. You are back online.',
+                ),
+              ),
+            );
+            return;
+          }
+        }
+      }
       if (!rideCallableSucceeded(cloud)) {
         _showSnackBarSafely(
           SnackBar(

@@ -363,8 +363,8 @@ class CallService {
   }
 
   Stream<rtdb.DatabaseEvent> observeCallsForReceiver(String receiverId) {
-    // Prefer observeCall(rideId): root /calls queries are denied for clients.
-    return _callsByReceiverQuery(receiverId.trim()).onValue;
+    // Root /calls queries are denied — use observeCall(rideId) instead.
+    return const Stream<rtdb.DatabaseEvent>.empty();
   }
 
   Future<RideCallSession?> fetchCall(String rideId) async {
@@ -389,16 +389,8 @@ class CallService {
   }
 
   Future<List<RideCallSession>> fetchCallsForReceiver(String receiverId) async {
-    final normalizedReceiverId = receiverId.trim();
-    final snapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
-      source: 'call_service.fetch_calls_for_receiver',
-      path: 'calls[orderByChild=receiverId,equalTo=$normalizedReceiverId]',
-      action: () => _callsByReceiverQuery(normalizedReceiverId).get(),
-    );
-    if (snapshot == null) {
-      return const <RideCallSession>[];
-    }
-    return RideCallSession.listFromCollectionValue(snapshot.value);
+    // Root /calls queries are denied — callers must use fetchCall(rideId).
+    return const <RideCallSession>[];
   }
 
   Future<void> prefetchAgoraToken({
@@ -431,7 +423,6 @@ class CallService {
         : normalizedDriverId;
 
     await _keepRideCallSynced(normalizedRideId);
-    await _keepReceiverCallsSynced(receiverId);
 
     final payload = <String, Object?>{
       'ride_id': normalizedRideId,
@@ -974,11 +965,10 @@ class CallService {
       debugPrint('[CALL_SERVICE] callable response: $responseMap');
       final firstReason = responseMap['reason']?.toString().trim() ?? '';
       if (firstReason == 'call_already_active') {
-        await RiderRideCloudFunctionsService.instance
-            .clearStaleRideCall(rideId: rideId)
-            .timeout(const Duration(seconds: 30));
         responseMap = await requestToken(force: true);
-        debugPrint('[CALL_SERVICE] callable retry response: $responseMap');
+        debugPrint(
+          '[CALL_SERVICE] callable retry (force) response: $responseMap',
+        );
       }
 
       final ok = responseMap['success'] == true;
@@ -1626,20 +1616,7 @@ class CallService {
   }
 
   Future<void> _keepReceiverCallsSynced(String receiverId) async {
-    final normalizedReceiverId = receiverId.trim();
-    if (normalizedReceiverId.isEmpty ||
-        !_syncedReceiverIds.add(normalizedReceiverId)) {
-      return;
-    }
-
-    try {
-      await _callsByReceiverQuery(normalizedReceiverId).keepSynced(true);
-    } catch (error) {
-      _syncedReceiverIds.remove(normalizedReceiverId);
-      debugPrint(
-        '[RideCall] keepSynced failed receiverId=$normalizedReceiverId error=$error',
-      );
-    }
+    // No-op: root /calls keepSynced is denied; ride-scoped sync only.
   }
 }
 

@@ -66,12 +66,74 @@ function isCallRecordStale(record, nowMsValue) {
   return nowMsValue - baseline > CALL_STALE_MS;
 }
 
+function callRecordInvolvesUid(record, uid) {
+  if (!record || typeof record !== "object" || !uid) {
+    return false;
+  }
+  const ids = [
+    record.callerId,
+    record.caller_id,
+    record.receiverId,
+    record.receiver_id,
+    record.rider_id,
+    record.riderId,
+    record.driver_id,
+    record.driverId,
+    record.started_by,
+    record.startedBy,
+  ];
+  return ids.some((raw) => normUid(raw) === uid);
+}
+
+function sameRideCalleeMayJoinActiveCall({ record, caller, rider, driver }) {
+  if (!record || typeof record !== "object") {
+    return false;
+  }
+  if (!isActiveCallStatus(record.status)) {
+    return false;
+  }
+  if (caller !== rider && caller !== driver) {
+    return false;
+  }
+  return callRecordInvolvesUid(record, rider) && callRecordInvolvesUid(record, driver);
+}
+
+async function hasActiveCallOnOtherRide({ db, rideId, caller, rider, driver }) {
+  const snap = await db.ref("active_calls").get();
+  const all = snap.val();
+  if (!all || typeof all !== "object") {
+    return false;
+  }
+  const now = Date.now();
+  for (const [otherRideId, record] of Object.entries(all)) {
+    if (otherRideId === rideId || !record || typeof record !== "object") {
+      continue;
+    }
+    if (!isActiveCallStatus(record.status) || isCallRecordStale(record, now)) {
+      continue;
+    }
+    if (!callRecordInvolvesUid(record, caller)) {
+      continue;
+    }
+    console.log(
+      "CALL_RECORD_ACTIVE_OTHER_RIDE",
+      `rideId=${rideId}`,
+      `otherRideId=${otherRideId}`,
+      `caller=${caller || "none"}`,
+    );
+    return true;
+  }
+  return false;
+}
+
 async function clearCallLocksIfNeeded({
   db,
   rideId,
   force,
   forceClearStale,
   caller,
+  rider,
+  driver,
 }) {
   const now = Date.now();
   const nodes = [`calls/${rideId}`, `ride_calls/${rideId}`, `active_calls/${rideId}`];
@@ -101,6 +163,16 @@ async function clearCallLocksIfNeeded({
     }
 
     if (active) {
+      if (sameRideCalleeMayJoinActiveCall({ record: value, caller, rider, driver })) {
+        console.log(
+          "CALL_RECORD_JOIN_ALLOWED",
+          `rideId=${rideId}`,
+          `path=${path}`,
+          `status=${String(value.status ?? "")}`,
+          `caller=${caller || "none"}`,
+        );
+        continue;
+      }
       blockedByActiveCall = true;
       console.log(
         "CALL_RECORD_ACTIVE",
@@ -196,9 +268,22 @@ async function getRideCallRtcToken(data, context, db) {
     force,
     forceClearStale,
     caller,
+    rider,
+    driver,
   });
   if (callLockResult.blockedByActiveCall) {
     console.log("CALL_TOKEN_DENIED", rideId, "call_already_active");
+    return { success: false, reason: "call_already_active" };
+  }
+  const blockedOtherRide = await hasActiveCallOnOtherRide({
+    db,
+    rideId,
+    caller,
+    rider,
+    driver,
+  });
+  if (blockedOtherRide) {
+    console.log("CALL_TOKEN_DENIED", rideId, "call_already_active", "other_ride");
     return { success: false, reason: "call_already_active" };
   }
 

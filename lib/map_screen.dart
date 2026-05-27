@@ -5493,36 +5493,40 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }) {
     final isIncoming = _isIncomingCall(session);
     final isOutgoing = _isOutgoingCall(session);
+    if (isIncoming && !session.isAccepted) {
+      return _buildIncomingCallTopBanner(session: session);
+    }
+
     final title = _currentDriverNameForRide;
     final isFailed = phase == AgoraConnectionPhase.failed;
     final isReconnecting = phase == AgoraConnectionPhase.reconnecting;
     final isConnecting = phase == AgoraConnectionPhase.connecting ||
         (session.isAccepted && phase != AgoraConnectionPhase.connected);
-    final subtitle = isIncoming
-        ? 'Incoming call'
-        : isOutgoing
-            ? 'Calling...'
-            : isFailed
-                ? (phaseError ?? 'Could not connect call. Please try again.')
-                : isReconnecting
-                    ? 'Reconnecting...'
-                    : isConnecting
-                        ? 'Connecting...'
-                        : _formatCallDuration(_callDuration);
+    final subtitle = isOutgoing
+        ? 'Calling...'
+        : isFailed
+            ? (phaseError ?? 'Could not connect call. Please try again.')
+            : isReconnecting
+                ? 'Reconnecting...'
+                : isConnecting
+                    ? 'Connecting...'
+                    : _formatCallDuration(_callDuration);
 
     return Material(
-      color: Colors.black.withValues(alpha: 0.56),
+      color: const Color(0xFF08111F),
       child: SafeArea(
         child: Center(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 360),
+              constraints: const BoxConstraints(maxWidth: 420),
               child: Container(
                 padding: const EdgeInsets.fromLTRB(24, 24, 24, 22),
                 decoration: BoxDecoration(
-                  color: Colors.white,
+                  color: const Color(0xFF111827),
                   borderRadius: BorderRadius.circular(28),
+                  border:
+                      Border.all(color: Colors.white.withValues(alpha: 0.08)),
                   boxShadow: const [
                     BoxShadow(
                       color: Color(0x33000000),
@@ -5538,7 +5542,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                       width: 76,
                       height: 76,
                       decoration: BoxDecoration(
-                        color: const Color(0xFFF6E7CF),
+                        color: _gold.withValues(alpha: 0.18),
                         borderRadius: BorderRadius.circular(24),
                       ),
                       child: const Icon(
@@ -5554,7 +5558,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                       style: const TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.w800,
-                        color: Colors.black87,
+                        color: Colors.white,
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -5569,33 +5573,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                             : (session.isAccepted &&
                                     phase == AgoraConnectionPhase.connected)
                                 ? _gold
-                                : Colors.black54,
+                                : Colors.white70,
                       ),
                     ),
                     const SizedBox(height: 24),
-                    if (isIncoming)
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _buildCallActionButton(
-                              label: 'Decline',
-                              icon: Icons.call_end_rounded,
-                              backgroundColor: const Color(0xFFE85D4C),
-                              onPressed: _declineIncomingCall,
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: _buildCallActionButton(
-                              label: 'Accept',
-                              icon: Icons.call_rounded,
-                              backgroundColor: const Color(0xFF22A45D),
-                              onPressed: _acceptIncomingCall,
-                            ),
-                          ),
-                        ],
-                      )
-                    else if (isOutgoing)
+                    if (isOutgoing)
                       SizedBox(
                         width: double.infinity,
                         child: _buildCallActionButton(
@@ -5637,6 +5619,83 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                       ),
                   ],
                 ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIncomingCallTopBanner({required RideCallSession session}) {
+    final title = _currentDriverNameForRide;
+    return Material(
+      color: Colors.transparent,
+      child: SafeArea(
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: Container(
+              width: double.infinity,
+              constraints: const BoxConstraints(maxWidth: 520),
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF111827),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: _gold.withValues(alpha: 0.35)),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x44000000),
+                    blurRadius: 18,
+                    offset: Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Incoming call',
+                    style: TextStyle(
+                      color: _gold.withValues(alpha: 0.95),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 20,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _buildCallActionButton(
+                          label: 'Decline',
+                          icon: Icons.call_end_rounded,
+                          backgroundColor: const Color(0xFFE85D4C),
+                          onPressed: _declineIncomingCall,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: _buildCallActionButton(
+                          label: 'Accept',
+                          icon: Icons.call_rounded,
+                          backgroundColor: const Color(0xFF22A45D),
+                          onPressed: _acceptIncomingCall,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
