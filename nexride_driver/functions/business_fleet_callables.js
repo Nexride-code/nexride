@@ -2,15 +2,36 @@
 
 const crypto = require("crypto");
 const admin = require("firebase-admin");
+const { FieldValue } = require("firebase-admin/firestore");
 const { normUid } = require("./admin_auth");
 const { writeAdminAuditLog } = require("./admin_audit_log");
 const merchantVerification = require("./merchant/merchant_verification");
 
 const DISPATCH_VEHICLE_TYPES = new Set(["bike", "car", "van"]);
 const OWNERSHIP_MODES = new Set(["individual", "business_managed"]);
+const ACCOUNT_KIND_DISPATCH_FLEET = "dispatch_fleet";
+const FLEET_OWNER_INDEX_ROOT = "dispatch_fleet_owner_index";
+/** @type {import("firebase-admin/firestore").Firestore | null} */
+let firestoreOverrideForTests = null;
+const FLEET_BLOCKING_STATUSES = new Set([
+  "pending",
+  "pending_review",
+  "approved",
+  "suspended",
+  "rejected",
+]);
 
 function nowMs() {
   return Date.now();
+}
+
+function resolveFirestore() {
+  return firestoreOverrideForTests || admin.firestore();
+}
+
+/** @param {import("firebase-admin/firestore").Firestore | null} fs */
+function setFirestoreForTests(fs) {
+  firestoreOverrideForTests = fs;
 }
 
 function trimStr(v, max = 200) {
@@ -27,6 +48,45 @@ function normalizeOwnershipMode(v) {
   return OWNERSHIP_MODES.has(s) ? s : "";
 }
 
+function isDispatchFleetAccount(m) {
+  return (
+    trimStr(m?.account_kind ?? m?.accountKind, 64).toLowerCase() ===
+    ACCOUNT_KIND_DISPATCH_FLEET
+  );
+}
+
+function merchantStatusOf(m) {
+  return trimStr(m?.merchant_status ?? m?.status, 40).toLowerCase();
+}
+
+function verificationStatusOf(m) {
+  return trimStr(m?.verification_status, 64).toLowerCase();
+}
+
+/**
+ * Fleet may create driver invites only when business + verification are approved.
+ * @param {Record<string, unknown> | null | undefined} m
+ */
+function fleetAccountApprovedForInvites(m) {
+  if (!m || typeof m !== "object") {
+    return false;
+  }
+  if (!isDispatchFleetAccount(m)) {
+    return false;
+  }
+  if (merchantStatusOf(m) !== "approved") {
+    return false;
+  }
+  const vs = verificationStatusOf(m);
+  if (vs === "approved") {
+    return true;
+  }
+  if (m.required_documents_complete === true && (vs === "docs_complete" || vs === "approved")) {
+    return true;
+  }
+  return false;
+}
+
 function buildInviteCode() {
   const raw = crypto.randomBytes(8).toString("hex").toUpperCase();
   return `NXR-${raw}`;
@@ -34,6 +94,170 @@ function buildInviteCode() {
 
 function inviteRef(db, inviteCode) {
   return db.ref(`business_driver_invites/${inviteCode}`);
+}
+
+/**
+ * @param {import("firebase-admin/database").Database} db
+ * @param {string} ownerUid
+ */
+function fleetOwnerIndexRef(db, ownerUid) {
+  return db.ref(`${FLEET_OWNER_INDEX_ROOT}/${normUid(ownerUid)}`);
+}
+
+/**
+ * Keyed read: dispatch_fleet_owner_index/{ownerUid} (all fleet businesses for owner).
+ * @param {import("firebase-admin/database").Database} db
+ * @param {string} ownerUid
+ * @returns {Promise<Record<string, Record<string, unknown>>>}
+ */
+async function loadFleetOwnerIndex(db, ownerUid) {
+  const uid = normUid(ownerUid);
+  if (!uid) {
+    return {};
+  }
+  const snap = await fleetOwnerIndexRef(db, uid).get();
+  const val = snap.val();
+  if (!val || typeof val !== "object") {
+    return {};
+  }
+  /** @type {Record<string, Record<string, unknown>>} */
+  const out = {};
+  for (const [businessId, entry] of Object.entries(val)) {
+    if (entry && typeof entry === "object") {
+      out[trimStr(businessId, 128)] = entry;
+    }
+  }
+  return out;
+}
+
+/**
+ * @param {import("firebase-admin/database").Database} db
+ * @param {string} ownerUid
+ * @param {string} businessId
+ * @param {Record<string, unknown>} entry
+ */
+async function writeFleetOwnerIndexEntry(db, ownerUid, businessId, entry) {
+  const uid = normUid(ownerUid);
+  const bid = trimStr(businessId, 128);
+  if (!uid || !bid) {
+    return;
+  }
+  await db.ref(`${FLEET_OWNER_INDEX_ROOT}/${uid}/${bid}`).set(entry);
+}
+
+function indexEntryStatus(entry) {
+  return trimStr(entry?.status ?? entry?.merchant_status, 40).toLowerCase();
+}
+
+/**
+ * @param {import("firebase-admin/database").Database} db
+ * @param {import("firebase-admin/firestore").Firestore} fs
+ * @param {string} ownerUid
+ * @returns {Promise<string | null>} business_id if a blocking fleet account exists
+ */
+async function ownerHasBlockingFleetFromIndex(db, fs, ownerUid) {
+  const entries = await loadFleetOwnerIndex(db, ownerUid);
+  const businessIds = Object.keys(entries);
+  if (!businessIds.length) {
+    return null;
+  }
+  for (const businessId of businessIds) {
+    const entry = entries[businessId] || {};
+    if (trimStr(entry.account_kind, 64).toLowerCase() !== ACCOUNT_KIND_DISPATCH_FLEET) {
+      continue;
+    }
+    const snap = await fs.collection("merchants").doc(businessId).get();
+    if (!snap.exists) {
+      if (FLEET_BLOCKING_STATUSES.has(indexEntryStatus(entry))) {
+        return businessId;
+      }
+      continue;
+    }
+    const m = snap.data() || {};
+    if (!isDispatchFleetAccount(m)) {
+      continue;
+    }
+    if (FLEET_BLOCKING_STATUSES.has(merchantStatusOf(m))) {
+      return businessId;
+    }
+  }
+  return null;
+}
+
+/**
+ * @param {Record<string, Record<string, unknown>>} entries
+ * @param {Record<string, Record<string, unknown>>} merchantsById
+ */
+function pickFleetBusinessId(entries, merchantsById) {
+  /** @type {{ businessId: string, entry: Record<string, unknown>, merchant: Record<string, unknown> }[]} */
+  const candidates = [];
+  for (const [businessId, entry] of Object.entries(entries)) {
+    const m = merchantsById[businessId];
+    if (!m || !isDispatchFleetAccount(m)) {
+      continue;
+    }
+    candidates.push({ businessId, entry, merchant: m });
+  }
+  if (!candidates.length) {
+    return null;
+  }
+  const approved = candidates.filter((c) => merchantStatusOf(c.merchant) === "approved");
+  const pool = approved.length ? approved : candidates;
+  pool.sort((a, b) => {
+    const aTs = Number(a.entry.created_at ?? a.entry.createdAt ?? 0);
+    const bTs = Number(b.entry.created_at ?? b.entry.createdAt ?? 0);
+    return bTs - aTs;
+  });
+  return pool[0].businessId;
+}
+
+/**
+ * Resolve fleet business via RTDB owner index + keyed merchants/{id} reads only.
+ * @param {import("firebase-admin/database").Database} db
+ * @param {import("firebase-admin/firestore").Firestore} fs
+ * @param {string} ownerUid
+ */
+async function resolveFleetForOwnerAuth(db, fs, ownerUid) {
+  const uid = normUid(ownerUid);
+  if (!uid) {
+    return { ok: false, reason: "unauthorized" };
+  }
+  const entries = await loadFleetOwnerIndex(db, uid);
+  const businessIds = Object.keys(entries);
+  if (!businessIds.length) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  /** @type {Record<string, Record<string, unknown>>} */
+  const merchantsById = {};
+  for (const businessId of businessIds) {
+    const snap = await fs.collection("merchants").doc(businessId).get();
+    if (!snap.exists) {
+      continue;
+    }
+    const m = snap.data() || {};
+    if (rowOwnerUid(m) !== uid) {
+      continue;
+    }
+    merchantsById[businessId] = m;
+  }
+
+  const chosenId = pickFleetBusinessId(entries, merchantsById);
+  if (!chosenId) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  const data = merchantsById[chosenId];
+  if (!isDispatchFleetAccount(data)) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  return {
+    ok: true,
+    id: chosenId,
+    data,
+    ref: fs.collection("merchants").doc(chosenId),
+  };
 }
 
 function validateDispatchProfileInput(data, opts = {}) {
@@ -60,23 +284,288 @@ function validateDispatchProfileInput(data, opts = {}) {
   };
 }
 
+function rowOwnerUid(m) {
+  return normUid(m?.owner_uid ?? m?.ownerUid);
+}
+
+/**
+ * @param {string} merchantId
+ * @param {Record<string, unknown>} m
+ * @param {object | null} readiness
+ */
+function buildFleetSafeAccountPayload(merchantId, m, readiness) {
+  return {
+    business_id: merchantId,
+    business_name: trimStr(m.business_name ?? m.businessName, 200),
+    account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
+    merchant_status: merchantStatusOf(m) || "pending_review",
+    verification_status: verificationStatusOf(m) || "pending_review",
+    rejection_reason:
+      trimStr(m.rejection_reason ?? m.rejectionReason ?? m.review_note, 2000) || null,
+    owner_name: trimStr(m.owner_name ?? m.ownerName, 120) || null,
+    contact_email: trimStr(m.contact_email ?? m.contactEmail, 200).toLowerCase() || null,
+    phone: trimStr(m.phone ?? m.phoneNumber, 40) || null,
+    address: trimStr(m.address ?? m.business_address, 500) || null,
+    region_id: trimStr(m.region_id ?? m.regionId, 80) || null,
+    city_id: trimStr(m.city_id ?? m.cityId, 120) || null,
+    required_documents_complete: m.required_documents_complete === true,
+    docs_readiness: readiness
+      ? {
+          allowed: Boolean(readiness.allowed),
+          missing_requirements: Array.isArray(readiness.missingRequirements)
+            ? readiness.missingRequirements.slice(0, 40)
+            : [],
+          readable_message: readiness.readableMessage
+            ? trimStr(readiness.readableMessage, 2000)
+            : null,
+          document_statuses:
+            readiness.documentStatuses && typeof readiness.documentStatuses === "object"
+              ? { ...readiness.documentStatuses }
+              : {},
+        }
+      : null,
+  };
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function dispatchFleetRegister(data, context, db) {
+  const uid = normUid(context?.auth?.uid);
+  if (!uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+
+  const businessName = trimStr(data?.business_name ?? data?.businessName, 200);
+  if (businessName.length < 2) {
+    return { success: false, reason: "invalid_business_name" };
+  }
+
+  const contactEmail = trimStr(
+    data?.contact_email ?? data?.contactEmail ?? context.auth?.token?.email,
+    200,
+  ).toLowerCase();
+  const ownerName = trimStr(data?.owner_name ?? data?.ownerName, 120);
+  const phone = trimStr(data?.phone ?? data?.phoneNumber, 40);
+  const address = trimStr(data?.address ?? data?.business_address, 500);
+  const regionId = trimStr(data?.region_id ?? data?.regionId, 80) || null;
+  const cityId = trimStr(data?.city_id ?? data?.cityId, 120) || null;
+
+  const fs = resolveFirestore();
+  const existingFleetId = await ownerHasBlockingFleetFromIndex(db, fs, uid);
+  if (existingFleetId) {
+    return {
+      success: false,
+      reason: "fleet_account_already_exists",
+      business_id: existingFleetId,
+    };
+  }
+
+  const ref = fs.collection("merchants").doc();
+  const merchantId = ref.id;
+  const now = FieldValue.serverTimestamp();
+  const row = {
+    merchant_id: merchantId,
+    account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
+    owner_uid: uid,
+    created_by: uid,
+    business_name: businessName,
+    owner_name: ownerName || null,
+    contact_email: contactEmail || authEmail || null,
+    phone: phone || null,
+    address: address || null,
+    region_id: regionId,
+    city_id: cityId,
+    category: "Dispatch Fleet",
+    business_type: ACCOUNT_KIND_DISPATCH_FLEET,
+    merchant_status: "pending_review",
+    status: "pending_review",
+    verification_status: "pending_review",
+    is_open: false,
+    accepting_orders: false,
+    availability_status: "closed",
+    closed_reason: null,
+    payment_model: "subscription",
+    subscription_status: "inactive",
+    subscription_amount: 0,
+    subscription_currency: "NGN",
+    commission_rate: 0,
+    commission_exempt: true,
+    withdrawal_percent: 0,
+    required_documents_complete: false,
+    document_statuses: {},
+    readiness_missing_requirements: [],
+    rejection_reason: null,
+    review_note: null,
+    approved_at: null,
+    approved_by: null,
+    reviewed_at: null,
+    reviewed_by: null,
+    admin_note: null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  await ref.set(row);
+
+  const createdAtMs = nowMs();
+  await writeFleetOwnerIndexEntry(db, uid, merchantId, {
+    business_id: merchantId,
+    account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
+    status: "pending_review",
+    created_at: createdAtMs,
+  });
+
+  await writeAdminAuditLog(db, {
+    actor_uid: uid,
+    action: "dispatch_fleet_registered",
+    entity_type: "dispatch_fleet_account",
+    entity_id: merchantId,
+    after: {
+      business_id: merchantId,
+      account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
+      merchant_status: "pending_review",
+      verification_status: "pending_review",
+    },
+    reason: "dispatch_fleet_registered",
+    source: "business_fleet_callables.dispatchFleetRegister",
+    type: "DISPATCH_FLEET_REGISTERED",
+  });
+
+  console.log("DISPATCH_FLEET_REGISTERED", `businessId=${merchantId}`, `ownerUid=${uid}`);
+
+  return {
+    success: true,
+    business_id: merchantId,
+    merchant_status: "pending_review",
+    verification_status: "pending_review",
+    account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
+  };
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function dispatchFleetGetMyAccount(data, context, db) {
+  const uid = normUid(context?.auth?.uid);
+  if (!uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+
+  const fs = resolveFirestore();
+  const resolved = await resolveFleetForOwnerAuth(db, fs, uid);
+  if (!resolved.ok) {
+    return { success: false, reason: resolved.reason || "not_found" };
+  }
+
+  const m = resolved.data || {};
+
+  const gate = merchantVerification.assertMerchantPortalAllowed(m, uid, [
+    "owner",
+    "manager",
+  ]);
+  if (!gate.ok) {
+    return { success: false, reason: gate.reason || "forbidden" };
+  }
+
+  let readiness = null;
+  try {
+    readiness = await merchantVerification.getMerchantReadiness(resolved.id);
+  } catch (e) {
+    console.warn(
+      "DISPATCH_FLEET_ACCOUNT_READ readiness_failed",
+      `businessId=${resolved.id}`,
+      String(e?.message || e),
+    );
+  }
+
+  const account = buildFleetSafeAccountPayload(resolved.id, m, readiness);
+
+  await writeAdminAuditLog(db, {
+    actor_uid: uid,
+    action: "dispatch_fleet_account_read",
+    entity_type: "dispatch_fleet_account",
+    entity_id: resolved.id,
+    after: {
+      business_id: resolved.id,
+      merchant_status: account.merchant_status,
+      verification_status: account.verification_status,
+    },
+    reason: "dispatch_fleet_account_read",
+    source: "business_fleet_callables.dispatchFleetGetMyAccount",
+    type: "DISPATCH_FLEET_ACCOUNT_READ",
+  });
+
+  console.log("DISPATCH_FLEET_ACCOUNT_READ", `businessId=${resolved.id}`, `actorUid=${uid}`);
+
+  return {
+    success: true,
+    account,
+  };
+}
+
 async function businessCreateDriverInvite(data, context, db) {
   if (!context?.auth?.uid) {
     return { success: false, reason: "unauthorized" };
   }
-  const fs = admin.firestore();
-  const resolved = await merchantVerification.resolveMerchantForMerchantAuth(fs, context);
+  const fs = resolveFirestore();
+  const actorUid = normUid(context.auth.uid);
+  const resolved = await resolveFleetForOwnerAuth(db, fs, actorUid);
   if (!resolved.ok) {
     return { success: false, reason: resolved.reason || "forbidden" };
   }
-  const actorUid = normUid(context.auth.uid);
-  const gate = merchantVerification.assertMerchantPortalAllowed(
-    resolved.data || {},
-    actorUid,
-    ["owner", "manager"],
-  );
+  const m = resolved.data || {};
+  const gate = merchantVerification.assertMerchantPortalAllowed(m, actorUid, [
+    "owner",
+    "manager",
+  ]);
   if (!gate.ok) {
     return { success: false, reason: gate.reason || "forbidden" };
+  }
+
+  if (!isDispatchFleetAccount(m)) {
+    await writeAdminAuditLog(db, {
+      actor_uid: actorUid,
+      action: "dispatch_fleet_invite_blocked",
+      entity_type: "dispatch_fleet_account",
+      entity_id: resolved.id,
+      after: {
+        business_id: resolved.id,
+        account_kind: trimStr(m.account_kind, 64) || null,
+      },
+      reason: "not_dispatch_fleet",
+      source: "business_fleet_callables.businessCreateDriverInvite",
+      type: "DISPATCH_FLEET_INVITE_BLOCKED_NOT_APPROVED",
+    });
+    return { success: false, reason: "not_dispatch_fleet" };
+  }
+
+  if (!fleetAccountApprovedForInvites(m)) {
+    await writeAdminAuditLog(db, {
+      actor_uid: actorUid,
+      action: "dispatch_fleet_invite_blocked",
+      entity_type: "dispatch_fleet_account",
+      entity_id: resolved.id,
+      after: {
+        business_id: resolved.id,
+        merchant_status: merchantStatusOf(m),
+        verification_status: verificationStatusOf(m),
+      },
+      reason: "fleet_not_approved",
+      source: "business_fleet_callables.businessCreateDriverInvite",
+      type: "DISPATCH_FLEET_INVITE_BLOCKED_NOT_APPROVED",
+    });
+    console.log(
+      "DISPATCH_FLEET_INVITE_BLOCKED_NOT_APPROVED",
+      `businessId=${resolved.id}`,
+      `merchantStatus=${merchantStatusOf(m)}`,
+      `verificationStatus=${verificationStatusOf(m)}`,
+    );
+    return { success: false, reason: "fleet_not_approved" };
   }
 
   const profile = validateDispatchProfileInput(
@@ -323,12 +812,21 @@ async function driverRedeemBusinessInvite(data, context, db) {
 }
 
 module.exports = {
+  ACCOUNT_KIND_DISPATCH_FLEET,
+  FLEET_OWNER_INDEX_ROOT,
   DISPATCH_VEHICLE_TYPES,
   OWNERSHIP_MODES,
   normalizeDispatchVehicleType,
   normalizeOwnershipMode,
+  isDispatchFleetAccount,
+  fleetAccountApprovedForInvites,
+  buildFleetSafeAccountPayload,
   validateDispatchProfileInput,
+  loadFleetOwnerIndex,
+  resolveFleetForOwnerAuth,
+  setFirestoreForTests,
+  dispatchFleetRegister,
+  dispatchFleetGetMyAccount,
   businessCreateDriverInvite,
   driverRedeemBusinessInvite,
 };
-

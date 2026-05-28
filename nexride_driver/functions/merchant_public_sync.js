@@ -4,6 +4,18 @@
  */
 const admin = require("firebase-admin");
 
+/** @type {import("firebase-admin/firestore").Firestore | null} */
+let firestoreOverrideForTests = null;
+
+function resolveFirestore() {
+  return firestoreOverrideForTests || admin.firestore();
+}
+
+/** @param {import("firebase-admin/firestore").Firestore | null} fs */
+function setFirestoreForTests(fs) {
+  firestoreOverrideForTests = fs;
+}
+
 function availabilityStatusForTeaser(m) {
   const raw = String(m?.availability_status ?? "")
     .trim()
@@ -29,10 +41,16 @@ function availabilityStatusForTeaser(m) {
 async function syncMerchantPublicTeaserFromMerchantId(db, merchantId, extra = {}) {
   const mid = String(merchantId ?? "").trim();
   if (!mid || !db) return;
-  const fs = admin.firestore();
+  const fs = resolveFirestore();
   const snap = await fs.collection("merchants").doc(mid).get();
   if (!snap.exists) return;
   const m = snap.data() || {};
+  const accountKind = String(m.account_kind ?? "")
+    .trim()
+    .toLowerCase();
+  if (accountKind === "dispatch_fleet") {
+    return;
+  }
   const st = String(m.merchant_status ?? m.status ?? "")
     .trim()
     .toLowerCase();
@@ -56,4 +74,5 @@ async function syncMerchantPublicTeaserFromMerchantId(db, merchantId, extra = {}
 
 module.exports = {
   syncMerchantPublicTeaserFromMerchantId,
+  setFirestoreForTests,
 };

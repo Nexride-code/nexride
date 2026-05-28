@@ -359,6 +359,12 @@ exports.merchantPortalHeartbeat = onCall(rideCallOpts, async (request) =>
 exports.merchantPutStaffMember = onCall(rideCallOpts, async (request) =>
   merchantCallables.merchantPutStaffMember(request.data, callableContext(request), db),
 );
+exports.dispatchFleetRegister = onCall(rideCallOpts, async (request) =>
+  businessFleet.dispatchFleetRegister(request.data, callableContext(request), db),
+);
+exports.dispatchFleetGetMyAccount = onCall(rideCallOpts, async (request) =>
+  businessFleet.dispatchFleetGetMyAccount(request.data, callableContext(request), db),
+);
 exports.businessCreateDriverInvite = onCall(rideCallOpts, async (request) =>
   businessFleet.businessCreateDriverInvite(request.data, callableContext(request), db),
 );
