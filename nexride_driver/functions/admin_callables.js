@@ -24,6 +24,8 @@ const {
 const { syncRideTrackPublic } = require("./track_public");
 const { sendPushToUser } = require("./push_notifications");
 const { parseAdminListParams } = require("./admin_list_params");
+const adminPaymentTx = require("./admin_payment_transactions");
+const rideFinanceSettlement = require("./ride_finance_settlement");
 const {
   driverProfileLooksCommittedForRiderExclusion,
 } = require("./admin_rider_metrics");
@@ -690,8 +692,9 @@ async function adminGetTripDetail(data, context, db) {
   const rSnap = await db.ref(`ride_requests/${tripId}`).get();
   if (rSnap.exists()) {
     const ride = rSnap.val();
-    const payments = await loadPaymentRowsForRefs(db, ride);
     const audit_timeline = await filterAdminAuditForTrip(db, tripId);
+    const paymentView = await adminPaymentTx.buildRidePaymentAdminView(db, ride, audit_timeline);
+    const payments = paymentView.payments;
     const trackToken = String(ride.track_token ?? "").trim() || null;
     const md =
       ride?.match_debug && typeof ride.match_debug === "object" ? ride.match_debug : {};
@@ -777,6 +780,8 @@ async function adminGetTripDetail(data, context, db) {
       trip_id: tripId,
       ride,
       payments,
+      payment_detail: paymentView.payment_detail,
+      payment_timeline: paymentView.payment_timeline,
       audit_timeline,
       track_token: trackToken,
       lifecycle_ops: {
@@ -807,14 +812,16 @@ async function adminGetTripDetail(data, context, db) {
   const dSnap = await db.ref(`delivery_requests/${tripId}`).get();
   if (dSnap.exists()) {
     const delivery = dSnap.val();
-    const payments = await loadPaymentRowsForRefs(db, delivery);
     const audit_timeline = await filterAdminAuditForTrip(db, tripId);
+    const paymentView = await adminPaymentTx.buildRidePaymentAdminView(db, delivery, audit_timeline);
     return {
       success: true,
       trip_kind: "delivery",
       trip_id: tripId,
       delivery,
-      payments,
+      payments: paymentView.payments,
+      payment_detail: paymentView.payment_detail,
+      payment_timeline: paymentView.payment_timeline,
       audit_timeline,
       track_token: null,
     };
@@ -3654,6 +3661,18 @@ async function adminGetPaymentDiagnostics(_data, context, db) {
   };
 }
 
+async function adminGetFinanceRevenueBuckets(data, context, db) {
+  const deny = await adminPerms.enforceCallable(db, context, "adminGetFinanceRevenueBuckets");
+  if (deny) return deny;
+  const createdFrom = Number(data?.createdFrom ?? data?.created_from ?? 0) || 0;
+  const createdTo = Number(data?.createdTo ?? data?.created_to ?? 0) || 0;
+  return rideFinanceSettlement.summarizePlatformRevenueBuckets(db, {
+    createdFrom,
+    createdTo,
+    maxScan: Number(data?.maxScan ?? data?.max_scan ?? 4000) || 4000,
+  });
+}
+
 async function adminExpireStaleVaPaymentIntents(_data, context, db) {
   const deny = await adminPerms.enforceCallable(
     db,
@@ -3719,6 +3738,8 @@ module.exports = {
   adminReviewRiderFirestoreIdentity,
   adminApproveDriverVerification,
   adminListPaymentIntents,
+  adminListPaymentTransactionsPage: adminPaymentTx.adminListPaymentTransactionsPage,
+  adminGetFinanceRevenueBuckets,
   adminGetPaymentDiagnostics,
   adminExpireStaleVaPaymentIntents,
   adminUpdateWithdrawalStatus: adminBusinessMutations.adminUpdateWithdrawalStatus,

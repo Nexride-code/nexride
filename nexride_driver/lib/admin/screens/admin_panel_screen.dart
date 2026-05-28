@@ -19,6 +19,7 @@ import '../utils/admin_formatters.dart';
 import '../utils/admin_perf_guard.dart';
 import '../widgets/admin_charts.dart';
 import '../widgets/admin_components.dart';
+import '../widgets/admin_finance_revenue_buckets_panel.dart';
 import '../widgets/admin_driver_drawer_tabs.dart';
 import '../widgets/admin_entity_drawer.dart';
 import '../widgets/admin_entity_drawer_controller.dart';
@@ -2526,6 +2527,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
+        AdminFinanceRevenueBucketsPanel(
+          dataService: _dataService,
+          session: widget.session,
+        ),
+        const SizedBox(height: 24),
         AdminSummaryBanner(
           title: 'Finance and revenue',
           subtitle:

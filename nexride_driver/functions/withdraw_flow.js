@@ -97,6 +97,43 @@ async function driverUpdateWithdrawalDestination(data, context, db) {
   return { success: true, destination: payload };
 }
 
+const RESERVED_WITHDRAWAL_STATUSES = new Set(["pending", "processing", "reviewing"]);
+
+function roundNgn(n) {
+  return Math.round(Math.max(0, Number(n) || 0));
+}
+
+function withdrawalStatusReservesBalance(status) {
+  return RESERVED_WITHDRAWAL_STATUSES.has(String(status ?? "").trim().toLowerCase());
+}
+
+function computeAvailableWithdrawalBalanceNgn(walletBalance, reservedWithdrawalTotal) {
+  return Math.max(0, roundNgn(walletBalance) - roundNgn(reservedWithdrawalTotal));
+}
+
+/**
+ * Sum open driver withdrawal requests that reserve balance (pending/processing/reviewing).
+ * @param {import("firebase-admin/database").Database} db
+ * @param {string} driverId
+ */
+async function sumReservedDriverWithdrawalAmountNgn(db, driverId) {
+  const did = normUid(driverId);
+  if (!did) return 0;
+  const snap = await db.ref("withdraw_requests").get();
+  const val = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
+  let sum = 0;
+  for (const row of Object.values(val)) {
+    if (!row || typeof row !== "object") continue;
+    const rowDriver = normUid(row.driver_id ?? row.driverId);
+    if (rowDriver !== did) continue;
+    const entity = String(row.entity_type ?? row.entityType ?? "driver").trim().toLowerCase();
+    if (entity !== "driver") continue;
+    if (!withdrawalStatusReservesBalance(row.status)) continue;
+    sum += roundNgn(row.amount ?? 0);
+  }
+  return sum;
+}
+
 function driverWithdrawalRecordHasPayoutDestination(w) {
   if (!w || typeof w !== "object") {
     return false;
@@ -142,9 +179,25 @@ async function requestWithdrawal(data, context, db) {
 
   const walletSnap = await db.ref(`wallets/${driverId}`).get();
   const wallet = walletSnap.val();
-  const balance = Number(wallet?.balance ?? 0);
-  if (!Number.isFinite(balance) || balance < amount) {
-    return { success: false, reason: "insufficient_balance" };
+  const balance = roundNgn(wallet?.balance ?? 0);
+  const reserved = await sumReservedDriverWithdrawalAmountNgn(db, driverId);
+  const available = computeAvailableWithdrawalBalanceNgn(balance, reserved);
+  console.log(
+    "FINANCE_WITHDRAWAL_AVAILABLE_CHECK",
+    `driverId=${driverId}`,
+    `wallet_balance=${balance}`,
+    `reserved_withdrawals=${reserved}`,
+    `available=${available}`,
+    `requested=${roundNgn(amount)}`,
+  );
+  if (amount > available) {
+    return {
+      success: false,
+      reason: "insufficient_available_balance",
+      wallet_balance: balance,
+      reserved_withdrawals: reserved,
+      available_balance: available,
+    };
   }
 
   const now = nowMs();
@@ -304,4 +357,7 @@ module.exports = {
   driverUpdateWithdrawalDestination,
   validateDriverWithdrawalDestinationInput,
   driverWithdrawalRecordHasPayoutDestination,
+  withdrawalStatusReservesBalance,
+  computeAvailableWithdrawalBalanceNgn,
+  sumReservedDriverWithdrawalAmountNgn,
 };

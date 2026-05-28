@@ -727,6 +727,23 @@ exports.adminListPaymentIntents = onCall(rideCallOpts, async (request) =>
   adminCallables.adminListPaymentIntents(request.data, callableContext(request), db),
 );
 
+
+exports.adminListPaymentTransactionsPage = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminListPaymentTransactionsPage(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+exports.adminGetFinanceRevenueBuckets = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminGetFinanceRevenueBuckets(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
 exports.adminGetPaymentDiagnostics = onCall(
   { region: REGION, secrets: [flutterwaveSecretKey] },
   async (request) =>

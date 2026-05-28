@@ -21,6 +21,7 @@ const {
 const { buildFlutterwaveRedirectUrl } = require("./payment_redirect");
 const { assertPaymentOwnership } = require("./payment_ownership");
 const { createWalletTransactionInternal } = require("./wallet_core");
+const { recordSubscriptionRevenueOnce } = require("./ride_finance_settlement");
 const { sendPushToUser } = require("./push_notifications");
 const bankTransferVa = require("./bank_transfer_va");
 const payDiag = require("./payment_diagnostics_store");
@@ -298,6 +299,22 @@ async function applyDriverSubscriptionSettlement(db, fs, {
       driver_id: driverId,
       subscription_plan_type: planType,
     });
+  }
+
+  const subRevenue = await recordSubscriptionRevenueOnce(db, {
+    txRef: refFinal,
+    amountNgn: expectedAmount,
+    driverId,
+    ownerUid,
+    planType,
+    source: "driver_subscription_settlement",
+  });
+  if (!subRevenue.success && subRevenue.reason !== "already_settled") {
+    logger.warn("FINANCE_SUBSCRIPTION_REVENUE_FAIL", {
+      txRef: refFinal,
+      reason: subRevenue.reason,
+    });
+    return { success: false, reason: subRevenue.reason || "subscription_revenue_failed" };
   }
 
   try {

@@ -250,6 +250,8 @@ class _AdminLiveOperationsScreenState extends State<AdminLiveOperationsScreen> {
           : _mapOf(data['delivery']);
       final lifecycleOps = _mapOf(data['lifecycle_ops']);
       final payments = _listOfMaps(data['payments']);
+      final paymentDetail = _mapOf(data['payment_detail']);
+      final paymentTimeline = _listOfMaps(data['payment_timeline']);
       final auditTimeline = _listOfMaps(data['audit_timeline']);
       await showModalBottomSheet<void>(
         context: context,
@@ -268,6 +270,8 @@ class _AdminLiveOperationsScreenState extends State<AdminLiveOperationsScreen> {
                 record: record,
                 lifecycleOps: lifecycleOps,
                 payments: payments,
+                paymentDetail: paymentDetail,
+                paymentTimeline: paymentTimeline,
                 auditTimeline: auditTimeline,
                 scrollController: sc,
                 onAction: _runTripAction,
@@ -985,6 +989,8 @@ class _TripDetailSheet extends StatelessWidget {
     required this.record,
     required this.lifecycleOps,
     required this.payments,
+    required this.paymentDetail,
+    required this.paymentTimeline,
     required this.auditTimeline,
     required this.scrollController,
     required this.onAction,
@@ -997,12 +1003,28 @@ class _TripDetailSheet extends StatelessWidget {
   final Map<String, dynamic> record;
   final Map<String, dynamic> lifecycleOps;
   final List<Map<String, dynamic>> payments;
+  final Map<String, dynamic> paymentDetail;
+  final List<Map<String, dynamic>> paymentTimeline;
   final List<Map<String, dynamic>> auditTimeline;
   final ScrollController scrollController;
   final Future<void> Function(String name, Map<String, dynamic> payload)
       onAction;
   final VoidCallback onClose;
   final AdminSession session;
+
+  static Map<String, dynamic> _detailMap(Object? raw) {
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    return <String, dynamic>{};
+  }
+
+  static List<Map<String, dynamic>> _detailList(Object? raw) {
+    if (raw is! List) return const [];
+    return raw
+        .map((dynamic e) => _detailMap(e))
+        .where((Map<String, dynamic> m) => m.isNotEmpty)
+        .toList();
+  }
 
   Widget _tonalGate({required bool allowed, required Widget child}) {
     if (allowed) {
@@ -1210,18 +1232,80 @@ class _TripDetailSheet extends StatelessWidget {
           const Text('Payments',
               style: TextStyle(fontWeight: FontWeight.w700)),
           const SizedBox(height: 6),
-          if (payments.isEmpty)
+          if (paymentDetail.isNotEmpty) ...<Widget>[
+            Text(
+              'Method: ${paymentDetail['payment_method'] ?? '—'} • '
+              'Status: ${paymentDetail['payment_status'] ?? '—'}',
+            ),
+            Text('tx_ref: ${paymentDetail['tx_ref'] ?? '—'}'),
+            Text(
+              'flw_ref: ${paymentDetail['flw_ref'] ?? '—'} • '
+              'auth_ref: ${paymentDetail['authorization_ref'] ?? '—'}',
+            ),
+            const SizedBox(height: 8),
+            const Text('Card auth / capture / void',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            Text(
+              'Auth: ${_detailMap(paymentDetail['card_auth'])['status'] ?? '—'} • '
+              'Capture: ${_detailMap(paymentDetail['capture'])['status'] ?? '—'} • '
+              'Void: ${_detailMap(paymentDetail['void_refund'])['void_status'] ?? '—'} • '
+              'Refund: ${_detailMap(paymentDetail['void_refund'])['refund_status'] ?? '—'}',
+            ),
+            const SizedBox(height: 8),
+            const Text('Bank transfer',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            Text(
+              'Status: ${_detailMap(paymentDetail['bank_transfer'])['status'] ?? '—'} • '
+              'confirmed: ${_detailMap(paymentDetail['bank_transfer'])['payment_confirmed'] ?? false}',
+            ),
+          ],
+          if (payments.isEmpty && paymentDetail.isEmpty)
             const Text('No linked payment rows.')
-          else
+          else if (payments.isNotEmpty)
             ...payments.map(
               (Map<String, dynamic> p) => ListTile(
                 dense: true,
-                title: Text(p['reference']?.toString() ?? ''),
+                title: Text(p['tx_ref']?.toString() ?? p['reference']?.toString() ?? ''),
                 subtitle: Text(
-                  'verified=${p['verified']} amount=${p['amount']}',
+                  '${p['payment_method'] ?? '—'} • ${p['payment_status'] ?? '—'} • '
+                  'amount=${p['amount']} ${p['currency'] ?? 'NGN'}',
                 ),
               ),
             ),
+          if (paymentTimeline.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 12),
+            const Text('Payment timeline',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            ...paymentTimeline.take(12).map(
+                  (Map<String, dynamic> e) {
+                    final ms = (e['at'] is num) ? (e['at'] as num).toInt() : 0;
+                    final when = ms > 0
+                        ? formatAdminDateTime(
+                            DateTime.fromMillisecondsSinceEpoch(ms),
+                          )
+                        : '—';
+                    return ListTile(
+                      dense: true,
+                      title: Text(e['label']?.toString() ?? ''),
+                      subtitle: Text(
+                        '$when • ${e['kind'] ?? ''} • ${e['detail'] ?? ''}',
+                      ),
+                    );
+                  },
+                ),
+          ],
+          if (_detailList(paymentDetail['admin_actions']).isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            const Text('Admin payment actions',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            ..._detailList(paymentDetail['admin_actions']).map(
+              (Map<String, dynamic> a) => ListTile(
+                dense: true,
+                title: Text(a['type']?.toString() ?? ''),
+                subtitle: Text(a['note']?.toString() ?? ''),
+              ),
+            ),
+          ],
           const SizedBox(height: 20),
           const Text('Safety / emergency',
               style: TextStyle(fontWeight: FontWeight.w700)),

@@ -26,6 +26,7 @@ async function syncRideRealtimeMirrors(db, rideId, driverId) {
 }
 const adminPerms = require("./admin_permissions");
 const { createWalletTransactionInternal } = require("./wallet_core");
+const rideFinance = require("./ride_finance_settlement");
 const { ServerValue } = require("firebase-admin/database");
 const {
   evaluateDriverForOffer,
@@ -2959,7 +2960,6 @@ async function createRideRequest(data, context, db) {
     console.log("RIDER_CREATE_FAIL", riderId, identityGate.reason || "identity_denied");
     return { success: false, reason: identityGate.reason || "identity_denied" };
   }
-
   const supersede = await supersedePriorOpenRideForRider(db, riderId);
   if (!supersede.ok) {
     console.log("RIDER_CREATE_FAIL", riderId, supersede.reason || "rider_active_trip");
@@ -4762,7 +4762,6 @@ async function completeTrip(data, context, db) {
   }
   const monetization = await resolveDriverMonetization(db, driverId);
   const commissionPolicy = await resolveCommissionPolicy(db, driverId);
-  const settlementFee = commissionPolicy.exempt ? 0 : platformFeeNgn();
   console.log(
     "COMMISSION_EXEMPT",
     `driverId=${driverId}`,
@@ -4773,6 +4772,9 @@ async function completeTrip(data, context, db) {
   const preRideSnap = await rideRef.get();
   const preRide =
     preRideSnap.exists() && typeof preRideSnap.val() === "object" ? preRideSnap.val() : null;
+  const financeBreakdown = rideFinance.computeRideFinanceBreakdown(preRide || {}, {
+    commissionExempt: commissionPolicy.exempt,
+  });
   if (preRide && cardPayment.isCardPaymentMethod(preRide.payment_method ?? preRide.paymentMethod)) {
     const capture = await cardPayment.captureRideCardOnCompletion({
       db,
@@ -4806,31 +4808,21 @@ async function completeTrip(data, context, db) {
       return;
     }
     const now = nowMs();
-    const gross = grossFareFromRide(cur);
-    const driverPayout = Math.max(0, gross - settlementFee);
-    const settlement = {
-      grossFareNgn: gross,
-      commissionAmountNgn: settlementFee,
-      driverPayoutNgn: driverPayout,
-      netEarningNgn: driverPayout,
-      currency: String(cur.currency ?? "NGN"),
-      selectedModel: monetization.selectedModel,
-      effectiveModel: monetization.effectiveModel,
-      recorded_at: now,
-      source: "driver_complete_trip",
-    };
+    const settlementPatch = rideFinance.buildRideSettlementPatch(financeBreakdown, "driver_complete_trip");
     return {
       ...cur,
       trip_state: TRIP_STATE.completed,
       status: legacyUiStatusForTripState(TRIP_STATE.completed),
       completed_at: cur.completed_at ?? now,
       trip_completed: true,
-      settlement,
-      grossFare: gross,
-      commission: settlementFee,
-      commissionAmount: settlementFee,
-      driverPayout,
-      netEarning: driverPayout,
+      trip_fare_ngn: financeBreakdown.trip_fare_ngn,
+      booking_fee_ngn: financeBreakdown.booking_fee_ngn,
+      platform_fee_ngn: financeBreakdown.booking_fee_ngn,
+      commission_ngn: financeBreakdown.commission_ngn,
+      driver_net_ngn: financeBreakdown.driver_net_ngn,
+      selectedModel: monetization.selectedModel,
+      effectiveModel: monetization.effectiveModel,
+      ...settlementPatch,
       updated_at: now,
     };
   });
@@ -4868,47 +4860,19 @@ async function completeTrip(data, context, db) {
   await syncRideRealtimeMirrors(db, rideId, driverId);
 
   if (rideHasVerifiedOnlinePayment(ride)) {
-    const gross = grossFareFromRide(ride);
-    const driverPayout = Math.max(0, gross - settlementFee);
-    if (driverPayout > 0 && driverId) {
-      const ledgerRef = db.ref(`driver_wallet_ledger/${driverId}/${rideId}_fare_credit`);
-      const ltxn = await ledgerRef.transaction((cur) => {
-        if (cur && typeof cur === "object" && cur.completed) {
-          return undefined;
-        }
-        if (cur && typeof cur === "object" && cur.pending) {
-          return undefined;
-        }
-        if (cur != null && cur !== undefined) {
-          return undefined;
-        }
-        return { pending: true, at: nowMs() };
-      });
-      if (!ltxn.committed) {
-        console.log("WALLET_CREDIT_LOCK_SKIP", rideId);
-      } else {
-        const wt = await createWalletTransactionInternal(db, {
-          userId: driverId,
-          amount: driverPayout,
-          type: "driver_earning_credit",
-          idempotencyKey: `${rideId}_fare_credit`,
-        });
-        if (wt.success) {
-          await ledgerRef.update({
-            completed: true,
-            amount: driverPayout,
-            credited_at: nowMs(),
-            source: "complete_trip",
-          });
-          console.log("WALLET_CREDITED", driverId, rideId);
-        } else {
-          try {
-            await ledgerRef.remove();
-          } catch (_) {
-            /* ignore */
-          }
-        }
-      }
+    const fin = await rideFinance.settleCompletedRideOnce(db, {
+      rideId,
+      ride,
+      driverId,
+      riderId,
+      source: "complete_trip",
+    });
+    if (!fin.success && fin.reason !== "already_settled") {
+      console.log(
+        "FINANCE_SETTLE_FAIL",
+        `rideId=${rideId}`,
+        `reason=${fin.reason || "unknown"}`,
+      );
     }
   }
 

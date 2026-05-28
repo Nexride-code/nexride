@@ -132,6 +132,8 @@ const CALLABLE_PERMISSIONS = {
   adminListSupportTickets: "support.read",
   adminListPendingWithdrawals: "withdrawals.read",
   adminListPayments: "finance.read",
+  adminListPaymentTransactionsPage: "finance.read",
+  adminGetFinanceRevenueBuckets: "finance.read",
   adminFetchDriversTree: "drivers.read",
   adminListDriversPage: "drivers.read",
   adminGetSidebarBadgeCounts: "dashboard.read",

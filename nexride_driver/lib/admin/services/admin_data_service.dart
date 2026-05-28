@@ -561,6 +561,70 @@ class AdminDataService {
     }
   }
 
+  /// RTDB `payment_transactions` ledger (`adminListPaymentTransactionsPage`).
+  Future<Map<String, dynamic>> adminListPaymentTransactionsPage({
+    String method = 'all',
+    String status = 'all',
+    String? rideId,
+    String? riderId,
+    String? driverId,
+    int? createdFrom,
+    int? createdTo,
+    String cursor = '',
+    int limit = 50,
+    String search = '',
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListPaymentTransactionsPage',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        if (method.trim().isNotEmpty && method.trim() != 'all') 'method': method.trim(),
+        if (status.trim().isNotEmpty && status.trim() != 'all') 'status': status.trim(),
+        if (rideId != null && rideId.trim().isNotEmpty) 'rideId': rideId.trim(),
+        if (riderId != null && riderId.trim().isNotEmpty) 'riderId': riderId.trim(),
+        if (driverId != null && driverId.trim().isNotEmpty) 'driverId': driverId.trim(),
+        if (createdFrom != null && createdFrom > 0) 'createdFrom': createdFrom,
+        if (createdTo != null && createdTo > 0) 'createdTo': createdTo,
+        if (cursor.trim().isNotEmpty) 'cursor': cursor.trim(),
+        if (search.trim().isNotEmpty) 'search': search.trim(),
+        'limit': limit,
+      });
+      return _map(result.data);
+    } catch (e) {
+      debugPrint('[Payments][DATA] adminListPaymentTransactionsPage error: $e');
+      return <String, dynamic>{
+        'success': false,
+        'reason': e.toString(),
+        'transactions': <String, dynamic>{},
+      };
+    }
+  }
+
+  /// Platform ledger revenue buckets (`adminGetFinanceRevenueBuckets`).
+  Future<Map<String, dynamic>> adminGetFinanceRevenueBuckets() async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetFinanceRevenueBuckets',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+      );
+      final result = await callable.call(<String, dynamic>{});
+      return _map(result.data);
+    } catch (e) {
+      debugPrint('[Finance][DATA] adminGetFinanceRevenueBuckets error: $e');
+      return <String, dynamic>{
+        'success': false,
+        'reason': e.toString(),
+        'buckets': <String, dynamic>{},
+      };
+    }
+  }
+
   /// Firestore-backed Flutterwave VA payment intents (`adminListPaymentIntents`).
   Future<Map<String, dynamic>> adminListPaymentIntents({
     String status = 'all',

@@ -344,7 +344,7 @@ extension AdminSectionPresentation on AdminSection {
       AdminSection.merchants => 'Merchants',
       AdminSection.settings => 'Settings',
       AdminSection.auditLogs => 'Audit logs',
-      AdminSection.paymentIntents => 'Payment intents',
+      AdminSection.paymentIntents => 'Payments',
     };
   }
 
