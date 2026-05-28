@@ -157,6 +157,41 @@ function driverWithdrawalRecordHasPayoutDestination(w) {
   return false;
 }
 
+function normalizeDriverOwnershipMode(v) {
+  const s = String(v ?? "")
+    .trim()
+    .toLowerCase();
+  return s === "business_managed" || s === "individual" ? s : "";
+}
+
+function normalizeDriverBusinessLinkStatus(v) {
+  return String(v ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Single keyed read on drivers/{driverId} — gate self-service withdrawals.
+ * @param {Record<string, unknown> | null | undefined} profile
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+function driverWithdrawalGateFromProfile(profile) {
+  if (!profile || typeof profile !== "object") {
+    return { ok: true };
+  }
+  const mode = normalizeDriverOwnershipMode(profile.ownership_mode ?? profile.ownershipMode);
+  const linkStatus = normalizeDriverBusinessLinkStatus(
+    profile.business_link_status ?? profile.businessLinkStatus,
+  );
+  if (mode === "business_managed") {
+    return { ok: false, reason: "business_managed_withdrawal_blocked" };
+  }
+  if (linkStatus && linkStatus !== "approved") {
+    return { ok: false, reason: "business_link_not_approved" };
+  }
+  return { ok: true };
+}
+
 async function requestWithdrawal(data, context, db) {
   if (!context.auth) {
     return { success: false, reason: "unauthorized" };
@@ -167,8 +202,20 @@ async function requestWithdrawal(data, context, db) {
     return { success: false, reason: "invalid_amount" };
   }
 
-  const destSnap = await db.ref(`drivers/${driverId}/withdrawal_destination`).get();
-  const dest = destSnap.val();
+  const driverSnap = await db.ref(`drivers/${driverId}`).get();
+  const profile =
+    driverSnap.val() && typeof driverSnap.val() === "object" ? driverSnap.val() : {};
+  const withdrawalGate = driverWithdrawalGateFromProfile(profile);
+  if (!withdrawalGate.ok) {
+    console.log(
+      "FINANCE_WITHDRAWAL_BLOCKED",
+      `driverId=${driverId}`,
+      `reason=${withdrawalGate.reason}`,
+    );
+    return { success: false, reason: withdrawalGate.reason };
+  }
+
+  const dest = profile.withdrawal_destination;
   if (!dest || typeof dest !== "object") {
     return { success: false, reason: "withdrawal_destination_required" };
   }
@@ -360,4 +407,7 @@ module.exports = {
   withdrawalStatusReservesBalance,
   computeAvailableWithdrawalBalanceNgn,
   sumReservedDriverWithdrawalAmountNgn,
+  driverWithdrawalGateFromProfile,
+  normalizeDriverOwnershipMode,
+  normalizeDriverBusinessLinkStatus,
 };

@@ -845,6 +845,8 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
               final vehicle = _text(item['dispatch_vehicle_type']);
               final ownership = _text(item['ownership_mode']);
               final online = item['online'] == true;
+              final withdrawalBlocked = ownership.toLowerCase() == 'business_managed' ||
+                  (status.isNotEmpty && status.toLowerCase() != 'approved');
               return Padding(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: Container(
@@ -890,6 +892,12 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
                             label: Text(online ? 'Online' : 'Offline'),
                             visualDensity: VisualDensity.compact,
                           ),
+                          if (withdrawalBlocked)
+                            Chip(
+                              label: const Text('Withdrawals blocked'),
+                              visualDensity: VisualDensity.compact,
+                              backgroundColor: Colors.orange.shade50,
+                            ),
                           Chip(
                             label: Text('Linked ${_formatLinkedAt(item['linked_at'])}'),
                             visualDensity: VisualDensity.compact,
@@ -900,6 +908,18 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
                         Padding(
                           padding: const EdgeInsets.only(top: 6),
                           child: Text('Phone: ${_text(item['phone'])}'),
+                        ),
+                      if (withdrawalBlocked)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            'Withdrawal restriction active '
+                            '(ownership: ${ownership.isEmpty ? 'business_managed' : ownership}).',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: AdminThemeTokens.slate,
+                            ),
+                          ),
                         ),
                     ],
                   ),

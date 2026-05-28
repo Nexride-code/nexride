@@ -111,6 +111,9 @@ class _WalletScreenState extends State<WalletScreen> {
         'insufficient_balance' =>
           'Withdrawal amount exceeds your wallet balance.',
         'invalid_amount' => 'Enter a valid withdrawal amount.',
+        'business_managed_withdrawal_blocked' ||
+        'business_link_not_approved' =>
+          DriverFinanceService.fleetManagedWithdrawalNotice,
         _ =>
           'Unable to submit the withdrawal request${code.isNotEmpty ? ' ($code)' : ''}.',
       };
@@ -488,35 +491,42 @@ class _WalletScreenState extends State<WalletScreen> {
                       _DestinationSummaryCard(
                         destination: snapshot.payoutDestination,
                       ),
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          onPressed: _isSubmittingWithdrawal
-                              ? null
-                              : () async {
-                                  await _showEditDestinationDialog(
-                                    snapshot.payoutDestination,
-                                  );
-                                },
-                          icon: const Icon(Icons.account_balance_outlined, size: 18),
-                          label: Text(
-                            snapshot.payoutDestination.isConfigured
-                                ? 'Edit withdrawal destination'
-                                : 'Add withdrawal destination',
+                      if (snapshot.businessManagedWithdrawalsBlocked) ...<Widget>[
+                        const SizedBox(height: 14),
+                        const _FleetWithdrawalBlockedCard(
+                          message: DriverFinanceService.fleetManagedWithdrawalNotice,
+                        ),
+                      ] else ...<Widget>[
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _isSubmittingWithdrawal
+                                ? null
+                                : () async {
+                                    await _showEditDestinationDialog(
+                                      snapshot.payoutDestination,
+                                    );
+                                  },
+                            icon: const Icon(Icons.account_balance_outlined, size: 18),
+                            label: Text(
+                              snapshot.payoutDestination.isConfigured
+                                  ? 'Edit withdrawal destination'
+                                  : 'Add withdrawal destination',
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 14),
-                      _WithdrawalActionCard(
-                        isSubmitting: _isSubmittingWithdrawal,
-                        balance: snapshot.currentWalletBalance,
-                        hasDestination: snapshot.payoutDestination.isConfigured,
-                        onPressed: snapshot.currentWalletBalance > 0 &&
-                                snapshot.payoutDestination.isConfigured
-                            ? _showWithdrawDialog
-                            : null,
-                      ),
+                        const SizedBox(height: 14),
+                        _WithdrawalActionCard(
+                          isSubmitting: _isSubmittingWithdrawal,
+                          balance: snapshot.currentWalletBalance,
+                          hasDestination: snapshot.payoutDestination.isConfigured,
+                          onPressed: snapshot.currentWalletBalance > 0 &&
+                                  snapshot.payoutDestination.isConfigured
+                              ? _showWithdrawDialog
+                              : null,
+                        ),
+                      ],
                       const SizedBox(height: 22),
                       const _SectionHeader(
                         title: 'Withdrawal history',
@@ -828,6 +838,42 @@ class _DestinationSummaryCard extends StatelessWidget {
               color: Color(0xFF111111),
               fontWeight: FontWeight.w700,
               height: 1.35,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FleetWithdrawalBlockedCard extends StatelessWidget {
+  const _FleetWithdrawalBlockedCard({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E7),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE8C547)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Icon(Icons.business_outlined, color: Color(0xFF8A6D00)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                color: Color(0xFF111111),
+                fontWeight: FontWeight.w600,
+                height: 1.45,
+              ),
             ),
           ),
         ],

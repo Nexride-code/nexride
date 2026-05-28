@@ -174,6 +174,7 @@ class DriverFinanceSnapshot {
     required this.walletTransactions,
     required this.payoutDestination,
     required this.hasLiveBackendData,
+    this.businessManagedWithdrawalsBlocked = false,
   });
 
   final double totalGrossEarnings;
@@ -191,6 +192,7 @@ class DriverFinanceSnapshot {
   final List<DriverWalletTransaction> walletTransactions;
   final DriverPayoutDestination payoutDestination;
   final bool hasLiveBackendData;
+  final bool businessManagedWithdrawalsBlocked;
 
   bool get hasEarnings => earnings.isNotEmpty;
   bool get hasWalletActivity =>
@@ -214,6 +216,38 @@ class DriverFinanceService {
       'Withdrawals above ₦300,000 may take 2-3 working days to process. '
       'Withdrawals below ₦300,000 are typically processed within 48 hours. '
       'Approved withdrawals are paid to the bank account you provide.';
+
+  static const String fleetManagedWithdrawalNotice =
+      'Withdrawals are managed by your Dispatch Fleet business.';
+
+  static bool businessManagedWithdrawalsBlockedFromDriverData(
+    Map<String, dynamic> driverData,
+  ) {
+    final mode = _staticText(driverData['ownership_mode'] ?? driverData['ownershipMode'])
+        .toLowerCase();
+    final linkStatus = _staticText(
+      driverData['business_link_status'] ?? driverData['businessLinkStatus'],
+    ).toLowerCase();
+    if (mode == 'business_managed') {
+      return true;
+    }
+    if (linkStatus.isNotEmpty && linkStatus != 'approved') {
+      return true;
+    }
+    return false;
+  }
+
+  static String _staticText(dynamic value) => value?.toString().trim() ?? '';
+
+  static String withdrawalBlockedUserMessage(String? reasonCode) {
+    switch (reasonCode?.trim().toLowerCase()) {
+      case 'business_managed_withdrawal_blocked':
+      case 'business_link_not_approved':
+        return fleetManagedWithdrawalNotice;
+      default:
+        return '';
+    }
+  }
 
   Future<DriverFinanceSnapshot> fetchDriverFinanceSnapshot({
     required String driverId,
@@ -555,6 +589,8 @@ class DriverFinanceService {
           currentWalletBalance > 0 ||
           _legacyEarningRecordMap(legacyEarningsData).isNotEmpty ||
           legacyTripsData.isNotEmpty;
+      final businessManagedWithdrawalsBlocked =
+          businessManagedWithdrawalsBlockedFromDriverData(driverData);
 
       return DriverFinanceSnapshot(
         totalGrossEarnings: totalGrossEarnings,
@@ -572,6 +608,7 @@ class DriverFinanceService {
         walletTransactions: walletTransactions,
         payoutDestination: payoutDestination,
         hasLiveBackendData: hasLiveBackendData,
+        businessManagedWithdrawalsBlocked: businessManagedWithdrawalsBlocked,
       );
     } catch (error, stackTrace) {
       debugPrint(
@@ -687,6 +724,8 @@ class DriverFinanceService {
         ),
       ),
       hasLiveBackendData: false,
+      businessManagedWithdrawalsBlocked:
+          businessManagedWithdrawalsBlockedFromDriverData(driverData),
     );
   }
 
