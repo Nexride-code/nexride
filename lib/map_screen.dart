@@ -3335,6 +3335,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         final snap = await _rideRequestsRef.child(rideId).get();
         final remote = _asStringDynamicMap(snap.value);
         if (remote != null && _rideDataIsNonTerminalForRiderCancel(remote)) {
+          _currentRideSnapshot = remote;
+          _logRideFlow('CANCEL_REQUEST_RETRY_AFTER_REFRESH rideId=$rideId');
           cancelRes = await _rideCloud
               .cancelRideRequest(
                 rideId: rideId,
@@ -5829,6 +5831,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           borderRadius: BorderRadius.circular(20),
           onTap: enabled
               ? () async {
+                  if (_isPrimaryRideButtonCancelMode) {
+                    await cancelRide();
+                    return;
+                  }
                   print('RIDER_REQUEST_BUTTON_TAPPED');
                   await handlePrimaryRideAction();
                 }
@@ -10174,18 +10180,79 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return !TripStateMachine.isTerminal(canonical);
   }
 
+  List<String> _cancelRideIdCandidates() {
+    final seen = <String>{};
+    final ordered = <String>[];
+    void addCandidate(dynamic value) {
+      final rideId = _valueAsText(value).trim();
+      if (rideId.isEmpty || seen.contains(rideId)) {
+        return;
+      }
+      seen.add(rideId);
+      ordered.add(rideId);
+    }
+
+    addCandidate(_currentRideId);
+    addCandidate(_currentRideSnapshot?['ride_id']);
+    addCandidate(_currentRideSnapshot?['rideId']);
+    addCandidate(_currentRideSnapshot?['id']);
+    addCandidate(_activeRideInteractionId);
+    addCandidate(_recoverableActiveRideId);
+    addCandidate(_pendingRideRequestSubmissionId);
+    addCandidate(_activeRideListenerRideId);
+    addCandidate(_callListenerRideId);
+    return ordered;
+  }
+
+  Future<String?> _resolveCancelRideIdForRider() async {
+    for (final rideId in _cancelRideIdCandidates()) {
+      try {
+        final snap = await _rideRequestsRef.child(rideId).get();
+        final remote = _asStringDynamicMap(snap.value);
+        if (remote != null && _rideDataIsNonTerminalForRiderCancel(remote)) {
+          _currentRideSnapshot = remote;
+          if (_currentRideId != rideId) {
+            _currentRideId = rideId;
+          }
+          return rideId;
+        }
+      } catch (error) {
+        _logRideFlow('cancel rideId probe failed rideId=$rideId error=$error');
+      }
+    }
+
+    final riderUid = _currentRiderUid?.trim() ?? '';
+    if (riderUid.isNotEmpty) {
+      try {
+        final ptrSnap =
+            await rtdb.FirebaseDatabase.instance.ref('rider_active_trip/$riderUid').get();
+        final ptr = _asStringDynamicMap(ptrSnap.value);
+        final ptrRideId = _firstNonEmptyText(<dynamic>[
+          ptr?['ride_id'],
+          ptr?['rideId'],
+        ]);
+        if (ptrRideId.isNotEmpty) {
+          final snap = await _rideRequestsRef.child(ptrRideId).get();
+          final remote = _asStringDynamicMap(snap.value);
+          if (remote != null && _rideDataIsNonTerminalForRiderCancel(remote)) {
+            _currentRideSnapshot = remote;
+            _currentRideId = ptrRideId;
+            return ptrRideId;
+          }
+        }
+      } catch (error) {
+        _logRideFlow('cancel rideId pointer resolve failed error=$error');
+      }
+    }
+    return null;
+  }
+
   Future<void> cancelRide() async {
-    final rideId = (_currentRideId != null && _currentRideId!.trim().isNotEmpty)
-        ? _currentRideId!.trim()
-        : (_activeRideInteractionId?.trim().isNotEmpty == true
-            ? _activeRideInteractionId!.trim()
-            : _pendingRideRequestSubmissionId?.trim());
+    final rideId = await _resolveCancelRideIdForRider();
     if (rideId == null || rideId.isEmpty) {
       _logRideFlow('cancelRide skipped: no active ride');
       return;
     }
-
-    callTraceLog('CANCEL_TAP', rideId: rideId, role: 'rider');
 
     final displayReason = await _pickRiderCancelReason();
     if (displayReason == null || displayReason.trim().isEmpty) {
@@ -10193,6 +10260,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
+    callTraceLog('CANCEL_REQUEST_TAP', rideId: rideId, role: 'rider');
     callTraceLog(
       'CANCEL_REQUEST_START',
       rideId: rideId,

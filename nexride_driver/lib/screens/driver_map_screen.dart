@@ -14866,34 +14866,38 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     );
   }
 
-  String? _resolvedActiveCancelRideId() {
-    final candidates = <String?>[
-      _currentRideId,
-      _valueAsText(_currentRideData?['rideId']).isEmpty
-          ? null
-          : _valueAsText(_currentRideData?['rideId']),
-      _valueAsText(_currentRideData?['ride_id']).isEmpty
-          ? null
-          : _valueAsText(_currentRideData?['ride_id']),
-      _driverActiveRideId,
-      _sessionTrackedRideId,
-      _activeRideListenerRideId,
-      _callListenerRideId,
-    ];
-    for (final candidate in candidates) {
-      final rideId = candidate?.trim();
-      if (rideId != null && rideId.isNotEmpty && _isValidRideId(rideId)) {
-        return rideId;
+  List<String> _cancelRideIdCandidates() {
+    final seen = <String>{};
+    final ordered = <String>[];
+    void addCandidate(dynamic value) {
+      final rideId = _valueAsText(value).trim();
+      if (rideId.isEmpty || !_isValidRideId(rideId) || seen.contains(rideId)) {
+        return;
       }
+      seen.add(rideId);
+      ordered.add(rideId);
     }
-    return null;
+
+    addCandidate(_currentRideId);
+    addCandidate(_currentRideData?['ride_id']);
+    addCandidate(_currentRideData?['rideId']);
+    addCandidate(_currentRideData?['id']);
+    addCandidate(_driverActiveRideId);
+    addCandidate(_sessionTrackedRideId);
+    addCandidate(_activeRideListenerRideId);
+    addCandidate(_callListenerRideId);
+    return ordered;
   }
 
   Future<String?> _resolveCancelRideIdForDriver() async {
-    final localRideId = _resolvedActiveCancelRideId();
-    if (localRideId != null) {
-      return localRideId;
+    for (final rideId in _cancelRideIdCandidates()) {
+      final remote = await _fetchRideRequestForCancel(rideId);
+      if (_rideDataIsNonTerminalForCancel(remote)) {
+        _currentRideData = remote;
+        return rideId;
+      }
     }
+
     final driverId = _effectiveDriverId.trim();
     if (driverId.isEmpty) {
       return null;
@@ -14906,7 +14910,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         marker?['ride_id'] ?? marker?['rideId'],
       );
       if (pointerRideId.isNotEmpty && _isValidRideId(pointerRideId)) {
-        return pointerRideId;
+        final remote = await _fetchRideRequestForCancel(pointerRideId);
+        if (_rideDataIsNonTerminalForCancel(remote)) {
+          _currentRideData = remote;
+          return pointerRideId;
+        }
       }
     } catch (error) {
       _log('driver cancel rideId resolve pointer failed error=$error');
@@ -14934,13 +14942,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
   Future<void> cancelActiveRide() async {
     final currentRideId = await _resolveCancelRideIdForDriver();
-    if (currentRideId != null &&
-        _currentRideId != currentRideId &&
-        mounted) {
-      _setStateSafely(() {
-        _currentRideId = currentRideId;
-      });
+    if (currentRideId == null || currentRideId.isEmpty) {
+      _log('driver cancel blocked reason=missing_ride_id');
+      return;
     }
+    if (_currentRideId != currentRideId) {
+      _currentRideId = currentRideId;
+      if (mounted) {
+        _setStateSafely(() {});
+      }
+    }
+    callTraceLog('CANCEL_REQUEST_TAP', rideId: currentRideId, role: 'driver');
     final serviceType = _serviceTypeKey(_currentRideData?['service_type']);
     final invalidReason = currentRideId == null
         ? 'missing_ride_id'
@@ -14949,11 +14961,6 @@ class _DriverMapScreenState extends State<DriverMapScreen>
             rideId: currentRideId,
             requireTrackedRide: true,
           );
-
-    if (currentRideId == null) {
-      _log('driver cancel blocked reason=missing_ride_id');
-      return;
-    }
 
     if (!_canDriverCancelActiveRide(_rideStatus)) {
       _log(
@@ -14979,8 +14986,6 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       _log('[CANCEL] actor=driver rideId=$currentRideId dismissed');
       return;
     }
-
-    callTraceLog('CANCEL_TAP', rideId: currentRideId, role: 'driver');
 
     if (mounted) {
       _setStateSafely(() {
@@ -15011,12 +15016,24 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       if (!rideCallableSucceeded(cloud)) {
         final failReason = rideCallableReason(cloud).trim().toLowerCase();
         if (failReason == 'ride_missing') {
+          final refreshSnap =
+              await _rideRequestsRef.child(currentRideId).get();
+          if (refreshSnap.exists) {
+            final refreshedRide = _asStringDynamicMap(refreshSnap.value);
+            if (refreshedRide != null) {
+              _currentRideData = refreshedRide;
+              if (mounted) {
+                _setStateSafely(() {
+                  _currentRideId = currentRideId;
+                });
+              } else {
+                _currentRideId = currentRideId;
+              }
+            }
+          }
           final refreshedRide = await _fetchRideRequestForCancel(currentRideId);
           if (_rideDataIsNonTerminalForCancel(refreshedRide)) {
-            _log(
-              '[CANCEL] actor=driver rideId=$currentRideId '
-              'retry after ride_missing refresh',
-            );
+            _log('CANCEL_REQUEST_RETRY_AFTER_REFRESH rideId=$currentRideId');
             cloud = await _rideCloud.cancelRideRequest(
               rideId: currentRideId,
               cancelReason: cancelReason.trim(),
@@ -15077,6 +15094,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         '[CANCEL] actor=driver rideId=$currentRideId reason=$cancelReason success',
       );
     } catch (error) {
+      callTraceLog(
+        'CANCEL_REQUEST_FAIL',
+        rideId: currentRideId,
+        role: 'driver',
+        error: error.toString(),
+      );
       _log(
         '[CANCEL] actor=driver rideId=$currentRideId reason=$cancelReason fail error=$error',
       );

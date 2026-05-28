@@ -4985,64 +4985,89 @@ async function releaseOpenRideForBankTransferFailure(
   return { success: true, reason: "released" };
 }
 
-async function cancelRideRequest(data, context, db) {
-  const rideId = normRideIdFromCallableData(data);
-  const cancelReason = String(data?.cancel_reason ?? data?.cancelReason ?? "").trim();
-  if (!rideId || !context.auth) {
-    return { success: false, reason: "unauthorized" };
+function isCancelRideTerminalState(cur) {
+  const tsState = String(cur?.trip_state ?? "").trim().toLowerCase();
+  return (
+    tsState === TRIP_STATE.completed ||
+    tsState === TRIP_STATE.cancelled ||
+    tsState === TRIP_STATE.expired ||
+    tsState === "trip_completed" ||
+    tsState === "trip_cancelled"
+  );
+}
+
+/** Driver cancel auth: canonical assignee plus legacy driver_id when not a placeholder. */
+function isCancelRideDriverActor(cur, uid) {
+  const assigned = canonicalAssignedDriverId(cur);
+  if (assigned && uid === assigned) {
+    return true;
   }
-  const uid = normUid(context.auth.uid);
-  let isAdminUser = await adminPerms.canAdmin(db, context, "trips.write");
-  const rideRef = db.ref(`ride_requests/${rideId}`);
-  let reason = "unknown";
-  const tx = await rideRef.transaction((cur) => {
-    if (!cur || typeof cur !== "object") {
-      reason = "ride_missing";
-      return;
-    }
-    const rider = normUid(cur.rider_id);
-    const driver = normUid(cur.driver_id);
-    const isRider = uid === rider;
-    const isDriver = uid === driver && !isPlaceholderDriverId(cur.driver_id);
-    const isAdmin = isAdminUser;
-    if (!isRider && !isDriver && !isAdmin) {
-      reason = "forbidden";
-      return;
-    }
-    const tsState = String(cur.trip_state ?? "").trim().toLowerCase();
-    if (
-      tsState === TRIP_STATE.completed ||
-      tsState === TRIP_STATE.cancelled ||
-      tsState === TRIP_STATE.expired ||
-      tsState === "trip_completed" ||
-      tsState === "trip_cancelled"
-    ) {
-      reason = "already_terminal";
-      return;
-    }
-    const now = nowMs();
-    const effectiveCancelReason =
-      cancelReason ||
-      (isAdmin ? "admin_cancelled" : isRider ? "rider_cancelled" : "driver_cancelled");
-    const nextStatus =
-      isDriver && !isRider && !isAdmin ? "driver_cancelled" : "cancelled";
-    return {
+  const driver = normUid(cur?.driver_id ?? cur?.driverId);
+  return uid === driver && !isPlaceholderDriverId(cur?.driver_id ?? cur?.driverId);
+}
+
+function cancelRideActorHint(cur, uid, isAdmin) {
+  if (!cur || typeof cur !== "object") {
+    return isAdmin ? "admin" : "unknown";
+  }
+  const rider = normUid(cur.rider_id ?? cur.riderId);
+  if (uid === rider) {
+    return "rider";
+  }
+  if (isCancelRideDriverActor(cur, uid)) {
+    return "driver";
+  }
+  if (isAdmin) {
+    return "admin";
+  }
+  return "unknown";
+}
+
+/**
+ * Pure cancel decision for RTDB transaction and warm-read fallback.
+ * @returns {{ ok: boolean, reason: string, patch?: Record<string, unknown> }}
+ */
+function evaluateCancelRideTransition(cur, uid, isAdmin, cancelReason) {
+  if (!cur || typeof cur !== "object") {
+    return { ok: false, reason: "ride_missing" };
+  }
+  const rider = normUid(cur.rider_id ?? cur.riderId);
+  const isRider = uid === rider;
+  const isDriver = isCancelRideDriverActor(cur, uid);
+  const isAdminActor = isAdmin;
+  if (!isRider && !isDriver && !isAdminActor) {
+    return { ok: false, reason: "forbidden" };
+  }
+  if (isCancelRideTerminalState(cur)) {
+    return { ok: false, reason: "already_terminal" };
+  }
+  const now = nowMs();
+  const effectiveCancelReason =
+    cancelReason ||
+    (isAdminActor ? "admin_cancelled" : isRider ? "rider_cancelled" : "driver_cancelled");
+  const nextStatus =
+    isDriver && !isRider && !isAdminActor ? "driver_cancelled" : "cancelled";
+  return {
+    ok: true,
+    reason: "cancelled",
+    patch: {
       ...cur,
       trip_state: TRIP_STATE.cancelled,
       status: nextStatus,
       cancelled_at: now,
       updated_at: now,
       cancel_reason: effectiveCancelReason,
-      cancel_actor: isAdmin ? "admin" : isRider ? "rider" : "driver",
-      cancelled_by: isAdmin ? "admin" : isRider ? "rider" : "driver",
-    };
-  });
-  if (!tx.committed) {
-    return { success: false, reason };
-  }
-  const v = tx.snapshot.val();
-  const rider = normUid(v?.rider_id);
-  const drv = normUid(v?.driver_id);
+      cancel_actor: isAdminActor ? "admin" : isRider ? "rider" : "driver",
+      cancelled_by: isAdminActor ? "admin" : isRider ? "rider" : "driver",
+    },
+  };
+}
+
+async function applyCancelRidePostCommit(db, rideId, v, uid, cancelReason) {
+  const rider = normUid(v?.rider_id ?? v?.riderId);
+  const drv =
+    canonicalAssignedDriverId(v) ||
+    (isPlaceholderDriverId(v?.driver_id) ? "" : normUid(v?.driver_id));
   const tripState = String(v?.trip_state ?? "").trim().toLowerCase();
   const tripStarted =
     tripState === TRIP_STATE.on_trip ||
@@ -5055,7 +5080,7 @@ async function cancelRideRequest(data, context, db) {
     await cardPayment.voidRideCardOnCancel({ db, rideId, ride: v });
   }
   await clearFanoutAndOffers(db, rideId);
-  if (drv && !isPlaceholderDriverId(v?.driver_id)) {
+  if (drv) {
     await clearActiveTripPointers(db, rideId, rider, drv);
     try {
       const { releaseAssignmentLocks } = require("./dispatch_engine/dispatch_assignment_lock_engine");
@@ -5078,7 +5103,111 @@ async function cancelRideRequest(data, context, db) {
     actor_uid: uid,
     cancel_reason: cancelReason,
   });
-  await syncRideRealtimeMirrors(db, rideId, drv || driverId);
+  await syncRideRealtimeMirrors(db, rideId, drv);
+}
+
+async function cancelRideRequest(data, context, db) {
+  const rideId = normRideIdFromCallableData(data);
+  const cancelReason = String(data?.cancel_reason ?? data?.cancelReason ?? "").trim();
+  if (!rideId || !context.auth) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const uid = normUid(context.auth.uid);
+  const isAdminUser = await adminPerms.canAdmin(db, context, "trips.write");
+  const rideRef = db.ref(`ride_requests/${rideId}`);
+  const payloadKeys =
+    data && typeof data === "object" && !Array.isArray(data) ? Object.keys(data).join(",") : "";
+
+  const preSnap = await rideRef.get();
+  const warmExists = snapExists(preSnap);
+  const preRide = rideDocFromSnapshot(preSnap);
+  const warmType = preRide
+    ? "object"
+    : preSnap.val() === null || preSnap.val() === undefined
+      ? "null"
+      : typeof preSnap.val();
+
+  console.log(
+    "CANCEL_BACKEND_REQUEST",
+    `rideId=${rideId}`,
+    `uid=${uid}`,
+    `actor=${cancelRideActorHint(preRide, uid, isAdminUser)}`,
+    `payloadKeys=${payloadKeys}`,
+  );
+  console.log(
+    "CANCEL_BACKEND_RIDE_LOOKUP",
+    `rideId=${rideId}`,
+    `warmExists=${warmExists}`,
+    `warmType=${warmType}`,
+    `trip_state=${preRide ? String(preRide.trip_state ?? "") : ""}`,
+    `status=${preRide ? String(preRide.status ?? "") : ""}`,
+  );
+
+  let txReason = "unknown";
+  const tx = await rideRef.transaction((cur) => {
+    const decision = evaluateCancelRideTransition(cur, uid, isAdminUser, cancelReason);
+    txReason = decision.reason;
+    if (!decision.ok) {
+      return;
+    }
+    return decision.patch;
+  });
+
+  let finalRide = tx.committed ? rideDocFromSnapshot(tx.snapshot) : null;
+  let fallbackUsed = false;
+
+  if (!tx.committed) {
+    const failReason = txReason;
+    if (failReason === "ride_missing" && preRide) {
+      const fallbackDecision = evaluateCancelRideTransition(
+        preRide,
+        uid,
+        isAdminUser,
+        cancelReason,
+      );
+      txReason = fallbackDecision.reason;
+      if (!fallbackDecision.ok) {
+        console.log(
+          "CANCEL_BACKEND_FAIL_REASON",
+          `reason=${fallbackDecision.reason}`,
+          `warmExists=${warmExists}`,
+          `txReason=${failReason}`,
+          `fallbackUsed=false`,
+        );
+        return { success: false, reason: fallbackDecision.reason };
+      }
+      await rideRef.update(fallbackDecision.patch);
+      finalRide = fallbackDecision.patch;
+      fallbackUsed = true;
+      console.log(
+        "CANCEL_BACKEND_FALLBACK_UPDATE_OK",
+        `rideId=${rideId}`,
+        `uid=${uid}`,
+      );
+    } else {
+      console.log(
+        "CANCEL_BACKEND_FAIL_REASON",
+        `reason=${failReason}`,
+        `warmExists=${warmExists}`,
+        `txReason=${failReason}`,
+        `fallbackUsed=false`,
+      );
+      return { success: false, reason: failReason };
+    }
+  }
+
+  if (!finalRide) {
+    console.log(
+      "CANCEL_BACKEND_FAIL_REASON",
+      `reason=ride_missing`,
+      `warmExists=${warmExists}`,
+      `txReason=${txReason}`,
+      `fallbackUsed=${fallbackUsed}`,
+    );
+    return { success: false, reason: "ride_missing" };
+  }
+
+  await applyCancelRidePostCommit(db, rideId, finalRide, uid, cancelReason);
   return { success: true, reason: "cancelled" };
 }
 
@@ -5780,6 +5909,9 @@ module.exports = {
   hasAssignedDriver,
   rideAssignedDriverUid,
   evaluateDriverArrivedTransition,
+  isCancelRideTerminalState,
+  isCancelRideDriverActor,
+  evaluateCancelRideTransition,
   canonicalAssignedDriverId,
   ridePoolOpenForAccept,
   rideAssignedOrTerminal,
