@@ -182,6 +182,30 @@ async function refreshDriverAvailability(db, driverId, options = {}) {
   const summary = await clearStaleDriverTripSummary(db, d);
   const offers = await purgeExpiredDriverOfferQueueEntries(db, d);
 
+  try {
+    const {
+      maybeUpsertAvailableDriverThrottled,
+    } = require("./dispatch_engine/dispatch_available_drivers_index");
+    await maybeUpsertAvailableDriverThrottled(db, d, {
+      source: `refresh_availability_${source}`,
+    });
+  } catch (geoErr) {
+    dispatchVerboseLog(
+      "DISPATCH_GEO_INDEX_UPSERT_FAIL",
+      `driverId=${d}`,
+      String(geoErr?.message || geoErr),
+    );
+  }
+
+  if (repair.success !== false) {
+    console.log(
+      "DISPATCH_BLOCKER_REPAIR_OK",
+      `driverId=${d}`,
+      `source=${source}`,
+      `repairReason=${repair.reason ?? ""}`,
+    );
+  }
+
   dispatchVerboseLog(
     "REFRESH_DRIVER_AVAILABILITY_DONE",
     `driverId=${d}`,

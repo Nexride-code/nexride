@@ -397,7 +397,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   bool _callSpeakerOn = true;
   bool _callJoinedChannel = false;
   bool _isStartingVoiceCall = false;
-  String? _callJoinBlockedRideId;
+  int _callJoinAttemptCount = 0;
+  final Set<String> _callCleanupDoneRideIds = <String>{};
   bool _callLocalCleanupInProgress = false;
 
   LatLng _driverLocation = const LatLng(
@@ -439,6 +440,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   Timer? _waitFeeGraceTimer;
   String? _waitFeeGraceRideId;
   bool _waitFeeApplyInFlight = false;
+  Timer? _waitTimerTicker;
+  int _waitTimerSecondsRemaining = 0;
   bool _paymentConfirmInFlight = false;
   String? _driverActiveRideId;
   String? _activeRideListenerRideId;
@@ -882,6 +885,45 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (reason.isNotEmpty) {
       _log('wait fee grace timer cleared reason=$reason');
     }
+  }
+
+  void _cancelWaitTimerTicker() {
+    _waitTimerTicker?.cancel();
+    _waitTimerTicker = null;
+    _waitTimerSecondsRemaining = 0;
+  }
+
+  String _waitTimerLabel() {
+    final seconds = _waitTimerSecondsRemaining.clamp(0, 36000);
+    final mm = (seconds ~/ 60).toString().padLeft(2, '0');
+    final ss = (seconds % 60).toString().padLeft(2, '0');
+    return '$mm:$ss';
+  }
+
+  void _startWaitTimerTicker(String rideId) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) return;
+    _cancelWaitTimerTicker();
+    _waitTimerTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _currentRideId != normalizedRideId) {
+        _cancelWaitTimerTicker();
+        return;
+      }
+      final graceUntilMs = _asInt(_currentRideData?['wait_fee_grace_until']) ?? 0;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final remainingSeconds =
+          graceUntilMs > nowMs ? ((graceUntilMs - nowMs) / 1000).ceil() : 0;
+      _waitTimerSecondsRemaining = remainingSeconds;
+      if (remainingSeconds % 15 == 0) {
+        _log('WAIT_TIMER_TICK rideId=$normalizedRideId seconds=$remainingSeconds');
+      }
+      if (remainingSeconds <= 0) {
+        _log('WAIT_TIMER_EXPIRED rideId=$normalizedRideId');
+        _cancelWaitTimerTicker();
+      } else {
+        _setStateSafely(() {});
+      }
+    });
   }
 
   @override
@@ -2103,6 +2145,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (_waitFeeGraceTimer != null) {
       count++;
     }
+    if (_waitTimerTicker != null) {
+      count++;
+    }
     if (_callDurationTimer != null) {
       count++;
     }
@@ -2914,6 +2959,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   void dispose() {
     _isDisposing = true;
     _cancelWaitFeeGraceTimer(reason: 'dispose');
+    _cancelWaitTimerTicker();
     WidgetsBinding.instance.removeObserver(this);
     _positionStream?.cancel();
     _positionStream = null;
@@ -5773,7 +5819,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _currentCallSession = nextSession;
 
     if (nextSession == null) {
-      _callJoinBlockedRideId = null;
+      _callJoinAttemptCount = 0;
       final hadCallActivity = previousSession != null ||
           _callJoinedChannel ||
           _callOverlayEntry != null ||
@@ -5787,7 +5833,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     if (nextSession.isRinging) {
-      _callJoinBlockedRideId = null;
+      _callJoinAttemptCount = 0;
+      _callCleanupDoneRideIds.remove(rideId);
       _scheduleCallRingTimeout(nextSession);
       _stopCallDurationTicker();
       _callAcceptedAt = null;
@@ -5809,6 +5856,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         await _startCallRingtone();
       } else {
         await _stopCallRingtone();
+        _logRideCall('CALL_UI_OUTGOING_SHOW rideId=$rideId source=CALL_SIGNAL_WRITE_OK');
       }
 
       _refreshCallOverlayEntry();
@@ -5824,13 +5872,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         _logRideCall('call accepted rideId=$rideId');
       }
 
-      if (!_callJoinedChannel && _callJoinBlockedRideId != rideId) {
+      if (!_callJoinedChannel && _callJoinAttemptCount < 3) {
         final driverId = _effectiveDriverId;
         if (driverId.isNotEmpty) {
           await _joinAcceptedCall(rideId: rideId, uid: driverId);
         }
       }
 
+      _logRideCall('CALL_UI_ACTIVE_SHOW rideId=$rideId source=accepted_session');
+      if (_callService.isVoiceConnected) {
+        _logRideCall('CALL_UI_ACTIVE_SHOW rideId=$rideId source=CALL_REMOTE_JOINED');
+      }
       _refreshCallOverlayEntry();
       return;
     }
@@ -5863,14 +5915,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     if (nextSession.isTerminal) {
-      _callJoinBlockedRideId = null;
+      _callJoinAttemptCount = 0;
       if (previousStatus != nextSession.status) {
         await _performLocalCallCleanup(rideId: rideId);
       }
       return;
     }
-
-    await _performLocalCallCleanup(rideId: rideId);
   }
 
   Future<void> _joinAcceptedCall({
@@ -5905,19 +5955,24 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         updateKind: ParticipantUpdateKind.callLifecycle,
         force: true,
       );
+      _logRideCall('CALL_UI_ACTIVE_SHOW rideId=$rideId source=CALL_JOIN_OK');
+      _refreshCallOverlayEntry();
     } catch (error) {
-      _logRideCall('[CALL_JOIN_FAIL] rideId=$rideId error=$error');
+      _callJoinAttemptCount++;
+      _logRideCall(
+        '[CALL_JOIN_FAIL] rideId=$rideId attempt=$_callJoinAttemptCount error=$error',
+      );
       _callJoinedChannel = false;
-      _callJoinBlockedRideId = rideId;
       _setStartingVoiceCall(false);
-      await _performLocalCallCleanup(rideId: rideId, logCleanup: false);
       final message = error is RideCallException
           ? error.message
           : 'Unable to connect the call right now.';
-      await _callService.endAcceptedCall(
-        rideId: rideId,
-        endedBy: 'system',
-      );
+      if (_callJoinAttemptCount >= 3) {
+        await _callService.endAcceptedCall(
+          rideId: rideId,
+          endedBy: 'system',
+        );
+      }
       _showSnackBarSafely(
         SnackBar(
           content: Text(message),
@@ -6040,6 +6095,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     required String rideId,
     bool logCleanup = true,
   }) async {
+    if (_callCleanupDoneRideIds.contains(rideId)) {
+      return;
+    }
     final hadVisibleCallState = _currentCallSession != null ||
         _callJoinedChannel ||
         _alertSoundService.isCallAlertActive ||
@@ -6049,22 +6107,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (!hadVisibleCallState) {
       return;
     }
-    final driverId = _effectiveDriverId;
-
-    if (hadVisibleCallState && driverId.isNotEmpty && rideId.isNotEmpty) {
-      unawaited(
-        _updateParticipantStateSafely(
-          source: 'call_cleanup',
-          rideId: rideId,
-          joined: false,
-          muted: _callMuted,
-          speaker: _callSpeakerOn,
-          foreground: _appLifecycleState == AppLifecycleState.resumed,
-          updateKind: ParticipantUpdateKind.callLifecycle,
-          force: true,
-        ),
-      );
-    }
+    _callCleanupDoneRideIds.add(rideId);
 
     _cancelCallRingTimeout();
     _stopCallDurationTicker();
@@ -6082,6 +6125,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     _callJoinedChannel = false;
+    _logRideCall('CALL_UI_CLOSE rideId=$rideId reason=local_cleanup');
     _removeCallOverlayEntry();
 
     if (hadVisibleCallState) {
@@ -6201,6 +6245,15 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         await _handleCallSnapshotUpdate(rideId, result.session);
       }
     } finally {
+      final session = _currentCallSession;
+      final keepUiVisible = session != null &&
+          !session.isTerminal &&
+          (session.isRinging || session.isAccepted || _callService.isVoiceConnected);
+      if (keepUiVisible) {
+        _logRideCall(
+          'CALL_UI_RESET_BLOCKED_ACTIVE_SESSION reason=start_voice_call_finally rideId=${session.rideId} status=${session.status}',
+        );
+      }
       _setStartingVoiceCall(false);
     }
   }
@@ -6433,16 +6486,18 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return;
     }
 
-    _callOverlayEntry ??= OverlayEntry(
-      builder: (context) => _buildRideCallOverlay(),
-    );
+    final entry = _callOverlayEntry ??
+        OverlayEntry(
+          builder: (context) => _buildRideCallOverlay(),
+        );
+    _callOverlayEntry = entry;
 
-    if (!_callOverlayEntry!.mounted) {
-      overlay.insert(_callOverlayEntry!);
+    if (!entry.mounted) {
+      overlay.insert(entry);
       return;
     }
 
-    _callOverlayEntry!.markNeedsBuild();
+    entry.markNeedsBuild();
   }
 
   void _removeCallOverlayEntry() {
@@ -6545,7 +6600,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
             final isFailed = phase == AgoraConnectionPhase.failed;
             final isReconnecting = phase == AgoraConnectionPhase.reconnecting;
             final isConnecting = phase == AgoraConnectionPhase.connecting ||
-                (session.isAccepted && phase != AgoraConnectionPhase.connected);
+                (session.isAccepted &&
+                    !_callService.isVoiceConnected &&
+                    phase != AgoraConnectionPhase.failed &&
+                    phase != AgoraConnectionPhase.reconnecting);
             final resolvedSubtitle = isOutgoing
                 ? 'Calling...'
                 : isFailed
@@ -7919,6 +7977,46 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         _valueAsText(rideData['status']).toLowerCase() == 'searching' ||
         _valueAsText(rideData['trip_state']).toLowerCase() == 'searching' ||
         _valueAsText(rideData['trip_state']).toLowerCase() == 'requesting';
+  }
+
+  bool _paymentAllowsAcceptRide(Map<String, dynamic>? rideData) {
+    if (rideData == null || rideData.isEmpty) {
+      return false;
+    }
+    final method = _paymentMethodFromRide(rideData).toLowerCase();
+    final status = _valueAsText(rideData['payment_status']).toLowerCase();
+    final settlement = _valueAsText(rideData['settlement_status']).toLowerCase();
+    if (status == 'bank_transfer_expired' ||
+        status == 'failed' ||
+        status == 'declined') {
+      return false;
+    }
+    if (_ridePaymentConfirmed(rideData)) {
+      return true;
+    }
+    const reviewStatuses = <String>{
+      'pending',
+      'pending_transfer',
+      'pending_manual_confirmation',
+      'pending_review',
+      'payment_review',
+      'bank_transfer_pending',
+      'automated_va',
+      'in_review',
+    };
+    if (reviewStatuses.contains(status) || settlement == 'payment_review') {
+      return true;
+    }
+    final automatedVa = rideData['bank_transfer_automated'] == true ||
+        rideData['automated_va'] == true ||
+        method == 'flutterwave_va';
+    if (automatedVa && (status.isEmpty || reviewStatuses.contains(status))) {
+      return true;
+    }
+    if (method == 'bank_transfer' && status == 'awaiting_transfer') {
+      return true;
+    }
+    return false;
   }
 
   void _suppressPopupForeverAfterTerminalAcceptFailure(
@@ -9692,20 +9790,120 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   }
 
   void _rearmRideRequestListener(String reason) {
-    Future<void>.microtask(() {
-      if (!_isOnline || _hasActiveDriverTripAssignment()) {
+    _scheduleDiscoveryRearmWhenIdle(reason);
+  }
+
+  void _scheduleDiscoveryRearmWhenIdle(String reason, {int attempt = 0}) {
+    if (attempt > 12) {
+      _logRideReq(
+        'DISPATCH_DISCOVERY_REARM_DEFERRED reason=$reason attempts=$attempt',
+      );
+      return;
+    }
+    Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 250), () {
+      if (!mounted || !_isOnline || _hasActiveDriverTripAssignment()) {
         return;
       }
       if (_discoveryRebindFrozen) {
-        _logRideReq(
-          'listener rearm deferred popup_state=${_popupLifecycleState.name} reason=$reason',
-        );
+        _scheduleDiscoveryRearmWhenIdle(reason, attempt: attempt + 1);
         return;
       }
-
       _logListenerStillActiveWaitingForFreshRides();
-      unawaited(_listenForRideRequests(reason: reason));
+      unawaited(_listenForRideRequests(reason: 'discovery_rearm:$reason').then((attached) {
+        if (attached) {
+          _logRideReq('DISPATCH_DISCOVERY_REARM_OK reason=$reason');
+        }
+      }));
     });
+  }
+
+  Future<void> _syncDriverDeclineToServer(String rideId) async {
+    final normalized = rideId.trim();
+    if (normalized.isEmpty) {
+      return;
+    }
+    _logRideReq('DRIVER_DECLINE_SERVER_SYNC_START rideId=$normalized');
+    try {
+      final resp = await _rideCloud
+          .withdrawDriverOffer(
+            rideId: normalized,
+            reason: 'driver_declined',
+          )
+          .timeout(const Duration(seconds: 20));
+      if (rideCallableSucceeded(resp)) {
+        _logRideReq('DRIVER_DECLINE_SERVER_SYNC_OK rideId=$normalized');
+      } else {
+        _logRideReq(
+          'DRIVER_DECLINE_SERVER_SYNC_FAIL rideId=$normalized '
+          'reason=${_valueAsText(resp['reason'])}',
+        );
+      }
+    } catch (error) {
+      _logRideReq(
+        'DRIVER_DECLINE_SERVER_SYNC_FAIL rideId=$normalized error=$error',
+      );
+    }
+  }
+
+  Future<void> _repairDispatchBlockersAndRearmDiscovery({
+    required String reason,
+    String releasedRideId = '',
+  }) async {
+    if (!_isOnline) {
+      return;
+    }
+    _logRideReq('DISPATCH_BLOCKER_REPAIR_START reason=$reason');
+    try {
+      final resp = await _rideCloud
+          .refreshDriverAvailability(source: 'dispatch_blocker_repair_$reason')
+          .timeout(const Duration(seconds: 20));
+      _applyDispatchBlockerRepairToLocalState(
+        resp,
+        releasedRideId: releasedRideId,
+      );
+      if (rideCallableSucceeded(resp)) {
+        _logRideReq('DISPATCH_BLOCKER_REPAIR_OK reason=$reason');
+      } else {
+        _logRideReq(
+          'DISPATCH_BLOCKER_REPAIR_FAIL reason=$reason '
+          'callableReason=${_valueAsText(resp['reason'])}',
+        );
+      }
+    } catch (error) {
+      _logRideReq('DISPATCH_BLOCKER_REPAIR_FAIL reason=$reason error=$error');
+    }
+    _scheduleDiscoveryRearmWhenIdle(reason);
+  }
+
+  void _applyDispatchBlockerRepairToLocalState(
+    Map<String, dynamic> resp, {
+    String releasedRideId = '',
+  }) {
+    final repair = resp['repair'];
+    if (repair is! Map) {
+      return;
+    }
+    final blockingRaw = repair['blockingTripIds'] ?? repair['blocking_trip_ids'];
+    final blocking = blockingRaw is List
+        ? blockingRaw.map((e) => _valueAsText(e).trim()).where((id) => id.isNotEmpty).toList()
+        : <String>[];
+    if (blocking.isNotEmpty) {
+      return;
+    }
+    final releaseId = releasedRideId.trim();
+    if (releaseId.isNotEmpty &&
+        (_currentRideId?.trim() == releaseId ||
+            _driverActiveRideId?.trim() == releaseId)) {
+      unawaited(
+        _releaseAssignedRideIfNeeded(
+          rideId: releaseId,
+          reason: 'dispatch_blocker_repair',
+        ),
+      );
+    }
+    if (!_hasActiveDriverTripAssignment()) {
+      _discoverySuspendedForRideId = null;
+    }
   }
 
   Future<_MatchedRideRequest?> _loadLivePopupRide(
@@ -10215,9 +10413,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       logRtdbAuthContext(role: 'driver', path: 'drivers/$driverId');
       onlinePublishAttempted = true;
       try {
-        await _rideCloud
+        _logRideReq('DISPATCH_BLOCKER_REPAIR_START reason=go_online');
+        final refreshResp = await _rideCloud
             .refreshDriverAvailability(source: 'go_online')
             .timeout(const Duration(seconds: 20));
+        _applyDispatchBlockerRepairToLocalState(refreshResp);
+        if (rideCallableSucceeded(refreshResp)) {
+          _logRideReq('DISPATCH_BLOCKER_REPAIR_OK reason=go_online');
+        } else {
+          _logRideReq(
+            'DISPATCH_BLOCKER_REPAIR_FAIL reason=go_online '
+            'callableReason=${_valueAsText(refreshResp['reason'])}',
+          );
+        }
         final onlineResp = await _rideCloud
             .setDriverOnline(
               availabilityMode: sessionMode,
@@ -10355,6 +10563,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       if (!discoveryReady) {
         await Future<void>.delayed(const Duration(milliseconds: 500));
         discoveryReady = await _listenForRideRequests(reason: 'goOnline_retry');
+      }
+      if (discoveryReady) {
+        _logRideReq('DISPATCH_DISCOVERY_REARM_OK reason=go_online');
       }
       dispatchVerboseLog(
         'DRIVER_ONLINE_SUCCESS driverId=$driverId '
@@ -13265,8 +13476,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         _log(
           'driver acceptance ts=${DateTime.now().toIso8601String()} action=decline rideId=${popupRide.rideId} currentRideId=$_currentRideId',
         );
+        unawaited(_syncDriverDeclineToServer(popupRide.rideId));
         _clearRidePreview();
-        _rearmRideRequestListener('ride declined rideId=${popupRide.rideId}');
         return;
       }
 
@@ -13370,6 +13581,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       if (_popupDismissedRideId == ride.rideId) {
         _popupDismissedRideId = null;
         _popupDismissedReason = null;
+      }
+      if (!rideAccepted) {
+        final repairReason = popupTimedOut
+            ? 'offer_expired'
+            : (_popupDismissedReason ?? 'popup_closed');
+        unawaited(
+          _repairDispatchBlockersAndRearmDiscovery(
+            reason: repairReason,
+            releasedRideId: ride.rideId,
+          ),
+        );
       }
       scheduleMicrotask(() {
         unawaited(_flushRideRequestPopupQueueAfterClose());
@@ -13532,12 +13754,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         );
         return false;
       }
-      Map<String, dynamic>? preflightRideData = _driverOfferRideCache[rideId];
       rtdb.DataSnapshot? preflightSnapshot;
-      if (preflightRideData == null) {
-        preflightSnapshot = await ref.get();
-        preflightRideData = _asStringDynamicMap(preflightSnapshot.value);
-      }
+      preflightSnapshot = await ref.get();
+      Map<String, dynamic>? preflightRideData =
+          _asStringDynamicMap(preflightSnapshot.value) ??
+              _driverOfferRideCache[rideId];
       if (preflightRideData == null) {
         final offerQueued = _driverOfferQueueReplica.containsKey(rideId) ||
             (await rtdb.FirebaseDatabase.instance
@@ -13549,8 +13770,16 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           preflightRideData = _asStringDynamicMap(preflightSnapshot.value);
         }
       }
-      if (preflightRideData == null ||
-          !_driverOfferRideStillAcceptable(preflightRideData, driverId)) {
+      final offerAcceptable =
+          _driverOfferRideStillAcceptable(preflightRideData, driverId);
+      final paymentAcceptable = _paymentAllowsAcceptRide(preflightRideData);
+      if (preflightRideData == null || !offerAcceptable || !paymentAcceptable) {
+        _offerDiscoveryLog(
+          'OFFER_ACCEPT_FIRST_TAP_BLOCKED',
+          rideId: rideId,
+          detail:
+              'offer=$offerAcceptable payment=$paymentAcceptable status=${_valueAsText(preflightRideData?['payment_status'])}',
+        );
         _setApiStatus(
           'failed',
           errorMessage: 'This request is no longer available.',
@@ -13631,7 +13860,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       }
 
       if (!acceptOk &&
-          blockedReason == 'unavailable') {
+          (blockedReason == 'unavailable' ||
+              blockedReason == 'payment_not_dispatchable')) {
         _offerDiscoveryLog(
           'OFFER_ACCEPT_RETRY',
           rideId: rideId,
@@ -13640,8 +13870,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         await Future<void>.delayed(const Duration(milliseconds: 500));
         final refreshedPreflight =
             _asStringDynamicMap((await ref.get()).value);
-        if (refreshedPreflight != null &&
-            _driverOfferRideStillAcceptable(refreshedPreflight, driverId)) {
+        final refreshedAllowsAccept =
+            refreshedPreflight != null &&
+                _driverOfferRideStillAcceptable(refreshedPreflight, driverId) &&
+                _paymentAllowsAcceptRide(refreshedPreflight);
+        if (refreshedAllowsAccept) {
           final retryResult = await callable.call(callablePayload);
           callableResponse = _asStringDynamicMap(retryResult.data);
           acceptOk = callableResponse?['success'] == true;
@@ -13651,6 +13884,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       }
 
       if (!acceptOk) {
+        _offerDiscoveryLog(
+          'OFFER_ACCEPT_FIRST_TAP_BLOCKED',
+          rideId: rideId,
+          detail: blockedReason.isEmpty ? 'unknown' : blockedReason,
+        );
         _offerDiscoveryLog(
           'OFFER_ACCEPT_FAIL',
           rideId: rideId,
@@ -13667,6 +13905,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       } else {
         final acceptedRideData =
             _asStringDynamicMap((await ref.get()).value) ?? preflightRideData;
+        _offerDiscoveryLog(
+          'OFFER_ACCEPT_FIRST_TAP_OK',
+          rideId: rideId,
+          detail:
+              'payment_status=${_valueAsText(acceptedRideData?['payment_status'])}',
+        );
         if (_shouldShowDriverPaymentConfirmation(acceptedRideData)) {
           _offerDiscoveryLog(
             'ACCEPT_PAYMENT_REVIEW_ALLOWED',
@@ -14192,16 +14436,24 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (_waitFeeGraceRideId == normalizedRideId && _waitFeeGraceTimer != null) {
       return;
     }
-    if (_currentRideData?['wait_fee_applied'] == true) {
-      return;
-    }
 
     _cancelWaitFeeGraceTimer(reason: 'reschedule');
     _waitFeeGraceRideId = normalizedRideId;
-    _waitFeeGraceTimer = Timer(const Duration(minutes: 5), () {
+    _startWaitTimerTicker(normalizedRideId);
+
+    final graceUntilMs =
+        _asInt(_currentRideData?['wait_fee_grace_until']) ?? 0;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final delayMs = graceUntilMs > nowMs
+        ? graceUntilMs - nowMs
+        : const Duration(minutes: 5).inMilliseconds;
+
+    _waitFeeGraceTimer = Timer(Duration(milliseconds: delayMs), () {
       unawaited(_applyWaitFeeOnce(normalizedRideId));
     });
-    _log('wait fee grace timer started rideId=$normalizedRideId minutes=5');
+    _log(
+      'wait fee grace timer started rideId=$normalizedRideId delayMs=$delayMs',
+    );
   }
 
   Future<void> _applyWaitFeeOnce(String rideId) async {
@@ -14211,36 +14463,27 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (_currentRideId != rideId) {
       return;
     }
-    final rideData = _currentRideData;
-    if (rideData == null || rideData['wait_fee_applied'] == true) {
-      return;
-    }
 
     _waitFeeApplyInFlight = true;
     try {
-      final currentTotal = _asDouble(rideData['total']) ??
-          _asDouble(rideData['estimated_total']) ??
-          _asDouble(rideData['fare']) ??
-          0;
-      final nextTotal = currentTotal + 250;
-      if (_currentRideId == rideId && _currentRideData != null) {
-        final nextRideData = Map<String, dynamic>.from(_currentRideData!);
-        nextRideData
-          ..['wait_fee_applied'] = true
-          ..['wait_fee_total'] = 250
-          ..['wait_fee_driver'] = 200
-          ..['wait_fee_platform'] = 50
-          ..['total'] = nextTotal
-          ..['estimated_total'] = nextTotal;
-        _currentRideData = nextRideData;
-        if (mounted) {
-          _setStateSafely(() {});
-        }
+      final cloud = await _rideCloud.applyRideWaitFeeInterval(rideId: rideId);
+      if (!rideCallableSucceeded(cloud)) {
+        _log(
+          'WAIT_FEE_APPLY_FAIL rideId=$rideId reason=${rideCallableReason(cloud)}',
+        );
+        return;
       }
-      _log(
-        'wait fee local-only rideId=$rideId total=$nextTotal '
-        '(backend authority required for fare RTDB write)',
-      );
+      final reason = rideCallableReason(cloud);
+      _log('WAIT_FEE_APPLY_OK rideId=$rideId reason=$reason cloud=$cloud');
+      if (reason == 'waiting_expired_cancelled' && mounted) {
+        _showSnackBarSafely(
+          const SnackBar(
+            content: Text(
+              'Waiting window expired. Trip was cancelled and waiting fee recorded.',
+            ),
+          ),
+        );
+      }
     } catch (error) {
       _log('wait fee apply failed rideId=$rideId error=$error');
     } finally {
@@ -14354,19 +14597,29 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       if (mounted) {
         _setStateSafely(() {});
       }
-      _log('PAYMENT_CONFIRMED rideId=$rideId reference=$reference');
-      _showSnackBarSafely(
-        const SnackBar(content: Text('Payment marked as confirmed.')),
-      );
-
+      _log('PAYMENT_CONFIRMED_DRIVER rideId=$rideId reference=$reference');
       final cloud = await _rideCloud.driverConfirmBankTransferPayment(
         rideId: rideId,
         reference: reference,
       );
-      if (!rideCallableSucceeded(cloud)) {
+      if (rideCallableSucceeded(cloud)) {
+        _log('PAYMENT_CONFIRMED_RIDER_NOTIFY rideId=$rideId reference=$reference');
+        _showSnackBarSafely(
+          const SnackBar(
+            content: Text(
+              'Payment confirmed. Rider was notified.',
+            ),
+          ),
+        );
+      } else {
         _log(
           'PAYMENT_CONFIRM_BACKEND_DEFERRED rideId=$rideId '
           'reason=${rideCallableReason(cloud)}',
+        );
+        _showSnackBarSafely(
+          const SnackBar(
+            content: Text('Payment confirmation saved locally; syncing…'),
+          ),
         );
       }
     } catch (error) {
@@ -14380,9 +14633,23 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   }
 
   Future<void> startTrip() async {
-    final currentRideId = _currentRideId;
+    String candidateRideId(Map<String, dynamic>? ride) {
+      if (ride == null) return '';
+      return _firstNonEmptyText(<dynamic>[
+        ride['ride_id'],
+        ride['rideId'],
+        ride['id'],
+      ]);
+    }
+
+    final currentRideId = _firstNonEmptyText(<dynamic>[
+      _currentRideId,
+      candidateRideId(_currentRideData),
+      _driverActiveRideId,
+    ]);
+    _log('START_TRIP_TAP rideId=$currentRideId');
     final serviceType = _serviceTypeKey(_currentRideData?['service_type']);
-    final invalidReason = currentRideId == null
+    final invalidReason = currentRideId.isEmpty
         ? 'missing_ride_id'
         : _activeRideInvalidReason(
             _currentRideData,
@@ -14390,7 +14657,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
             requireTrackedRide: true,
           );
 
-    if (currentRideId == null) {
+    if (currentRideId.isEmpty) {
       _log('start trip blocked reason=missing_ride_id');
       return;
     }
@@ -14442,7 +14709,21 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         'trip_state=${_valueAsText(_currentRideData?['trip_state'])}',
       );
       try {
-      final cloud = await _rideCloud.startTrip(rideId: currentRideId);
+      var cloud = await _rideCloud.startTrip(rideId: currentRideId);
+      if (rideCallableReason(cloud) == 'ride_missing') {
+        final refreshSnap =
+            await _rideRequestsRef.child(currentRideId).get();
+        if (refreshSnap.exists) {
+          final refreshed = _asStringDynamicMap(refreshSnap.value);
+          if (refreshed != null) {
+            _currentRideData = refreshed;
+            _currentRideId = currentRideId;
+            _driverActiveRideId = currentRideId;
+          }
+          _log('START_TRIP_RETRY_AFTER_REFRESH rideId=$currentRideId');
+          cloud = await _rideCloud.startTrip(rideId: currentRideId);
+        }
+      }
       if (!rideCallableSucceeded(cloud)) {
         final startReason = rideCallableReason(cloud);
         if (startReason == 'bank_transfer_pending_confirmation' ||
@@ -17936,7 +18217,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return const SizedBox.shrink();
     }
 
-    final showStartTrip = _rideStatus == 'arrived';
+    final showStartTrip = _rideStatus == 'arrived' || _tripStateIsArrived(activeRide);
     final showCancelTrip = _canDriverCancelActiveRide(_rideStatus);
     final riderPhone = _riderPhone.isEmpty ? 'Phone unavailable' : _riderPhone;
     final serviceType = _serviceTypeKey(activeRide['service_type']);
@@ -18394,6 +18675,15 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                 const SizedBox(height: 10),
               ],
               if (showStartTrip) ...[
+                Text(
+                  'Waiting timer: ${_waitTimerLabel()}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.black54,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(

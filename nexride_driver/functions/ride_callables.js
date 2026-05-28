@@ -1670,6 +1670,7 @@ async function withdrawDriverOffer(data, context, db) {
   if (!rideId) {
     return { success: false, reason: "invalid_ride_id" };
   }
+  console.log("DRIVER_DECLINE_SERVER_SYNC_START", { driverId, rideId });
   await db.ref().update({
     [`driver_offer_queue/${driverId}/${rideId}`]: null,
     [`driver_offer_queue_debug/${driverId}/${rideId}`]: null,
@@ -1720,6 +1721,7 @@ async function withdrawDriverOffer(data, context, db) {
   } catch (e) {
     console.log("DRIVER_WITHDRAW_REFANOUT_FAIL", rideId, String(e?.message || e));
   }
+  console.log("DRIVER_DECLINE_SERVER_SYNC_OK", { driverId, rideId });
   return { success: true, rideId, driverId };
 }
 
@@ -2090,6 +2092,9 @@ async function writeDriverOfferPaths(
  * @param {import("firebase-admin/database").Database} db
  * @param {string} market
  */
+const MARKET_DRIVER_QUERY_CAP = 120;
+const ONLINE_DRIVER_FALLBACK_CAP = 80;
+
 async function loadDriversForDispatchMarket(db, market) {
   const m = canonicalDispatchMarket(market);
   if (!m) return {};
@@ -2100,14 +2105,26 @@ async function loadDriversForDispatchMarket(db, market) {
     return raw;
   }
 
+  console.log("DISPATCH_INDEX_EMPTY_WARNING", `market=${m}`);
+
   try {
-    const snap1 = await db.ref("drivers").orderByChild("dispatch_market_id").equalTo(m).once("value");
+    const snap1 = await db
+      .ref("drivers")
+      .orderByChild("dispatch_market_id")
+      .equalTo(m)
+      .limitToFirst(MARKET_DRIVER_QUERY_CAP)
+      .get();
     raw = snap1.val() && typeof snap1.val() === "object" ? snap1.val() : {};
   } catch (_) {}
 
   if (Object.keys(raw).length === 0) {
     try {
-      const snap2 = await db.ref("drivers").orderByChild("canonical_market_id").equalTo(m).once("value");
+      const snap2 = await db
+        .ref("drivers")
+        .orderByChild("canonical_market_id")
+        .equalTo(m)
+        .limitToFirst(MARKET_DRIVER_QUERY_CAP)
+        .get();
       const v2 = snap2.val() && typeof snap2.val() === "object" ? snap2.val() : {};
       raw = { ...raw, ...v2 };
     } catch (_) {}
@@ -2115,24 +2132,31 @@ async function loadDriversForDispatchMarket(db, market) {
 
   if (Object.keys(raw).length === 0) {
     try {
-      const [onlineSnap, driversSnap] = await Promise.all([
-        db.ref("online_drivers").once("value"),
-        db.ref("drivers").once("value"),
-      ]);
+      const onlineSnap = await db.ref("online_drivers").limitToFirst(ONLINE_DRIVER_FALLBACK_CAP).get();
       const online =
         onlineSnap.val() && typeof onlineSnap.val() === "object" ? onlineSnap.val() : {};
-      const all =
-        driversSnap.val() && typeof driversSnap.val() === "object" ? driversSnap.val() : {};
+      let fetched = 0;
       for (const [id, row] of Object.entries(online)) {
         if (!row || typeof row !== "object" || row.is_online !== true) continue;
         const dm = canonicalDispatchMarket(
           row.dispatch_market_id ?? row.dispatch_market ?? row.market_pool ?? "",
         );
         if (dm !== m) continue;
-        const prof = all[id];
-        if (prof && typeof prof === "object") {
+        if (fetched >= ONLINE_DRIVER_FALLBACK_CAP) break;
+        const profSnap = await db.ref(`drivers/${id}`).get();
+        const prof = profSnap.val() && typeof profSnap.val() === "object" ? profSnap.val() : null;
+        if (prof) {
           raw[id] = { ...prof, ...row };
+          fetched += 1;
         }
+      }
+      if (fetched > 0) {
+        console.log(
+          "DISPATCH_MARKET_FALLBACK_ONLINE_ONLY",
+          `market=${m}`,
+          `count=${fetched}`,
+          `cap=${ONLINE_DRIVER_FALLBACK_CAP}`,
+        );
       }
     } catch (_) {}
   }
@@ -2438,14 +2462,19 @@ async function fanOutDriverOffersIfEligible(db, rideId, ridePayload, fanoutOptio
   await evaluateDriverMap(raw);
 
   if (useSoft && !allCandidates.some((c) => c.allowed)) {
-    const allSnap = await db.ref("drivers").once("value");
-    const allDrivers = allSnap.val() && typeof allSnap.val() === "object" ? allSnap.val() : {};
-    scanCount = Object.keys(allDrivers).length;
-    dispatchVerboseLog("MATCH_FANOUT_HINT", `full_driver_tree_scan rideId=${rid} keys=${scanCount}`);
-    allCandidates.length = 0;
-    candidateSamples.length = 0;
-    rejectedDriverSamples.length = 0;
-    await evaluateDriverMap(allDrivers);
+    const broadAlready = Number(md0.broad_scan_blocked_at_ms ?? 0) > 0;
+    console.log(
+      "DISPATCH_BROAD_SCAN_BLOCKED",
+      `rideId=${rid}`,
+      `market=${market}`,
+      `indexed=${scanCount}`,
+      `already_logged=${broadAlready}`,
+    );
+    try {
+      await db.ref(`ride_requests/${rid}/match_debug`).update({
+        broad_scan_blocked_at_ms: fanoutNow,
+      });
+    } catch (_) {}
   }
 
   const eligibleSorted = sortEligibleCandidates(allCandidates);
@@ -2960,6 +2989,19 @@ async function createRideRequest(data, context, db) {
     console.log("RIDER_CREATE_FAIL", riderId, identityGate.reason || "identity_denied");
     return { success: false, reason: identityGate.reason || "identity_denied" };
   }
+
+  const flagsSnap = await db.ref(`rider_payment_flags/${riderId}`).get();
+  const flags = flagsSnap.val() && typeof flagsSnap.val() === "object" ? flagsSnap.val() : {};
+  const outstanding = Number(flags.outstandingCancellationFeesNgn ?? 0);
+  if (Number.isFinite(outstanding) && outstanding > 0) {
+    console.log("RIDER_CREATE_FAIL", riderId, "outstanding_waiting_balance", outstanding);
+    return {
+      success: false,
+      reason: "outstanding_waiting_balance",
+      outstanding_ngn: outstanding,
+    };
+  }
+
   const supersede = await supersedePriorOpenRideForRider(db, riderId);
   if (!supersede.ok) {
     console.log("RIDER_CREATE_FAIL", riderId, supersede.reason || "rider_active_trip");
@@ -5540,6 +5582,28 @@ async function setDriverOnline(data, context, db) {
       String(indexErr?.message || indexErr),
     );
   }
+
+  try {
+    const {
+      maybeUpsertAvailableDriverThrottled,
+    } = require("./dispatch_engine/dispatch_available_drivers_index");
+    const profileSnap = await db.ref(`drivers/${driverId}`).get();
+    const onlineProfile =
+      profileSnap.val() && typeof profileSnap.val() === "object" ? profileSnap.val() : {};
+    await maybeUpsertAvailableDriverThrottled(db, driverId, {
+      force: true,
+      source: "set_driver_online",
+      market: canonicalMarket,
+      profile: onlineProfile,
+    });
+  } catch (geoErr) {
+    console.log(
+      "DISPATCH_GEO_INDEX_UPSERT_FAIL",
+      `driverId=${driverId}`,
+      String(geoErr?.message || geoErr),
+    );
+  }
+
   console.info("DRIVER_ONLINE", { driverId, market: canonicalMarket, mode });
   return {
     success: true,
@@ -5652,6 +5716,32 @@ async function driverUpdateLiveLocation(data, context, db) {
   });
 
   await db.ref().update(paths);
+
+  try {
+    const {
+      maybeUpsertAvailableDriverThrottled,
+    } = require("./dispatch_engine/dispatch_available_drivers_index");
+    await maybeUpsertAvailableDriverThrottled(db, driverId, {
+      source: "live_location",
+      market: marketId,
+      profile: {
+        ...d,
+        lat,
+        lng,
+        latitude: lat,
+        longitude: lng,
+        is_online: true,
+        isOnline: true,
+      },
+    });
+  } catch (geoErr) {
+    console.log(
+      "DISPATCH_GEO_INDEX_UPSERT_FAIL",
+      `driverId=${driverId}`,
+      String(geoErr?.message || geoErr),
+    );
+  }
+
   return { success: true, reason: "updated" };
 }
 

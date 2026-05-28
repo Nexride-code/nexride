@@ -192,9 +192,57 @@ async function loadAvailableDriversNearPickup(db, market, lat, lng, options = {}
   return profiles;
 }
 
+/** Minimum interval between geo-index writes per driver (location heartbeat). */
+const GEO_INDEX_MIN_INTERVAL_MS = 45_000;
+
+/**
+ * Upsert geo bucket with throttle unless options.force === true.
+ */
+async function maybeUpsertAvailableDriverThrottled(db, driverId, options = {}) {
+  const d = normUid(driverId);
+  if (!d) {
+    return { indexed: false, reason: "invalid_driver_id" };
+  }
+
+  const force = options.force === true;
+  const snap = await db.ref(`drivers/${d}`).get();
+  const profile = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
+  if (!profile || typeof profile !== "object") {
+    return { indexed: false, reason: "no_profile" };
+  }
+
+  const now = Date.now();
+  const last = Number(profile.last_dispatch_geo_index_at_ms) || 0;
+  if (!force && last > 0 && now - last < GEO_INDEX_MIN_INTERVAL_MS) {
+    return { indexed: false, reason: "throttled", skipped: true };
+  }
+
+  const merged =
+    options.profile && typeof options.profile === "object"
+      ? { ...profile, ...options.profile }
+      : profile;
+
+  const result = await upsertAvailableDriver(db, d, merged, options);
+  if (result.indexed) {
+    await db.ref(`drivers/${d}`).update({ last_dispatch_geo_index_at_ms: now }).catch(() => {});
+    console.log(
+      "DISPATCH_GEO_INDEX_UPSERT",
+      JSON.stringify({
+        driverId: d,
+        market: result.market,
+        geohash: result.geohash,
+        source: String(options.source ?? "").trim() || "unknown",
+      }),
+    );
+  }
+  return result;
+}
+
 module.exports = {
   upsertAvailableDriver,
+  maybeUpsertAvailableDriverThrottled,
   removeAvailableDriver,
   loadAvailableDriversNearPickup,
   MIN_HEALTH_SCORE,
+  GEO_INDEX_MIN_INTERVAL_MS,
 };

@@ -204,6 +204,18 @@ class RideCloudFunctionsService {
         'source': source,
       });
 
+  /// Server-authoritative decline: clears offer queue/fanout and marks driver exhausted for that ride only.
+  Future<Map<String, dynamic>> withdrawDriverOffer({
+    required String rideId,
+    String reason = 'driver_declined',
+  }) =>
+      _call('withdrawDriverOffer', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'reason': reason,
+        'withdraw_reason': reason,
+      });
+
   /// Clears stale active-trip pointers blocking new offers (server-owned).
   Future<Map<String, dynamic>> recordDriverOfferPopupAck({
     required String rideId,
