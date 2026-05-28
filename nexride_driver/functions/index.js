@@ -371,6 +371,12 @@ exports.businessCreateDriverInvite = onCall(rideCallOpts, async (request) =>
 exports.driverRedeemBusinessInvite = onCall(rideCallOpts, async (request) =>
   businessFleet.driverRedeemBusinessInvite(request.data, callableContext(request), db),
 );
+exports.fleetListLinkedDriversPage = onCall(rideCallOpts, async (request) =>
+  businessFleet.fleetListLinkedDriversPage(request.data, callableContext(request), db),
+);
+exports.adminListFleetLinkedDriversPage = onCall(rideCallOpts, async (request) =>
+  businessFleet.adminListFleetLinkedDriversPage(request.data, callableContext(request), db),
+);
 exports.adminListDispatchFleetPage = onCall(rideCallOpts, async (request) =>
   businessFleet.adminListDispatchFleetPage(request.data, callableContext(request), db),
 );
