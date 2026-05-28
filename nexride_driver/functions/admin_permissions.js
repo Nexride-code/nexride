@@ -228,6 +228,10 @@ const CALLABLE_PERMISSIONS = {
   // merchant_callables
   adminListMerchants: "merchants.read",
   adminListMerchantsPage: "merchants.read",
+  adminListDispatchFleetPage: "merchants.read",
+  adminGetDispatchFleetAccount: "merchants.read",
+  adminReviewDispatchFleet: "merchants.write",
+  adminReviewFleetVerificationDocument: "merchants.write",
   adminGetMerchantProfile: "merchants.read",
   adminGetMerchant: "merchants.read",
   adminUpdateMerchantLocation: "merchants.write",

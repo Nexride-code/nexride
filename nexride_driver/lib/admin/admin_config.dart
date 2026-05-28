@@ -87,6 +87,7 @@ class AdminPortalRoutePaths {
   static const String regions = '/regions';
   static const String serviceAreas = '/service-areas';
   static const String merchants = '/merchants';
+  static const String dispatchFleet = '/dispatch-fleet';
   static const String settings = '/settings';
   static const String auditLogs = '/audit-logs';
   static const String paymentIntents = '/payment-intents';
@@ -114,6 +115,7 @@ class AdminPortalRoutePaths {
     '/regions': regions,
     '/service-areas': serviceAreas,
     '/merchants': merchants,
+    '/dispatch-fleet': dispatchFleet,
     '/settings': settings,
     '/audit-logs': auditLogs,
     '/payment-intents': paymentIntents,
@@ -137,6 +139,7 @@ class AdminPortalRoutePaths {
     regions,
     serviceAreas,
     merchants,
+    dispatchFleet,
     settings,
     auditLogs,
     paymentIntents,
@@ -229,6 +232,7 @@ class AdminPortalRoutePaths {
       AdminSection.regions => regions,
       AdminSection.serviceAreas => serviceAreas,
       AdminSection.merchants => merchants,
+      AdminSection.dispatchFleet => dispatchFleet,
       AdminSection.settings => settings,
       AdminSection.auditLogs => auditLogs,
       AdminSection.paymentIntents => paymentIntents,
@@ -256,6 +260,7 @@ class AdminPortalRoutePaths {
       regions => AdminSection.regions,
       serviceAreas => AdminSection.serviceAreas,
       merchants => AdminSection.merchants,
+      dispatchFleet => AdminSection.dispatchFleet,
       settings => AdminSection.settings,
       auditLogs => AdminSection.auditLogs,
       paymentIntents => AdminSection.paymentIntents,
@@ -290,6 +295,7 @@ enum AdminSection {
   regions,
   serviceAreas,
   merchants,
+  dispatchFleet,
   settings,
   auditLogs,
   paymentIntents,
@@ -319,6 +325,7 @@ const List<AdminSection> kAdminSidebarNavOrder = <AdminSection>[
   AdminSection.regions,
   AdminSection.serviceAreas,
   AdminSection.merchants,
+  AdminSection.dispatchFleet,
   AdminSection.paymentIntents,
   AdminSection.auditLogs,
   AdminSection.settings,
@@ -342,6 +349,7 @@ extension AdminSectionPresentation on AdminSection {
       AdminSection.regions => 'Regions',
       AdminSection.serviceAreas => 'Service areas',
       AdminSection.merchants => 'Merchants',
+      AdminSection.dispatchFleet => 'Dispatch Fleet',
       AdminSection.settings => 'Settings',
       AdminSection.auditLogs => 'Audit logs',
       AdminSection.paymentIntents => 'Payments',
@@ -365,6 +373,7 @@ extension AdminSectionPresentation on AdminSection {
       AdminSection.regions => 'Regions',
       AdminSection.serviceAreas => 'Areas',
       AdminSection.merchants => 'Merchants',
+      AdminSection.dispatchFleet => 'Fleet',
       AdminSection.settings => 'Settings',
       AdminSection.auditLogs => 'Audit',
       AdminSection.paymentIntents => 'Payments',
@@ -388,6 +397,7 @@ extension AdminSectionPresentation on AdminSection {
       AdminSection.regions => Icons.map_outlined,
       AdminSection.serviceAreas => Icons.location_city_outlined,
       AdminSection.merchants => Icons.storefront_outlined,
+      AdminSection.dispatchFleet => Icons.local_shipping_outlined,
       AdminSection.settings => Icons.settings_outlined,
       AdminSection.auditLogs => Icons.fact_check_outlined,
       AdminSection.paymentIntents => Icons.point_of_sale_outlined,

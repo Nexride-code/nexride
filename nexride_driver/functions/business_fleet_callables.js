@@ -4,8 +4,10 @@ const crypto = require("crypto");
 const admin = require("firebase-admin");
 const { FieldValue } = require("firebase-admin/firestore");
 const { normUid } = require("./admin_auth");
+const adminPerms = require("./admin_permissions");
 const { writeAdminAuditLog } = require("./admin_audit_log");
 const merchantVerification = require("./merchant/merchant_verification");
+const fleetVerification = require("./fleet_verification");
 
 const DISPATCH_VEHICLE_TYPES = new Set(["bike", "car", "van"]);
 const OWNERSHIP_MODES = new Set(["individual", "business_managed"]);
@@ -15,10 +17,20 @@ const FLEET_OWNER_INDEX_ROOT = "dispatch_fleet_owner_index";
 let firestoreOverrideForTests = null;
 const FLEET_BLOCKING_STATUSES = new Set([
   "pending",
+  "pending_documents",
   "pending_review",
   "approved",
   "suspended",
   "rejected",
+]);
+
+const FLEET_ADMIN_STATUS_FILTERS = new Set([
+  "all",
+  "pending_documents",
+  "pending_review",
+  "approved",
+  "rejected",
+  "suspended",
 ]);
 
 function nowMs() {
@@ -74,17 +86,16 @@ function fleetAccountApprovedForInvites(m) {
   if (!isDispatchFleetAccount(m)) {
     return false;
   }
+  if (merchantStatusOf(m) === "suspended") {
+    return false;
+  }
   if (merchantStatusOf(m) !== "approved") {
     return false;
   }
-  const vs = verificationStatusOf(m);
-  if (vs === "approved") {
-    return true;
+  if (m.required_documents_complete !== true) {
+    return false;
   }
-  if (m.required_documents_complete === true && (vs === "docs_complete" || vs === "approved")) {
-    return true;
-  }
-  return false;
+  return true;
 }
 
 function buildInviteCode() {
@@ -293,13 +304,57 @@ function rowOwnerUid(m) {
  * @param {Record<string, unknown>} m
  * @param {object | null} readiness
  */
+function firestoreMs(v) {
+  if (v == null) {
+    return null;
+  }
+  if (typeof v.toMillis === "function") {
+    return v.toMillis();
+  }
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Admin list/detail payload — no commerce or document blobs.
+ * @param {string} merchantId
+ * @param {Record<string, unknown>} m
+ */
+function buildFleetAdminAccountRow(merchantId, m) {
+  return {
+    business_id: merchantId,
+    business_name: trimStr(m.business_name ?? m.businessName, 200),
+    owner_name: trimStr(m.owner_name ?? m.ownerName, 120) || null,
+    contact_email: trimStr(m.contact_email ?? m.contactEmail, 200).toLowerCase() || null,
+    phone: trimStr(m.phone ?? m.phoneNumber, 40) || null,
+    address: trimStr(m.address ?? m.business_address, 500) || null,
+    city_id: trimStr(m.city_id ?? m.cityId, 120) || null,
+    region_id: trimStr(m.region_id ?? m.regionId, 80) || null,
+    verification_type:
+      fleetVerification.normalizeFleetVerificationType(
+        m.verification_type ?? m.verificationType,
+      ) || "cac_business",
+    merchant_status: merchantStatusOf(m) || "pending_documents",
+    verification_status: verificationStatusOf(m) || "pending_documents",
+    required_documents_complete: m.required_documents_complete === true,
+    rejection_reason:
+      trimStr(m.rejection_reason ?? m.rejectionReason ?? m.review_note, 2000) || null,
+    created_at: firestoreMs(m.created_at),
+    updated_at: firestoreMs(m.updated_at),
+  };
+}
+
 function buildFleetSafeAccountPayload(merchantId, m, readiness) {
   return {
     business_id: merchantId,
     business_name: trimStr(m.business_name ?? m.businessName, 200),
     account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
-    merchant_status: merchantStatusOf(m) || "pending_review",
-    verification_status: verificationStatusOf(m) || "pending_review",
+    verification_type:
+      fleetVerification.normalizeFleetVerificationType(
+        m.verification_type ?? m.verificationType,
+      ) || "cac_business",
+    merchant_status: merchantStatusOf(m) || "pending_documents",
+    verification_status: verificationStatusOf(m) || "pending_documents",
     rejection_reason:
       trimStr(m.rejection_reason ?? m.rejectionReason ?? m.review_note, 2000) || null,
     owner_name: trimStr(m.owner_name ?? m.ownerName, 120) || null,
@@ -312,8 +367,15 @@ function buildFleetSafeAccountPayload(merchantId, m, readiness) {
     docs_readiness: readiness
       ? {
           allowed: Boolean(readiness.allowed),
+          all_submitted: Boolean(readiness.allSubmitted),
           missing_requirements: Array.isArray(readiness.missingRequirements)
             ? readiness.missingRequirements.slice(0, 40)
+            : [],
+          missing_submissions: Array.isArray(readiness.missingSubmissions)
+            ? readiness.missingSubmissions.slice(0, 40)
+            : [],
+          required_document_types: Array.isArray(readiness.required_document_types)
+            ? readiness.required_document_types.slice(0, 20)
             : [],
           readable_message: readiness.readableMessage
             ? trimStr(readiness.readableMessage, 2000)
@@ -352,6 +414,10 @@ async function dispatchFleetRegister(data, context, db) {
   const address = trimStr(data?.address ?? data?.business_address, 500);
   const regionId = trimStr(data?.region_id ?? data?.regionId, 80) || null;
   const cityId = trimStr(data?.city_id ?? data?.cityId, 120) || null;
+  const verificationType =
+    fleetVerification.normalizeFleetVerificationType(
+      data?.verification_type ?? data?.verificationType,
+    ) || "cac_business";
 
   const fs = resolveFirestore();
   const existingFleetId = await ownerHasBlockingFleetFromIndex(db, fs, uid);
@@ -373,16 +439,17 @@ async function dispatchFleetRegister(data, context, db) {
     created_by: uid,
     business_name: businessName,
     owner_name: ownerName || null,
-    contact_email: contactEmail || authEmail || null,
+    contact_email: contactEmail || trimStr(context.auth?.token?.email, 200).toLowerCase() || null,
     phone: phone || null,
     address: address || null,
     region_id: regionId,
     city_id: cityId,
+    verification_type: verificationType,
     category: "Dispatch Fleet",
     business_type: ACCOUNT_KIND_DISPATCH_FLEET,
-    merchant_status: "pending_review",
-    status: "pending_review",
-    verification_status: "pending_review",
+    merchant_status: "pending_documents",
+    status: "pending_documents",
+    verification_status: "incomplete",
     is_open: false,
     accepting_orders: false,
     availability_status: "closed",
@@ -414,7 +481,7 @@ async function dispatchFleetRegister(data, context, db) {
   await writeFleetOwnerIndexEntry(db, uid, merchantId, {
     business_id: merchantId,
     account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
-    status: "pending_review",
+    status: "pending_documents",
     created_at: createdAtMs,
   });
 
@@ -426,8 +493,9 @@ async function dispatchFleetRegister(data, context, db) {
     after: {
       business_id: merchantId,
       account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
-      merchant_status: "pending_review",
-      verification_status: "pending_review",
+      verification_type: verificationType,
+      merchant_status: "pending_documents",
+      verification_status: "incomplete",
     },
     reason: "dispatch_fleet_registered",
     source: "business_fleet_callables.dispatchFleetRegister",
@@ -439,8 +507,9 @@ async function dispatchFleetRegister(data, context, db) {
   return {
     success: true,
     business_id: merchantId,
-    merchant_status: "pending_review",
-    verification_status: "pending_review",
+    merchant_status: "pending_documents",
+    verification_status: "incomplete",
+    verification_type: verificationType,
     account_kind: ACCOUNT_KIND_DISPATCH_FLEET,
   };
 }
@@ -474,7 +543,7 @@ async function dispatchFleetGetMyAccount(data, context, db) {
 
   let readiness = null;
   try {
-    readiness = await merchantVerification.getMerchantReadiness(resolved.id);
+    readiness = await fleetVerification.getFleetReadiness(resolved.id);
   } catch (e) {
     console.warn(
       "DISPATCH_FLEET_ACCOUNT_READ readiness_failed",
@@ -544,6 +613,10 @@ async function businessCreateDriverInvite(data, context, db) {
     return { success: false, reason: "not_dispatch_fleet" };
   }
 
+  if (merchantStatusOf(m) === "suspended") {
+    return { success: false, reason: "fleet_suspended" };
+  }
+
   if (!fleetAccountApprovedForInvites(m)) {
     await writeAdminAuditLog(db, {
       actor_uid: actorUid,
@@ -554,6 +627,7 @@ async function businessCreateDriverInvite(data, context, db) {
         business_id: resolved.id,
         merchant_status: merchantStatusOf(m),
         verification_status: verificationStatusOf(m),
+        required_documents_complete: m.required_documents_complete === true,
       },
       reason: "fleet_not_approved",
       source: "business_fleet_callables.businessCreateDriverInvite",
@@ -811,6 +885,544 @@ async function driverRedeemBusinessInvite(data, context, db) {
   };
 }
 
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function adminListDispatchFleetPage(data, context, db) {
+  const deny = await adminPerms.enforceCallable(db, context, "adminListDispatchFleetPage");
+  if (deny) {
+    return deny;
+  }
+
+  const limit = Math.min(50, Math.max(1, Number(data?.limit ?? 25) || 25));
+  const statusFilter = trimStr(data?.status ?? data?.merchant_status, 40).toLowerCase();
+  const cursorCreatedAt = Number(data?.cursor_created_at ?? data?.cursorCreatedAt);
+  const cursorId = trimStr(data?.cursor_id ?? data?.cursorId, 128);
+
+  if (statusFilter && !FLEET_ADMIN_STATUS_FILTERS.has(statusFilter)) {
+    return { success: false, reason: "invalid_status_filter" };
+  }
+
+  const fs = resolveFirestore();
+  let q = fs.collection("merchants").where("account_kind", "==", ACCOUNT_KIND_DISPATCH_FLEET);
+  if (statusFilter && statusFilter !== "all") {
+    q = q.where("merchant_status", "==", statusFilter);
+  }
+  q = q.orderBy("created_at", "desc").orderBy(admin.firestore.FieldPath.documentId(), "desc");
+
+  if (Number.isFinite(cursorCreatedAt) && cursorCreatedAt > 0 && cursorId) {
+    q = q.startAfter(admin.firestore.Timestamp.fromMillis(cursorCreatedAt), cursorId);
+  }
+
+  const snap = await q.limit(limit + 1).get();
+  const docs = snap.docs.slice(0, limit);
+  const accounts = docs.map((d) => buildFleetAdminAccountRow(d.id, d.data() || {}));
+  const last = docs.length > 0 ? docs[docs.length - 1] : null;
+  const nextCursor =
+    snap.docs.length > limit && last
+      ? {
+          cursor_created_at: firestoreMs(last.data()?.created_at),
+          cursor_id: last.id,
+        }
+      : null;
+
+  return {
+    success: true,
+    accounts,
+    has_more: snap.docs.length > limit,
+    next_cursor: nextCursor,
+  };
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function adminGetDispatchFleetAccount(data, context, db) {
+  const deny = await adminPerms.enforceCallable(db, context, "adminGetDispatchFleetAccount");
+  if (deny) {
+    return deny;
+  }
+
+  const businessId = trimStr(data?.business_id ?? data?.businessId, 128);
+  if (!businessId) {
+    return { success: false, reason: "invalid_business_id" };
+  }
+
+  const fs = resolveFirestore();
+  const snap = await fs.collection("merchants").doc(businessId).get();
+  if (!snap.exists) {
+    return { success: false, reason: "not_found" };
+  }
+  const m = snap.data() || {};
+  if (!isDispatchFleetAccount(m)) {
+    return { success: false, reason: "not_dispatch_fleet" };
+  }
+
+  const verification = await fleetVerification.enrichFleetAdminVerification(snap.id, m);
+
+  return {
+    success: true,
+    account: {
+      ...buildFleetAdminAccountRow(snap.id, m),
+      ...verification,
+    },
+  };
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function fleetUploadVerificationDocument(data, context, db) {
+  const uid = normUid(context?.auth?.uid);
+  if (!uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+
+  const fs = resolveFirestore();
+  const resolved = await resolveFleetForOwnerAuth(db, fs, uid);
+  if (!resolved.ok) {
+    return {
+      success: false,
+      reason: resolved.reason === "not_found" ? "not_found" : "unauthorized",
+    };
+  }
+
+  const m = resolved.data || {};
+  if (merchantStatusOf(m) === "suspended") {
+    return { success: false, reason: "fleet_suspended" };
+  }
+
+  const documentType = trimStr(data?.document_type ?? data?.documentType, 64).toLowerCase();
+  if (!fleetVerification.isFleetDocumentType(documentType)) {
+    return { success: false, reason: "invalid_document_type" };
+  }
+  if (!fleetVerification.documentAllowedForMerchant(m, documentType)) {
+    return { success: false, reason: "document_not_required_for_verification_type" };
+  }
+
+  const storagePath = trimStr(data?.storage_path ?? data?.storagePath, 1024);
+  const fileNameIn = trimStr(data?.file_name ?? data?.fileName, 256);
+  const contentType = trimStr(data?.content_type ?? data?.contentType, 128).toLowerCase();
+
+  const prefix = `fleet_verification_uploads/${resolved.id}/${documentType}/`;
+  if (!storagePath.startsWith(prefix) || storagePath.includes("..")) {
+    return { success: false, reason: "invalid_storage_path" };
+  }
+  const lastSeg = storagePath.slice(prefix.length);
+  if (!lastSeg || lastSeg.includes("/")) {
+    return { success: false, reason: "invalid_storage_path" };
+  }
+
+  const typeValidation = fleetVerification.validateFleetUploadFile({
+    contentType,
+    fileName: fileNameIn || lastSeg,
+  });
+  if (!typeValidation.ok) {
+    return { success: false, reason: typeValidation.reason };
+  }
+
+  const bucket = admin.storage().bucket();
+  const file = bucket.file(storagePath);
+  const [exists] = await file.exists();
+  if (!exists) {
+    return { success: false, reason: "storage_object_missing" };
+  }
+
+  const [meta] = await file.getMetadata();
+  const size = Number(meta.size || 0);
+  const storageContentType = trimStr(meta.contentType, 128).toLowerCase();
+
+  const preUploadValidation = fleetVerification.validateFleetUploadFile({
+    contentType,
+    sizeBytes: size,
+    fileName: fileNameIn || lastSeg,
+    storageContentType,
+  });
+  if (!preUploadValidation.ok) {
+    return { success: false, reason: preUploadValidation.reason };
+  }
+
+  const docRef = fleetVerification.docsCollection(fs, resolved.id).doc(documentType);
+  const now = FieldValue.serverTimestamp();
+  await docRef.set(
+    {
+      merchant_id: resolved.id,
+      document_type: documentType,
+      status: "pending",
+      storage_path: storagePath,
+      file_name: fileNameIn || lastSeg,
+      content_type: contentType,
+      uploaded_at: now,
+      reviewed_at: null,
+      reviewed_by: null,
+      admin_note: null,
+      rejection_reason: null,
+      updated_at: now,
+    },
+    { merge: true },
+  );
+
+  const readiness = await fleetVerification.recomputeFleetMerchantReadiness(fs, resolved.id);
+
+  await writeAdminAuditLog(db, {
+    actor_uid: uid,
+    action: "fleet_verification_document_uploaded",
+    entity_type: "dispatch_fleet_account",
+    entity_id: resolved.id,
+    after: {
+      document_type: documentType,
+      storage_path: storagePath,
+      required_documents_complete: readiness?.allowed === true,
+    },
+    source: "business_fleet_callables.fleetUploadVerificationDocument",
+    type: "FLEET_VERIFICATION_DOCUMENT_UPLOADED",
+  });
+
+  return {
+    success: true,
+    business_id: resolved.id,
+    document_type: documentType,
+    status: "pending",
+    required_documents_complete: readiness?.allowed === true,
+    merchant_status: merchantStatusOf(
+      (await resolved.ref.get()).data() || {},
+    ),
+  };
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function fleetListMyVerificationDocuments(data, context, db) {
+  const uid = normUid(context?.auth?.uid);
+  if (!uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+
+  const fs = resolveFirestore();
+  const resolved = await resolveFleetForOwnerAuth(db, fs, uid);
+  if (!resolved.ok) {
+    return {
+      success: false,
+      reason: resolved.reason === "not_found" ? "not_found" : "unauthorized",
+    };
+  }
+
+  const m = resolved.data || {};
+  const readiness = await fleetVerification.getFleetReadiness(resolved.id);
+  const requiredTypes = fleetVerification.requiredTypesForMerchant(m);
+  const snap = await fleetVerification.docsCollection(fs, resolved.id).get();
+  const byId = new Map(snap.docs.map((d) => [d.id, d.data() || {}]));
+
+  /** @type {unknown[]} */
+  const documents = [];
+  for (const t of requiredTypes) {
+    const row = byId.get(t);
+    if (!row) {
+      documents.push({
+        document_type: t,
+        label: fleetVerification.FLEET_DOCUMENT_LABELS[t] || t,
+        status: "not_submitted",
+        storage_path: null,
+        file_name: null,
+        content_type: null,
+        uploaded_at: null,
+      });
+      continue;
+    }
+    documents.push({
+      document_type: t,
+      label: fleetVerification.FLEET_DOCUMENT_LABELS[t] || t,
+      status: String(row.status ?? "pending").trim().toLowerCase(),
+      storage_path: row.storage_path ?? null,
+      file_name: row.file_name ?? null,
+      content_type: row.content_type ?? null,
+      uploaded_at: row.uploaded_at?.toMillis?.() ?? null,
+      rejection_reason: row.rejection_reason ?? null,
+    });
+  }
+
+  return {
+    success: true,
+    business_id: resolved.id,
+    verification_type:
+      fleetVerification.normalizeFleetVerificationType(
+        m.verification_type ?? m.verificationType,
+      ) || "cac_business",
+    documents,
+    readiness: readiness
+      ? {
+          allowed: readiness.allowed,
+          all_submitted: readiness.allSubmitted,
+          missing_requirements: readiness.missingRequirements,
+          missing_submissions: readiness.missingSubmissions,
+          document_statuses: { ...readiness.documentStatuses },
+          readable_message: readiness.readableMessage,
+        }
+      : null,
+  };
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function adminReviewFleetVerificationDocument(data, context, db) {
+  const deny = await adminPerms.enforceCallable(
+    db,
+    context,
+    "adminReviewFleetVerificationDocument",
+  );
+  if (deny) {
+    return deny;
+  }
+
+  const adminUid = normUid(context?.auth?.uid);
+  const businessId = trimStr(data?.business_id ?? data?.businessId, 128);
+  const documentType = trimStr(data?.document_type ?? data?.documentType, 64).toLowerCase();
+  const action = trimStr(data?.action, 32).toLowerCase();
+  const adminNote = trimStr(data?.admin_note ?? data?.note, 2000);
+  const rejectionReason = trimStr(
+    data?.rejection_reason ?? data?.rejectionReason,
+    2000,
+  );
+
+  if (!businessId || !fleetVerification.isFleetDocumentType(documentType)) {
+    return { success: false, reason: "invalid_input" };
+  }
+
+  let nextStatus = "";
+  if (action === "approve") {
+    nextStatus = "approved";
+  } else if (action === "reject") {
+    nextStatus = "rejected";
+  } else if (action === "require_resubmit" || action === "resubmission_required") {
+    nextStatus = "resubmission_required";
+  } else {
+    return { success: false, reason: "invalid_action" };
+  }
+
+  if (
+    (nextStatus === "rejected" || nextStatus === "resubmission_required") &&
+    !adminNote &&
+    !rejectionReason
+  ) {
+    return { success: false, reason: "note_required" };
+  }
+
+  const fs = resolveFirestore();
+  const mSnap = await fs.collection("merchants").doc(businessId).get();
+  if (!mSnap.exists) {
+    return { success: false, reason: "not_found" };
+  }
+  const m = mSnap.data() || {};
+  if (!isDispatchFleetAccount(m)) {
+    return { success: false, reason: "not_dispatch_fleet" };
+  }
+  if (!fleetVerification.documentAllowedForMerchant(m, documentType)) {
+    return { success: false, reason: "document_not_required_for_verification_type" };
+  }
+
+  const docRef = fleetVerification.docsCollection(fs, businessId).doc(documentType);
+  const snap = await docRef.get();
+  if (!snap.exists) {
+    return { success: false, reason: "document_not_found" };
+  }
+
+  const now = FieldValue.serverTimestamp();
+  await docRef.set(
+    {
+      status: nextStatus,
+      reviewed_at: now,
+      reviewed_by: adminUid,
+      admin_note: adminNote || null,
+      rejection_reason:
+        nextStatus === "rejected" || nextStatus === "resubmission_required"
+          ? rejectionReason || adminNote || null
+          : null,
+      updated_at: now,
+    },
+    { merge: true },
+  );
+
+  await fleetVerification.recomputeFleetMerchantReadiness(fs, businessId);
+
+  await writeAdminAuditLog(db, {
+    actor_uid: adminUid,
+    action: "fleet_verification_document_reviewed",
+    entity_type: "dispatch_fleet_account",
+    entity_id: businessId,
+    after: {
+      document_type: documentType,
+      status: nextStatus,
+    },
+    reason: adminNote || rejectionReason || null,
+    source: "business_fleet_callables.adminReviewFleetVerificationDocument",
+    type: "FLEET_VERIFICATION_DOCUMENT_REVIEWED",
+  });
+
+  return {
+    success: true,
+    business_id: businessId,
+    document_type: documentType,
+    status: nextStatus,
+  };
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function adminReviewDispatchFleet(data, context, db) {
+  const deny = await adminPerms.enforceCallable(db, context, "adminReviewDispatchFleet");
+  if (deny) {
+    return deny;
+  }
+
+  const adminUid = normUid(context?.auth?.uid);
+  if (!adminUid) {
+    return { success: false, reason: "unauthorized" };
+  }
+
+  const businessId = trimStr(data?.business_id ?? data?.businessId, 128);
+  const action = trimStr(data?.action, 24).toLowerCase();
+  const note = trimStr(
+    data?.note ?? data?.review_note ?? data?.rejection_reason ?? data?.rejectionReason,
+    2000,
+  );
+
+  if (!businessId) {
+    return { success: false, reason: "invalid_business_id" };
+  }
+  if (action !== "approve" && action !== "reject" && action !== "suspend") {
+    return { success: false, reason: "invalid_action" };
+  }
+  if ((action === "reject" || action === "suspend") && note.length < 3) {
+    return { success: false, reason: "rejection_note_required" };
+  }
+
+  const fs = resolveFirestore();
+  const ref = fs.collection("merchants").doc(businessId);
+  const snap = await ref.get();
+  if (!snap.exists) {
+    return { success: false, reason: "not_found" };
+  }
+
+  const before = snap.data() || {};
+  if (!isDispatchFleetAccount(before)) {
+    return { success: false, reason: "not_dispatch_fleet" };
+  }
+
+  const now = FieldValue.serverTimestamp();
+  /** @type {Record<string, unknown>} */
+  const patch = {
+    updated_at: now,
+    reviewed_at: now,
+    reviewed_by: adminUid,
+    review_note: note || null,
+  };
+
+  if (action === "approve") {
+    const readiness = await fleetVerification.getFleetReadiness(businessId);
+    if (!readiness || readiness.allowed !== true) {
+      return { success: false, reason: "fleet_documents_incomplete" };
+    }
+    if (before.required_documents_complete !== true) {
+      return { success: false, reason: "fleet_documents_incomplete" };
+    }
+    Object.assign(patch, {
+      merchant_status: "approved",
+      status: "approved",
+      verification_status: "approved",
+      rejection_reason: null,
+      approved_at: now,
+      approved_by: adminUid,
+    });
+  } else if (action === "suspend") {
+    Object.assign(patch, {
+      merchant_status: "suspended",
+      status: "suspended",
+      verification_status: verificationStatusOf(before) || "suspended",
+      rejection_reason: note || null,
+      approved_at: null,
+      approved_by: null,
+    });
+  } else {
+    Object.assign(patch, {
+      merchant_status: "rejected",
+      status: "rejected",
+      verification_status: "rejected",
+      rejection_reason: note,
+      approved_at: null,
+      approved_by: null,
+    });
+  }
+
+  await ref.update(patch);
+
+  const ownerUid = normUid(before.owner_uid);
+  if (ownerUid && db) {
+    try {
+      const indexStatus =
+        action === "approve" ? "approved" : action === "suspend" ? "suspended" : "rejected";
+      await db.ref(`${FLEET_OWNER_INDEX_ROOT}/${ownerUid}/${businessId}`).update({
+        status: indexStatus,
+        updated_at: nowMs(),
+      });
+    } catch (_) {
+      /* index best-effort */
+    }
+  }
+
+  await writeAdminAuditLog(db, {
+    actor_uid: adminUid,
+    action:
+      action === "approve"
+        ? "dispatch_fleet_approved"
+        : action === "suspend"
+          ? "dispatch_fleet_suspended"
+          : "dispatch_fleet_rejected",
+    entity_type: "dispatch_fleet_account",
+    entity_id: businessId,
+    before: {
+      merchant_status: merchantStatusOf(before),
+      verification_status: verificationStatusOf(before),
+    },
+    after: {
+      merchant_status: patch.merchant_status,
+      verification_status: patch.verification_status,
+      rejection_reason: action === "reject" ? note : null,
+    },
+    reason: note || null,
+    source: "business_fleet_callables.adminReviewDispatchFleet",
+    type: "DISPATCH_FLEET_REVIEWED",
+  });
+
+  console.log(
+    "DISPATCH_FLEET_REVIEWED",
+    `businessId=${businessId}`,
+    `action=${action}`,
+    `adminUid=${adminUid}`,
+  );
+
+  return {
+    success: true,
+    business_id: businessId,
+    merchant_status: patch.merchant_status,
+    verification_status: patch.verification_status,
+  };
+}
+
 module.exports = {
   ACCOUNT_KIND_DISPATCH_FLEET,
   FLEET_OWNER_INDEX_ROOT,
@@ -821,6 +1433,8 @@ module.exports = {
   isDispatchFleetAccount,
   fleetAccountApprovedForInvites,
   buildFleetSafeAccountPayload,
+  buildFleetAdminAccountRow,
+  FLEET_ADMIN_STATUS_FILTERS,
   validateDispatchProfileInput,
   loadFleetOwnerIndex,
   resolveFleetForOwnerAuth,
@@ -829,4 +1443,10 @@ module.exports = {
   dispatchFleetGetMyAccount,
   businessCreateDriverInvite,
   driverRedeemBusinessInvite,
+  adminListDispatchFleetPage,
+  adminGetDispatchFleetAccount,
+  adminReviewDispatchFleet,
+  fleetUploadVerificationDocument,
+  fleetListMyVerificationDocuments,
+  adminReviewFleetVerificationDocument,
 };

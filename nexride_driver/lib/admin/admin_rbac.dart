@@ -121,6 +121,7 @@ String? requiredPermissionForSection(AdminSection section) {
     AdminSection.regions => 'service_areas.read',
     AdminSection.serviceAreas => 'service_areas.read',
     AdminSection.merchants => 'merchants.read',
+    AdminSection.dispatchFleet => 'merchants.read',
     AdminSection.settings => 'settings.read',
     AdminSection.auditLogs => 'audit_logs.read',
     AdminSection.paymentIntents => 'finance.read',

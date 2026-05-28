@@ -30,6 +30,7 @@ import '../widgets/admin_shell.dart';
 import 'admin_live_operations_screen.dart';
 import 'admin_live_ops_dashboard_screen.dart';
 import 'admin_system_health_screen.dart';
+import 'admin_dispatch_fleet_screen.dart';
 import 'admin_merchants_screen.dart';
 import 'admin_rollout_regions_screen.dart';
 import 'admin_service_areas_screen.dart';
@@ -273,7 +274,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         _section == AdminSection.auditLogs ||
         _section == AdminSection.regions ||
         _section == AdminSection.serviceAreas ||
-        _section == AdminSection.merchants) {
+        _section == AdminSection.merchants ||
+        _section == AdminSection.dispatchFleet) {
       _isLoading = false;
     } else {
       _loadSnapshot();
@@ -1018,7 +1020,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         _section == AdminSection.trips ||
         _section == AdminSection.regions ||
         _section == AdminSection.serviceAreas ||
-        _section == AdminSection.merchants) {
+        _section == AdminSection.merchants ||
+        _section == AdminSection.dispatchFleet) {
       return;
     } else {
       await _loadSnapshot();
@@ -1301,6 +1304,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     if (_section == AdminSection.regions ||
         _section == AdminSection.serviceAreas ||
         _section == AdminSection.merchants ||
+        _section == AdminSection.dispatchFleet ||
         _section == AdminSection.trips ||
         _section == AdminSection.liveOperations ||
         _section == AdminSection.systemHealth ||
@@ -1331,6 +1335,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   ),
               AdminSection.merchants =>
                   AdminMerchantsScreen(session: widget.session),
+              AdminSection.dispatchFleet =>
+                  AdminDispatchFleetScreen(session: widget.session),
               AdminSection.trips => AdminLiveOperationsScreen(
                     dataService: _dataService,
                     session: widget.session,
@@ -1601,6 +1607,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   ),
               AdminSection.merchants =>
                   AdminMerchantsScreen(session: widget.session),
+              AdminSection.dispatchFleet =>
+                  AdminDispatchFleetScreen(session: widget.session),
               AdminSection.trips => AdminLiveOperationsScreen(
                     dataService: _dataService,
                     session: widget.session,

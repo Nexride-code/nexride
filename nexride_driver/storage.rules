@@ -51,6 +51,35 @@ service firebase.storage {
       return isMerchantOwnerUpload(merchantId) || isMerchantStaffUpload(merchantId);
     }
 
+    function isDispatchFleetOwnerUpload(businessId) {
+      let m = firestore.get(/databases/(default)/documents/merchants/$(businessId)).data;
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/merchants/$(businessId))
+        && m.account_kind == 'dispatch_fleet'
+        && request.auth.uid == m.owner_uid;
+    }
+
+    function isFleetVerificationDocumentType(documentType) {
+      return documentType in [
+        'cac_document',
+        'owner_id',
+        'nin_document',
+        'owner_selfie',
+        'address_proof',
+      ];
+    }
+
+    function isFleetVerificationUpload() {
+      return request.resource != null
+        && request.resource.size > 0
+        && request.resource.size <= 10 * 1024 * 1024
+        && request.resource.contentType in [
+          'image/jpeg',
+          'image/png',
+          'application/pdf',
+        ];
+    }
+
     match /user_verification/{uid}/{allPaths=**} {
       // Rider uploads own selfies only — no public read (admin/console uses privileged access).
       allow read: if isAdmin();
@@ -154,6 +183,14 @@ service firebase.storage {
       allow read: if isAdmin() || merchantUploadAllowed(merchantId);
       allow create, update: if merchantUploadAllowed(merchantId) && isImageUploadMax10MiB();
       allow delete: if isAdmin() || merchantUploadAllowed(merchantId);
+    }
+
+    match /fleet_verification_uploads/{businessId}/{documentType}/{fileName} {
+      allow read: if isAdmin() || isDispatchFleetOwnerUpload(businessId);
+      allow create, update: if isDispatchFleetOwnerUpload(businessId)
+        && isFleetVerificationDocumentType(documentType)
+        && isFleetVerificationUpload();
+      allow delete: if isAdmin();
     }
 
     match /merchant_uploads/{merchantId}/verification/{documentType}/{fileName} {

@@ -371,6 +371,29 @@ exports.businessCreateDriverInvite = onCall(rideCallOpts, async (request) =>
 exports.driverRedeemBusinessInvite = onCall(rideCallOpts, async (request) =>
   businessFleet.driverRedeemBusinessInvite(request.data, callableContext(request), db),
 );
+exports.adminListDispatchFleetPage = onCall(rideCallOpts, async (request) =>
+  businessFleet.adminListDispatchFleetPage(request.data, callableContext(request), db),
+);
+exports.adminGetDispatchFleetAccount = onCall(rideCallOpts, async (request) =>
+  businessFleet.adminGetDispatchFleetAccount(request.data, callableContext(request), db),
+);
+exports.adminReviewDispatchFleet = onCall(rideCallOpts, async (request) =>
+  businessFleet.adminReviewDispatchFleet(request.data, callableContext(request), db),
+);
+exports.fleetUploadVerificationDocument = onCall(rideCallOpts, async (request) =>
+  businessFleet.fleetUploadVerificationDocument(request.data, callableContext(request), db),
+);
+exports.fleetListMyVerificationDocuments = onCall(rideCallOpts, async (request) =>
+  businessFleet.fleetListMyVerificationDocuments(request.data, callableContext(request), db),
+);
+exports.adminReviewFleetVerificationDocument = onCall(rideCallOpts, async (request) =>
+  businessFleet.adminReviewFleetVerificationDocument(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
 exports.adminListMerchants = onCall(rideCallOpts, async (request) =>
   merchantCallables.adminListMerchants(request.data, callableContext(request), db),
 );
