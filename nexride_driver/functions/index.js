@@ -327,6 +327,7 @@ exports.adminMigrateDispatchCanonicalGeography = onCall(rideCallOpts, async (req
 // --- Merchant Phase 1 (registration + admin review only; no orders/menus/wallets) ---
 const merchantCallables = require("./merchant/merchant_callables");
 const merchantWallet = require("./merchant/merchant_wallet");
+const businessFleet = require("./business_fleet_callables");
 const driverFlutterwavePayments = require("./driver_flutterwave_payments");
 const nexrideOfficialBankConfig = require("./nexride_official_bank_config");
 exports.merchantRegister = onCall(rideCallOpts, async (request) =>
@@ -357,6 +358,12 @@ exports.merchantPortalHeartbeat = onCall(rideCallOpts, async (request) =>
 );
 exports.merchantPutStaffMember = onCall(rideCallOpts, async (request) =>
   merchantCallables.merchantPutStaffMember(request.data, callableContext(request), db),
+);
+exports.businessCreateDriverInvite = onCall(rideCallOpts, async (request) =>
+  businessFleet.businessCreateDriverInvite(request.data, callableContext(request), db),
+);
+exports.driverRedeemBusinessInvite = onCall(rideCallOpts, async (request) =>
+  businessFleet.driverRedeemBusinessInvite(request.data, callableContext(request), db),
 );
 exports.adminListMerchants = onCall(rideCallOpts, async (request) =>
   merchantCallables.adminListMerchants(request.data, callableContext(request), db),
