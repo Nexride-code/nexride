@@ -362,3 +362,47 @@ String dispatchVehicleTypeForServiceType(String serviceType) {
       return '';
   }
 }
+
+/// Profile field marking the ownership onboarding step as completed.
+const String kOwnershipOnboardingCompleteField =
+    'ownership_onboarding_complete';
+
+/// Whether the driver has completed the ownership onboarding step.
+bool dispatchOwnershipOnboardingComplete(Map<String, dynamic> profile) {
+  final raw = profile[kOwnershipOnboardingCompleteField] ??
+      profile['ownershipOnboardingComplete'];
+  if (raw is bool) {
+    return raw;
+  }
+  final v = raw?.toString().trim().toLowerCase();
+  return v == 'true' || v == 'complete' || v == '1' || v == 'yes';
+}
+
+/// Whether a (new) bike/van dispatch driver still needs to choose ownership.
+///
+/// Returns false for car_ride and legacy `unknown_dispatch` profiles, so it
+/// never hard-blocks existing drivers. Already business-managed bikers and
+/// drivers who completed the step are also skipped.
+bool requiresDispatchOwnershipOnboarding(Map<String, dynamic> profile) {
+  final serviceType = inferServiceTypeFromLegacyProfile(profile);
+  final isDispatchVehicle = serviceType == kServiceTypeBikeDispatch ||
+      serviceType == kServiceTypeVanDispatch;
+  if (!isDispatchVehicle) {
+    return false;
+  }
+  if (defaultOwnershipModeForProfile(profile) == kOwnershipBusinessManaged) {
+    return false;
+  }
+  return !dispatchOwnershipOnboardingComplete(profile);
+}
+
+/// Profile update written when a driver chooses to operate independently.
+/// `business_id: null` clears any prior business link in a keyed update.
+Map<String, Object?> independentDispatchOwnershipUpdate() {
+  return <String, Object?>{
+    'ownership_mode': kOwnershipIndividual,
+    'business_id': null,
+    'dispatch_role': kDispatchRoleIndependent,
+    kOwnershipOnboardingCompleteField: true,
+  };
+}

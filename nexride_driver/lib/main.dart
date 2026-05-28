@@ -13,13 +13,13 @@ import 'admin/widgets/admin_components.dart';
 import 'firebase_options.dart';
 import 'screens/driver_login_screen.dart';
 import 'screens/driver_map_screen.dart';
+import 'screens/driver_onboarding_ownership_screen.dart';
 import 'support/app_role.dart';
 import 'support/driver_profile_bootstrap_support.dart';
 import 'support/driver_profile_support.dart';
 import 'support/driver_crash_guard.dart';
 import 'support/driver_root_navigator.dart';
 import 'support/driver_startup_coordinator.dart';
-import 'support/driver_startup_logs.dart';
 import 'support/driver_startup_platform.dart';
 import 'services/driver_push_notification_service.dart';
 import 'support/production_user_messages.dart';
@@ -750,6 +750,9 @@ class _AuthGateState extends State<AuthGate> {
   Timer? _authStuckGuardTimer;
   bool _authStateDoneLogged = false;
   DriverProfileData? _profile;
+  /// Raw profile fields for onboarding routing. Null when running on a
+  /// fallback profile so onboarding never hard-blocks a degraded session.
+  Map<String, dynamic>? _ownershipProfile;
   _AuthGateStage _stage = _AuthGateStage.checkingSession;
   String? _statusMessage;
   String? _profileSyncIssueMessage;
@@ -918,7 +921,8 @@ class _AuthGateState extends State<AuthGate> {
     _setDebugStep('loading driver profile');
 
     try {
-      final profile = await _loadDriverProfile(user);
+      final loaded = await _loadDriverProfile(user);
+      final profile = loaded.data;
 
       if (!mounted ||
           attempt != _bootstrapAttempt ||
@@ -934,6 +938,7 @@ class _AuthGateState extends State<AuthGate> {
 
       setState(() {
         _profile = profile;
+        _ownershipProfile = loaded.raw;
         _stage = _AuthGateStage.ready;
         _statusMessage = null;
         _profileSyncIssueMessage = null;
@@ -958,6 +963,7 @@ class _AuthGateState extends State<AuthGate> {
       }
       setState(() {
         _profile = _profile ?? _buildFallbackProfile(user);
+        _ownershipProfile = null;
         _stage = _AuthGateStage.ready;
         _statusMessage = null;
         _profileSyncIssueMessage = error.userMessage;
@@ -981,6 +987,7 @@ class _AuthGateState extends State<AuthGate> {
       }
       setState(() {
         _profile = _profile ?? _buildFallbackProfile(user);
+        _ownershipProfile = null;
         _stage = _AuthGateStage.ready;
         _statusMessage = null;
         _profileSyncIssueMessage =
@@ -990,7 +997,8 @@ class _AuthGateState extends State<AuthGate> {
     }
   }
 
-  Future<DriverProfileData> _loadDriverProfile(User user) async {
+  Future<({DriverProfileData data, Map<String, dynamic> raw})>
+      _loadDriverProfile(User user) async {
     final path = driverProfilePath(user.uid);
     final int maxAttempts = driverStartupIsIosSimulator ? 1 : 2;
     final Duration authGateBudget = driverStartupIsIosSimulator
@@ -1015,7 +1023,10 @@ class _AuthGateState extends State<AuthGate> {
         );
         driverStartupLog('rtdb_session_done');
         driverStartupLog('driver_profile_done');
-        return DriverProfileData.fromMap(user.uid, result.profile);
+        return (
+          data: DriverProfileData.fromMap(user.uid, result.profile),
+          raw: result.profile,
+        );
       } on TimeoutException catch (error, stackTrace) {
         driverStartupLog('driver_profile_fail reason=timeout');
         debugPrint(
@@ -1118,6 +1129,17 @@ class _AuthGateState extends State<AuthGate> {
             title: 'Loading your driver workspace',
             message: _statusMessage ?? 'Please wait a moment.',
             loading: true,
+          );
+        }
+        final ownershipProfile = _ownershipProfile;
+        if (ownershipProfile != null &&
+            requiresDispatchOwnershipOnboarding(ownershipProfile)) {
+          return DriverOnboardingOwnershipScreen(
+            driverId: profile.driverId,
+            serviceType: inferServiceTypeFromLegacyProfile(ownershipProfile),
+            onCompleted: () {
+              unawaited(_retryBootstrap());
+            },
           );
         }
         return DriverMapScreen(

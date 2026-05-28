@@ -246,6 +246,79 @@ void main() {
     });
   });
 
+  group('ownership onboarding gate', () {
+    test('car_ride does not require ownership onboarding', () {
+      expect(
+        requiresDispatchOwnershipOnboarding(const <String, dynamic>{
+          'service_type': 'car_ride',
+        }),
+        isFalse,
+      );
+    });
+
+    test('bike_dispatch requires ownership onboarding when incomplete', () {
+      expect(
+        requiresDispatchOwnershipOnboarding(const <String, dynamic>{
+          'service_type': 'bike_dispatch',
+        }),
+        isTrue,
+      );
+    });
+
+    test('van_dispatch requires ownership onboarding when incomplete', () {
+      expect(
+        requiresDispatchOwnershipOnboarding(const <String, dynamic>{
+          'service_type': 'van_dispatch',
+        }),
+        isTrue,
+      );
+    });
+
+    test('legacy unknown_dispatch driver is never hard-blocked', () {
+      expect(
+        requiresDispatchOwnershipOnboarding(const <String, dynamic>{
+          'serviceTypes': <String>['dispatch_delivery'],
+          'driver_service_types': <String>['dispatch_driver'],
+        }),
+        isFalse,
+      );
+    });
+
+    test('existing business_managed profile does not show ownership screen', () {
+      expect(
+        requiresDispatchOwnershipOnboarding(const <String, dynamic>{
+          'service_type': 'bike_dispatch',
+          'ownership_mode': 'business_managed',
+        }),
+        isFalse,
+      );
+    });
+
+    test('completed ownership step clears the gate', () {
+      expect(
+        requiresDispatchOwnershipOnboarding(const <String, dynamic>{
+          'service_type': 'bike_dispatch',
+          'ownership_onboarding_complete': true,
+        }),
+        isFalse,
+      );
+    });
+
+    test('independent choice writes correct fields and clears the gate', () {
+      final update = independentDispatchOwnershipUpdate();
+      expect(update['ownership_mode'], kOwnershipIndividual);
+      expect(update['business_id'], isNull);
+      expect(update['dispatch_role'], kDispatchRoleIndependent);
+      expect(update[kOwnershipOnboardingCompleteField], isTrue);
+
+      final applied = <String, dynamic>{
+        'service_type': 'bike_dispatch',
+        ...update,
+      };
+      expect(requiresDispatchOwnershipOnboarding(applied), isFalse);
+    });
+  });
+
   group('signup write composition', () {
     Map<String, dynamic> signupWriteFor(String serviceType) {
       final record = buildDriverProfileRecord(
