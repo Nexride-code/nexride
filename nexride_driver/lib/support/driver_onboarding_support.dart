@@ -332,6 +332,22 @@ List<String> serviceTypesForDriverServiceType(String serviceType) {
   }
 }
 
+/// Legacy `driver_service_types` tokens for a canonical service type.
+/// Preserves the existing contract consumed by the driver app
+/// (`car_driver` -> ride, `dispatch_driver` -> dispatch_delivery).
+List<String> legacyDriverServiceTypesForServiceType(String serviceType) {
+  switch (normalizeDriverServiceType(serviceType)) {
+    case kServiceTypeCarRide:
+      return const <String>['car_driver'];
+    case kServiceTypeBikeDispatch:
+    case kServiceTypeVanDispatch:
+    case kServiceTypeUnknownDispatch:
+      return const <String>['dispatch_driver'];
+    default:
+      return const <String>['car_driver'];
+  }
+}
+
 /// Dispatch vehicle type implied by a canonical service type.
 /// Returns empty string when the vehicle is not yet known.
 String dispatchVehicleTypeForServiceType(String serviceType) {

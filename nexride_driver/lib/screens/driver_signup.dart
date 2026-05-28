@@ -24,13 +24,29 @@ class _DriverSignupState extends State<DriverSignup> {
   final DatabaseReference dbRef = FirebaseDatabase.instance.ref();
 
   bool isLoading = false;
-  final Set<String> _selectedDriverServiceTypes = <String>{'car_driver'};
+  String _selectedServiceType = kServiceTypeCarRide;
 
-  static const Map<String, String> _driverServiceToRequestServiceType =
-      <String, String>{
-    'car_driver': 'ride',
-    'dispatch_driver': 'dispatch_delivery',
-  };
+  static const List<_ServiceTypeOption> _serviceTypeOptions =
+      <_ServiceTypeOption>[
+    _ServiceTypeOption(
+      value: kServiceTypeCarRide,
+      title: 'Car ride',
+      subtitle: 'Pick up and drop off riders (ride-hailing).',
+      icon: Icons.directions_car_filled_outlined,
+    ),
+    _ServiceTypeOption(
+      value: kServiceTypeBikeDispatch,
+      title: 'Bike dispatch',
+      subtitle: 'Deliver packages and orders on a bike.',
+      icon: Icons.pedal_bike_outlined,
+    ),
+    _ServiceTypeOption(
+      value: kServiceTypeVanDispatch,
+      title: 'Van dispatch',
+      subtitle: 'Move larger deliveries with a van.',
+      icon: Icons.airport_shuttle_outlined,
+    ),
+  ];
 
   InputDecoration _inputDecoration({
     required String label,
@@ -70,10 +86,6 @@ class _DriverSignupState extends State<DriverSignup> {
       showMessage("Password must be at least 6 characters");
       return;
     }
-    if (_selectedDriverServiceTypes.isEmpty) {
-      showMessage("Select at least one driver service type");
-      return;
-    }
 
     setState(() => isLoading = true);
 
@@ -95,32 +107,31 @@ class _DriverSignupState extends State<DriverSignup> {
         rootRef: dbRef,
         source: 'signup',
       );
+      final serviceType = _selectedServiceType;
       final profileRecord = buildDriverProfileRecord(
         driverId: uid,
-        existing: <String, dynamic>{},
+        existing: <String, dynamic>{'service_type': serviceType},
         fallbackName: nameController.text.trim(),
         fallbackEmail: emailController.text.trim(),
         fallbackPhone: phoneController.text.trim(),
         pricingConfig: pricingConfig,
       );
-      final selectedDriverServiceTypes = _selectedDriverServiceTypes.toList(
-        growable: false,
-      )..sort();
-      final requestServiceTypes = selectedDriverServiceTypes
-          .map((String type) => _driverServiceToRequestServiceType[type] ?? '')
-          .where((String type) => type.isNotEmpty)
-          .toSet()
-          .toList(growable: false)
-        ..sort();
+      final requestServiceTypes =
+          serviceTypesForDriverServiceType(serviceType);
+      final legacyDriverServiceTypes =
+          legacyDriverServiceTypesForServiceType(serviceType);
+      final dispatchVehicleType =
+          dispatchVehicleTypeForServiceType(serviceType);
       debugPrint(
-        '[DriverSignup] profile write started uid=$uid path=$profilePath verificationPath=$verificationPath',
+        '[DriverSignup] profile write started uid=$uid path=$profilePath verificationPath=$verificationPath serviceType=$serviceType',
       );
 
       await dbRef.update({
         profilePath: {
           ...profileRecord,
-          "driver_service_types": selectedDriverServiceTypes,
+          "driver_service_types": legacyDriverServiceTypes,
           "serviceTypes": requestServiceTypes,
+          "dispatch_vehicle_type": dispatchVehicleType,
           "created_at": ServerValue.timestamp,
           "updated_at": ServerValue.timestamp,
         },
@@ -304,56 +315,35 @@ class _DriverSignupState extends State<DriverSignup> {
                   Align(
                     alignment: Alignment.centerLeft,
                     child: Text(
-                      'Driver service type',
+                      'What do you want to do?',
                       style: TextStyle(
                         color: Colors.black.withValues(alpha: 0.78),
                         fontWeight: FontWeight.w700,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  CheckboxListTile(
-                    value: _selectedDriverServiceTypes.contains('car_driver'),
-                    onChanged: isLoading
-                        ? null
-                        : (bool? value) {
-                            setState(() {
-                              if (value == true) {
-                                _selectedDriverServiceTypes.add('car_driver');
-                              } else {
-                                _selectedDriverServiceTypes
-                                    .remove('car_driver');
-                              }
-                            });
-                          },
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    title: const Text('Car driver'),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Choose your main service. You can request to add more later.',
+                      style: TextStyle(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        fontSize: 12.5,
+                        height: 1.4,
+                      ),
+                    ),
                   ),
-                  CheckboxListTile(
-                    value:
-                        _selectedDriverServiceTypes.contains('dispatch_driver'),
-                    onChanged: isLoading
-                        ? null
-                        : (bool? value) {
-                            setState(() {
-                              if (value == true) {
-                                _selectedDriverServiceTypes.add(
-                                  'dispatch_driver',
-                                );
-                              } else {
-                                _selectedDriverServiceTypes.remove(
-                                  'dispatch_driver',
-                                );
-                              }
-                            });
-                          },
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    title: const Text('Dispatch driver'),
-                  ),
+                  const SizedBox(height: 10),
+                  for (final _ServiceTypeOption option in _serviceTypeOptions)
+                    _ServiceTypeCard(
+                      option: option,
+                      selected: _selectedServiceType == option.value,
+                      enabled: !isLoading,
+                      onTap: () {
+                        setState(() => _selectedServiceType = option.value);
+                      },
+                    ),
                   const SizedBox(height: 22),
                   SizedBox(
                     width: double.infinity,
@@ -418,6 +408,107 @@ class _DriverSignupState extends State<DriverSignup> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ServiceTypeOption {
+  const _ServiceTypeOption({
+    required this.value,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+  });
+
+  final String value;
+  final String title;
+  final String subtitle;
+  final IconData icon;
+}
+
+class _ServiceTypeCard extends StatelessWidget {
+  const _ServiceTypeCard({
+    required this.option,
+    required this.selected,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final _ServiceTypeOption option;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color borderColor =
+        selected ? kDriverGold : Colors.black.withValues(alpha: 0.1);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: selected
+            ? kDriverGold.withValues(alpha: 0.12)
+            : kDriverCream,
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: enabled ? onTap : null,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: borderColor,
+                width: selected ? 1.6 : 1,
+              ),
+            ),
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  option.icon,
+                  color: selected
+                      ? kDriverDark
+                      : Colors.black.withValues(alpha: 0.6),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        option.title,
+                        style: const TextStyle(
+                          color: Colors.black87,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 15.5,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        option.subtitle,
+                        style: TextStyle(
+                          color: Colors.black.withValues(alpha: 0.6),
+                          fontSize: 12.5,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Icon(
+                  selected
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  color: selected
+                      ? kDriverGold
+                      : Colors.black.withValues(alpha: 0.35),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

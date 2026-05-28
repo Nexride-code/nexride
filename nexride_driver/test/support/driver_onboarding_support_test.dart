@@ -190,6 +190,15 @@ void main() {
       expect(dispatchVehicleTypeForServiceType(kServiceTypeCarRide), 'car');
       expect(dispatchVehicleTypeForServiceType(kServiceTypeUnknownDispatch), '');
     });
+
+    test('legacy driver_service_types preserve car_driver/dispatch_driver', () {
+      expect(legacyDriverServiceTypesForServiceType(kServiceTypeCarRide),
+          <String>['car_driver']);
+      expect(legacyDriverServiceTypesForServiceType(kServiceTypeBikeDispatch),
+          <String>['dispatch_driver']);
+      expect(legacyDriverServiceTypesForServiceType(kServiceTypeVanDispatch),
+          <String>['dispatch_driver']);
+    });
   });
 
   group('buildDriverProfileRecord mirror fields', () {
@@ -234,6 +243,56 @@ void main() {
       );
 
       expect(profile['service_type'], kServiceTypeVanDispatch);
+    });
+  });
+
+  group('signup write composition', () {
+    Map<String, dynamic> signupWriteFor(String serviceType) {
+      final record = buildDriverProfileRecord(
+        driverId: 'driver_signup',
+        existing: <String, dynamic>{'service_type': serviceType},
+      );
+      return <String, dynamic>{
+        ...record,
+        'driver_service_types':
+            legacyDriverServiceTypesForServiceType(serviceType),
+        'serviceTypes': serviceTypesForDriverServiceType(serviceType),
+        'dispatch_vehicle_type':
+            dispatchVehicleTypeForServiceType(serviceType),
+      };
+    }
+
+    test('car_ride maps to ride exactly like normal drivers today', () {
+      final w = signupWriteFor(kServiceTypeCarRide);
+      expect(w['service_type'], kServiceTypeCarRide);
+      expect(w['serviceTypes'], <String>['ride']);
+      expect(w['driver_service_types'], <String>['car_driver']);
+      expect(w['ownership_mode'], kOwnershipIndividual);
+      expect(w['dispatch_role'], kDispatchRoleNone);
+      expect(w['verification_scope'], kVerificationScopeRideHailing);
+      expect(w['dispatch_vehicle_type'], 'car');
+    });
+
+    test('bike_dispatch maps to dispatch_delivery + independent dispatch', () {
+      final w = signupWriteFor(kServiceTypeBikeDispatch);
+      expect(w['service_type'], kServiceTypeBikeDispatch);
+      expect(w['serviceTypes'], <String>['dispatch_delivery']);
+      expect(w['driver_service_types'], <String>['dispatch_driver']);
+      expect(w['ownership_mode'], kOwnershipIndividual);
+      expect(w['dispatch_role'], kDispatchRoleIndependent);
+      expect(w['verification_scope'], kVerificationScopeDispatch);
+      expect(w['dispatch_vehicle_type'], 'bike');
+    });
+
+    test('van_dispatch maps to dispatch_delivery + independent dispatch', () {
+      final w = signupWriteFor(kServiceTypeVanDispatch);
+      expect(w['service_type'], kServiceTypeVanDispatch);
+      expect(w['serviceTypes'], <String>['dispatch_delivery']);
+      expect(w['driver_service_types'], <String>['dispatch_driver']);
+      expect(w['ownership_mode'], kOwnershipIndividual);
+      expect(w['dispatch_role'], kDispatchRoleIndependent);
+      expect(w['verification_scope'], kVerificationScopeDispatch);
+      expect(w['dispatch_vehicle_type'], 'van');
     });
   });
 }
