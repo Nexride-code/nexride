@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../config/driver_app_config.dart';
+import 'driver_onboarding_support.dart';
 import 'driver_verification_support.dart';
 
+export 'driver_onboarding_support.dart';
 export 'driver_verification_support.dart';
 
 const Color kDriverGold = Color(0xFFD4AF37);
@@ -796,6 +798,25 @@ Map<String, dynamic> buildDriverProfileDefaults({
           ? 'online'
           : 'offline';
 
+  // Slice 0 onboarding mirror fields. These preserve any existing canonical
+  // values and only infer safe defaults when missing. They are metadata only:
+  // dispatch matching, wallet/withdrawal, and verification gates do not read
+  // them yet.
+  final serviceType = inferServiceTypeFromLegacyProfile(existing);
+  final ownershipMode = defaultOwnershipModeForProfile(existing);
+  final existingDispatchRole = normalizeDispatchRole(
+    existing['dispatch_role'] ?? existing['dispatchRole'],
+  );
+  final dispatchRole = existingDispatchRole.isNotEmpty
+      ? existingDispatchRole
+      : defaultDispatchRoleForProfile(serviceType, ownershipMode);
+  final existingVerificationScope = normalizeVerificationScope(
+    existing['verification_scope'] ?? existing['verificationScope'],
+  );
+  final verificationScope = existingVerificationScope.isNotEmpty
+      ? existingVerificationScope
+      : defaultVerificationScopeForProfile(existing, serviceType);
+
   return <String, dynamic>{
     'id': driverId,
     'uid':
@@ -845,6 +866,10 @@ Map<String, dynamic> buildDriverProfileDefaults({
       existing['serviceTypes'] ?? existing['service_types'],
       fallback: kDriverServiceTypes,
     ),
+    'service_type': serviceType,
+    'ownership_mode': ownershipMode,
+    'dispatch_role': dispatchRole,
+    'verification_scope': verificationScope,
     'businessModel': normalizedDriverBusinessModel(
       effectiveBusinessModel,
       now: effectiveNow,
