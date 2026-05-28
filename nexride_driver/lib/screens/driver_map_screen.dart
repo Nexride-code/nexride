@@ -54,6 +54,7 @@ import '../trip_sync/trip_state_machine.dart';
 import '../widgets/driver_dashboard_panel.dart';
 import '../widgets/driver_ride_chat_sheet.dart';
 import 'driver_business_model_screen.dart';
+import 'driver_redeem_fleet_invite_screen.dart';
 import 'driver_support_center_screen.dart';
 import 'driver_verification_screen.dart';
 import 'driver_login_screen.dart';
@@ -146,6 +147,7 @@ enum _DriverHubAction {
   tripHistory,
   earnings,
   businessModel,
+  fleetInvite,
   operatingArea,
   verification,
   wallet,
@@ -10851,6 +10853,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     );
   }
 
+  Future<void> _openRedeemFleetInviteScreen() async {
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => DriverRedeemFleetInviteScreen(
+          driverId: _effectiveDriverId,
+        ),
+      ),
+    );
+  }
+
   Future<void> _openVerificationScreen() async {
     if (!mounted) {
       return;
@@ -10932,6 +10947,14 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                     },
                   ),
                   DriverDashboardAction(
+                    label: 'Redeem Fleet Invite',
+                    icon: Icons.link,
+                    onTap: () {
+                      Navigator.of(sheetContext)
+                          .pop(_DriverHubAction.fleetInvite);
+                    },
+                  ),
+                  DriverDashboardAction(
                     label: 'Operating area',
                     icon: Icons.map_outlined,
                     onTap: () {
@@ -10991,6 +11014,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         break;
       case _DriverHubAction.businessModel:
         await _openBusinessModelScreen();
+        break;
+      case _DriverHubAction.fleetInvite:
+        await _openRedeemFleetInviteScreen();
         break;
       case _DriverHubAction.operatingArea:
         await _openDriverRolloutOperatingArea();

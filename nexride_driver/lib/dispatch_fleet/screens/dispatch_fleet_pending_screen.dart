@@ -72,9 +72,9 @@ class _DispatchFleetPendingScreenState extends State<DispatchFleetPendingScreen>
         return;
       }
       final dest = destinationForFleetAccountResponse(response);
-      if (dest == DispatchFleetAccountDestination.invites) {
+      if (dest == DispatchFleetAccountDestination.dashboard) {
         await Navigator.of(context).pushNamedAndRemoveUntil(
-          DispatchFleetRoutes.invites,
+          DispatchFleetRoutes.dashboard,
           (Route<dynamic> route) => false,
         );
         return;
@@ -349,6 +349,13 @@ class _DispatchFleetPendingScreenState extends State<DispatchFleetPendingScreen>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   Text(doc.label, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  if (doc.uploadHint != null && doc.uploadHint!.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 4),
+                    Text(
+                      doc.uploadHint!,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
                   const SizedBox(height: 4),
                   Text('Status: ${status.replaceAll('_', ' ')}'),
                 ],

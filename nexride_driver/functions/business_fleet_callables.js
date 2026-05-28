@@ -76,7 +76,26 @@ function verificationStatusOf(m) {
 }
 
 /**
- * Fleet may create driver invites only when business + verification are approved.
+ * Manual admin override approval (document bypass) — invite allowed without full docs.
+ * @param {Record<string, unknown>} m
+ */
+function fleetManualOverrideApprovedForInvites(m) {
+  const vs = verificationStatusOf(m);
+  if (vs === "approved_override") {
+    return true;
+  }
+  if (m.approval_override !== true) {
+    return false;
+  }
+  const overrideNote = trimStr(
+    m.override_note ?? m.overrideNote ?? m.review_note ?? m.reviewNote,
+    2000,
+  );
+  return overrideNote.length >= 3;
+}
+
+/**
+ * Fleet may create driver invites when approved with complete docs or manual override.
  * @param {Record<string, unknown> | null | undefined} m
  */
 function fleetAccountApprovedForInvites(m) {
@@ -92,10 +111,13 @@ function fleetAccountApprovedForInvites(m) {
   if (merchantStatusOf(m) !== "approved") {
     return false;
   }
-  if (m.required_documents_complete !== true) {
-    return false;
+  if (m.required_documents_complete === true) {
+    return true;
   }
-  return true;
+  if (fleetManualOverrideApprovedForInvites(m)) {
+    return true;
+  }
+  return false;
 }
 
 function buildInviteCode() {
@@ -313,6 +335,52 @@ function firestoreMs(v) {
   }
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Callable-safe JSON (no Firestore Timestamp / DocumentSnapshot leakage).
+ * @param {unknown} value
+ */
+function toCallableJson(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value.toMillis === "function") {
+    return value.toMillis();
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => toCallableJson(item));
+  }
+  if (typeof value === "object") {
+    /** @type {Record<string, unknown>} */
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v === undefined) {
+        continue;
+      }
+      out[k] = toCallableJson(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * @param {unknown} err
+ */
+function firestoreIndexErrorInfo(err) {
+  const code = Number(err?.code);
+  const details = String(err?.details || err?.message || "");
+  if (code !== 9 && !details.includes("requires an index")) {
+    return null;
+  }
+  const match = details.match(/https:\/\/console\.firebase\.google\.com[^\s'"]+/);
+  return {
+    reason: "firestore_index_required",
+    index_url: match ? match[0] : null,
+    message:
+      "Firestore composite index required for Dispatch Fleet admin list query.",
+  };
 }
 
 /**
@@ -885,6 +953,227 @@ async function driverRedeemBusinessInvite(data, context, db) {
   };
 }
 
+function driverDisplayNameFromProfile(d) {
+  if (!d || typeof d !== "object") {
+    return null;
+  }
+  const name = trimStr(
+    d.name ?? d.displayName ?? d.driver_name ?? d.full_name ?? d.display_name,
+    120,
+  );
+  return name || null;
+}
+
+function driverOnlineFromProfile(d) {
+  if (!d || typeof d !== "object") {
+    return false;
+  }
+  return d.isOnline === true || d.is_online === true || d.online === true;
+}
+
+/**
+ * @param {import("firebase-admin/database").Database} db
+ * @param {string} businessId
+ * @param {string} driverId
+ * @param {Record<string, unknown> | null | undefined} linkRow
+ */
+async function buildLinkedDriverItem(db, businessId, driverId, linkRow) {
+  const row = linkRow && typeof linkRow === "object" ? linkRow : {};
+  /** @type {Record<string, unknown>} */
+  const item = {
+    driver_id: driverId,
+    business_id: businessId,
+    business_link_status: trimStr(row.status, 40) || "approved",
+    ownership_mode:
+      normalizeOwnershipMode(row.ownership_mode ?? row.ownershipMode) || "business_managed",
+    dispatch_vehicle_type:
+      normalizeDispatchVehicleType(row.dispatch_vehicle_type ?? row.dispatchVehicleType) || null,
+    linked_at: Number(row.linked_at ?? row.linkedAt) || null,
+  };
+
+  const driverSnap = await db.ref(`drivers/${driverId}`).get();
+  const d = driverSnap.val();
+  if (d && typeof d === "object") {
+    item.driver_name = driverDisplayNameFromProfile(d);
+    item.phone = trimStr(d.phone, 40) || null;
+    item.online = driverOnlineFromProfile(d);
+    const profileVehicle = normalizeDispatchVehicleType(
+      d.dispatch_vehicle_type ?? d.dispatchVehicleType,
+    );
+    if (profileVehicle) {
+      item.dispatch_vehicle_type = profileVehicle;
+    }
+    const bls = trimStr(d.business_link_status ?? d.businessLinkStatus, 40);
+    if (bls) {
+      item.business_link_status = bls;
+    }
+    const mode = normalizeOwnershipMode(d.ownership_mode ?? d.ownershipMode);
+    if (mode) {
+      item.ownership_mode = mode;
+    }
+  }
+
+  return item;
+}
+
+/**
+ * @param {unknown} linksVal
+ */
+function computeLinkedDriversSummary(linksVal) {
+  if (!linksVal || typeof linksVal !== "object") {
+    return {
+      total_linked_bikers: 0,
+      active_linked_bikers: 0,
+    };
+  }
+  const rows = Object.values(linksVal);
+  let active = 0;
+  for (const row of rows) {
+    const status = trimStr(row?.status, 40).toLowerCase();
+    if (!status || status === "approved" || status === "active") {
+      active += 1;
+    }
+  }
+  return {
+    total_linked_bikers: rows.length,
+    active_linked_bikers: active,
+  };
+}
+
+/**
+ * Paginated keyed read of business_driver_links/{businessId} with optional driver enrichment.
+ * @param {import("firebase-admin/database").Database} db
+ * @param {string} businessId
+ * @param {object} data
+ * @param {{ allowSummary?: boolean }} [opts]
+ */
+async function listLinkedDriversPageInternal(db, businessId, data, opts = {}) {
+  const bid = trimStr(businessId, 128);
+  if (!bid) {
+    return { success: false, reason: "invalid_input" };
+  }
+
+  const limit = Math.min(50, Math.max(1, Number(data?.limit ?? 25) || 25));
+  const cursorDriverId = trimStr(data?.cursor_driver_id ?? data?.cursorDriverId, 128);
+  const includeSummary =
+    opts.allowSummary === true &&
+    (data?.include_summary === true || data?.includeSummary === true) &&
+    !cursorDriverId;
+
+  let query = db.ref(`business_driver_links/${bid}`).orderByKey();
+  if (cursorDriverId) {
+    query = query.startAfter(cursorDriverId);
+  }
+  const snap = await query.limitToFirst(limit + 1).get();
+  const val = snap.val();
+  /** @type {[string, Record<string, unknown>][]} */
+  const entries = [];
+  if (val && typeof val === "object") {
+    const keys = Object.keys(val).sort();
+    for (const driverId of keys) {
+      const row = val[driverId];
+      entries.push([driverId, row && typeof row === "object" ? row : {}]);
+    }
+  }
+
+  const pageEntries = entries.slice(0, limit);
+  const hasMore = entries.length > limit;
+  const items = [];
+  for (const [driverId, linkRow] of pageEntries) {
+    items.push(await buildLinkedDriverItem(db, bid, driverId, linkRow));
+  }
+
+  /** @type {Record<string, unknown>} */
+  const result = {
+    success: true,
+    items,
+    next_cursor_driver_id:
+      hasMore && pageEntries.length ? pageEntries[pageEntries.length - 1][0] : null,
+    has_more: hasMore,
+  };
+
+  if (includeSummary) {
+    const allSnap = await db.ref(`business_driver_links/${bid}`).get();
+    result.summary = computeLinkedDriversSummary(allSnap.val());
+  }
+
+  return toCallableJson(result);
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function fleetListLinkedDriversPage(data, context, db) {
+  if (!context?.auth?.uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+
+  const fs = resolveFirestore();
+  const actorUid = normUid(context.auth.uid);
+  const resolved = await resolveFleetForOwnerAuth(db, fs, actorUid);
+  if (!resolved.ok) {
+    return { success: false, reason: resolved.reason || "not_found" };
+  }
+
+  const m = resolved.data || {};
+  const gate = merchantVerification.assertMerchantPortalAllowed(m, actorUid, [
+    "owner",
+    "manager",
+  ]);
+  if (!gate.ok) {
+    return { success: false, reason: gate.reason || "forbidden" };
+  }
+
+  if (!isDispatchFleetAccount(m)) {
+    return { success: false, reason: "not_dispatch_fleet" };
+  }
+
+  console.log(
+    "FLEET_LINKED_DRIVERS_LIST",
+    `businessId=${resolved.id}`,
+    `actorUid=${actorUid}`,
+  );
+
+  return listLinkedDriversPageInternal(db, resolved.id, data, { allowSummary: true });
+}
+
+/**
+ * @param {object} data
+ * @param {import("firebase-functions").https.CallableContext} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function adminListFleetLinkedDriversPage(data, context, db) {
+  const deny = await adminPerms.enforceCallable(db, context, "adminListFleetLinkedDriversPage");
+  if (deny) {
+    return deny;
+  }
+
+  const businessId = trimStr(data?.business_id ?? data?.businessId, 128);
+  if (!businessId) {
+    return { success: false, reason: "invalid_input" };
+  }
+
+  const fs = resolveFirestore();
+  const snap = await fs.collection("merchants").doc(businessId).get();
+  if (!snap.exists) {
+    return { success: false, reason: "not_found" };
+  }
+  const m = snap.data() || {};
+  if (!isDispatchFleetAccount(m)) {
+    return { success: false, reason: "not_dispatch_fleet" };
+  }
+
+  console.log(
+    "ADMIN_FLEET_LINKED_DRIVERS_LIST",
+    `businessId=${businessId}`,
+    `adminUid=${normUid(context?.auth?.uid)}`,
+  );
+
+  return listLinkedDriversPageInternal(db, businessId, data, { allowSummary: false });
+}
+
 /**
  * @param {object} data
  * @param {import("firebase-functions").https.CallableContext} context
@@ -916,7 +1205,22 @@ async function adminListDispatchFleetPage(data, context, db) {
     q = q.startAfter(admin.firestore.Timestamp.fromMillis(cursorCreatedAt), cursorId);
   }
 
-  const snap = await q.limit(limit + 1).get();
+  let snap;
+  try {
+    snap = await q.limit(limit + 1).get();
+  } catch (err) {
+    const indexErr = firestoreIndexErrorInfo(err);
+    if (indexErr) {
+      console.warn(
+        "DISPATCH_FLEET_ADMIN_LIST_INDEX_REQUIRED",
+        `statusFilter=${statusFilter || "all"}`,
+        indexErr.index_url || "",
+      );
+      return { success: false, ...indexErr };
+    }
+    throw err;
+  }
+
   const docs = snap.docs.slice(0, limit);
   const accounts = docs.map((d) => buildFleetAdminAccountRow(d.id, d.data() || {}));
   const last = docs.length > 0 ? docs[docs.length - 1] : null;
@@ -928,12 +1232,12 @@ async function adminListDispatchFleetPage(data, context, db) {
         }
       : null;
 
-  return {
+  return toCallableJson({
     success: true,
     accounts,
     has_more: snap.docs.length > limit,
     next_cursor: nextCursor,
-  };
+  });
 }
 
 /**
@@ -964,13 +1268,13 @@ async function adminGetDispatchFleetAccount(data, context, db) {
 
   const verification = await fleetVerification.enrichFleetAdminVerification(snap.id, m);
 
-  return {
+  return toCallableJson({
     success: true,
     account: {
       ...buildFleetAdminAccountRow(snap.id, m),
       ...verification,
     },
-  };
+  });
 }
 
 /**
@@ -1300,6 +1604,10 @@ async function adminReviewDispatchFleet(data, context, db) {
     data?.note ?? data?.review_note ?? data?.rejection_reason ?? data?.rejectionReason,
     2000,
   );
+  const approvalOverride =
+    data?.approval_override === true ||
+    data?.override === true ||
+    trimStr(data?.approval_override ?? data?.override, 8).toLowerCase() === "true";
 
   if (!businessId) {
     return { success: false, reason: "invalid_business_id" };
@@ -1309,6 +1617,9 @@ async function adminReviewDispatchFleet(data, context, db) {
   }
   if ((action === "reject" || action === "suspend") && note.length < 3) {
     return { success: false, reason: "rejection_note_required" };
+  }
+  if (action === "approve" && approvalOverride && note.length < 3) {
+    return { success: false, reason: "override_note_required" };
   }
 
   const fs = resolveFirestore();
@@ -1333,20 +1644,24 @@ async function adminReviewDispatchFleet(data, context, db) {
   };
 
   if (action === "approve") {
-    const readiness = await fleetVerification.getFleetReadiness(businessId);
-    if (!readiness || readiness.allowed !== true) {
-      return { success: false, reason: "fleet_documents_incomplete" };
-    }
-    if (before.required_documents_complete !== true) {
-      return { success: false, reason: "fleet_documents_incomplete" };
+    if (!approvalOverride) {
+      const readiness = await fleetVerification.getFleetReadiness(businessId);
+      if (!readiness || readiness.allowed !== true) {
+        return { success: false, reason: "fleet_documents_incomplete" };
+      }
+      if (before.required_documents_complete !== true) {
+        return { success: false, reason: "fleet_documents_incomplete" };
+      }
     }
     Object.assign(patch, {
       merchant_status: "approved",
       status: "approved",
-      verification_status: "approved",
+      verification_status: approvalOverride ? "approved_override" : "approved",
       rejection_reason: null,
       approved_at: now,
       approved_by: adminUid,
+      approval_override: approvalOverride,
+      override_note: approvalOverride ? note : null,
     });
   } else if (action === "suspend") {
     Object.assign(patch, {
@@ -1388,7 +1703,9 @@ async function adminReviewDispatchFleet(data, context, db) {
     actor_uid: adminUid,
     action:
       action === "approve"
-        ? "dispatch_fleet_approved"
+        ? approvalOverride
+          ? "dispatch_fleet_approved_override"
+          : "dispatch_fleet_approved"
         : action === "suspend"
           ? "dispatch_fleet_suspended"
           : "dispatch_fleet_rejected",
@@ -1397,11 +1714,14 @@ async function adminReviewDispatchFleet(data, context, db) {
     before: {
       merchant_status: merchantStatusOf(before),
       verification_status: verificationStatusOf(before),
+      required_documents_complete: before.required_documents_complete === true,
     },
     after: {
       merchant_status: patch.merchant_status,
       verification_status: patch.verification_status,
       rejection_reason: action === "reject" ? note : null,
+      approval_override: action === "approve" ? approvalOverride : false,
+      override_reason: action === "approve" && approvalOverride ? note : null,
     },
     reason: note || null,
     source: "business_fleet_callables.adminReviewDispatchFleet",
@@ -1413,14 +1733,16 @@ async function adminReviewDispatchFleet(data, context, db) {
     `businessId=${businessId}`,
     `action=${action}`,
     `adminUid=${adminUid}`,
+    `approvalOverride=${approvalOverride}`,
   );
 
-  return {
+  return toCallableJson({
     success: true,
     business_id: businessId,
     merchant_status: patch.merchant_status,
     verification_status: patch.verification_status,
-  };
+    approval_override: action === "approve" ? approvalOverride : false,
+  });
 }
 
 module.exports = {
@@ -1431,6 +1753,7 @@ module.exports = {
   normalizeDispatchVehicleType,
   normalizeOwnershipMode,
   isDispatchFleetAccount,
+  fleetManualOverrideApprovedForInvites,
   fleetAccountApprovedForInvites,
   buildFleetSafeAccountPayload,
   buildFleetAdminAccountRow,
@@ -1443,10 +1766,17 @@ module.exports = {
   dispatchFleetGetMyAccount,
   businessCreateDriverInvite,
   driverRedeemBusinessInvite,
+  fleetListLinkedDriversPage,
+  adminListFleetLinkedDriversPage,
+  listLinkedDriversPageInternal,
+  buildLinkedDriverItem,
+  computeLinkedDriversSummary,
   adminListDispatchFleetPage,
   adminGetDispatchFleetAccount,
   adminReviewDispatchFleet,
   fleetUploadVerificationDocument,
   fleetListMyVerificationDocuments,
   adminReviewFleetVerificationDocument,
+  firestoreIndexErrorInfo,
+  toCallableJson,
 };

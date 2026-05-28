@@ -1,5 +1,6 @@
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../admin_config.dart';
 import '../models/admin_models.dart';
@@ -37,6 +38,12 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
   Map<String, dynamic>? _detailAccount;
   bool _detailLoading = false;
 
+  List<Map<String, dynamic>> _linkedBikers = const <Map<String, dynamic>>[];
+  bool _linkedBikersLoading = false;
+  String? _linkedBikersError;
+  String? _linkedBikersCursor;
+  bool _linkedBikersHasMore = false;
+
   FirebaseFunctions get _fn =>
       FirebaseFunctions.instanceFor(region: 'us-central1');
 
@@ -51,6 +58,133 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
       return data.map((dynamic k, dynamic v) => MapEntry(k.toString(), v));
     }
     return <String, dynamic>{};
+  }
+
+  String _verificationTypeLabel(String raw) {
+    switch (raw.trim().toLowerCase()) {
+      case 'nin_individual_business':
+        return 'NIN individual business';
+      case 'cac_business':
+        return 'CAC registered business';
+      default:
+        return raw.isEmpty ? 'CAC registered business' : raw;
+    }
+  }
+
+  String _documentStatusLabel(String status) {
+    switch (status.trim().toLowerCase()) {
+      case 'not_submitted':
+        return 'Not submitted';
+      case 'pending':
+        return 'Pending review';
+      case 'approved':
+        return 'Approved';
+      case 'rejected':
+        return 'Rejected';
+      case 'resubmission_required':
+        return 'Resubmission required';
+      default:
+        return status.isEmpty ? 'Unknown' : status;
+    }
+  }
+
+  Future<void> _viewDocument(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Document link is not available.')),
+        );
+      }
+      return;
+    }
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication) && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open document.')),
+      );
+    }
+  }
+
+  Future<void> _refreshDetail() async {
+    final businessId = _detailForId;
+    if (businessId == null || businessId.isEmpty) {
+      return;
+    }
+    await _openDetail(businessId);
+  }
+
+  Future<void> _loadLinkedBikers(String businessId, {bool append = false}) async {
+    if (businessId.isEmpty) {
+      return;
+    }
+    setState(() {
+      _linkedBikersLoading = true;
+      if (!append) {
+        _linkedBikersError = null;
+        _linkedBikers = const <Map<String, dynamic>>[];
+        _linkedBikersCursor = null;
+        _linkedBikersHasMore = false;
+      }
+    });
+
+    try {
+      final payload = <String, dynamic>{
+        'business_id': businessId,
+        'limit': 25,
+      };
+      if (append && _linkedBikersCursor != null && _linkedBikersCursor!.isNotEmpty) {
+        payload['cursor_driver_id'] = _linkedBikersCursor;
+      }
+
+      final result = await _fn
+          .httpsCallable(
+            'adminListFleetLinkedDriversPage',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+          )
+          .call(payload);
+
+      final data = _asMap(result.data);
+      if (data['success'] != true) {
+        throw StateError(data['reason']?.toString() ?? 'linked_bikers_failed');
+      }
+
+      final parsed = <Map<String, dynamic>>[];
+      final raw = data['items'];
+      if (raw is List) {
+        for (final item in raw) {
+          if (item is Map) {
+            parsed.add(item.map((k, v) => MapEntry(k.toString(), v)));
+          }
+        }
+      }
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _linkedBikers = append ? <Map<String, dynamic>>[..._linkedBikers, ...parsed] : parsed;
+        _linkedBikersCursor = data['next_cursor_driver_id']?.toString();
+        _linkedBikersHasMore = data['has_more'] == true;
+        _linkedBikersLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _linkedBikersLoading = false;
+        _linkedBikersError = e.toString();
+      });
+    }
+  }
+
+  String _formatLinkedAt(dynamic raw) {
+    final ms = int.tryParse(raw?.toString() ?? '');
+    if (ms == null || ms <= 0) {
+      return '—';
+    }
+    final dt = DateTime.fromMillisecondsSinceEpoch(ms).toLocal();
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
   }
 
   String _text(dynamic v) => v?.toString().trim() ?? '';
@@ -82,7 +216,17 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
 
       final data = _asMap(result.data);
       if (data['success'] != true) {
-        throw StateError(data['reason']?.toString() ?? 'list_failed');
+        final reason = data['reason']?.toString() ?? 'list_failed';
+        if (reason == 'firestore_index_required') {
+          final indexUrl = data['index_url']?.toString().trim() ?? '';
+          throw StateError(
+            indexUrl.isNotEmpty
+                ? 'Firestore index required. Create it in Firebase Console:\n$indexUrl'
+                : (data['message']?.toString() ??
+                    'Firestore composite index required for Dispatch Fleet list.'),
+          );
+        }
+        throw StateError(reason);
       }
 
       final list = <Map<String, dynamic>>[];
@@ -130,6 +274,10 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
       _detailForId = businessId;
       _detailAccount = null;
       _detailLoading = true;
+      _linkedBikers = const <Map<String, dynamic>>[];
+      _linkedBikersError = null;
+      _linkedBikersCursor = null;
+      _linkedBikersHasMore = false;
     });
 
     try {
@@ -154,6 +302,7 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
             : null;
         _detailLoading = false;
       });
+      await _loadLinkedBikers(businessId);
     } catch (e) {
       if (!mounted) {
         return;
@@ -189,6 +338,9 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
           FilledButton(
             onPressed: () {
               if (requireNote && noteController.text.trim().length < 3) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Enter at least 3 characters.')),
+                );
                 return;
               }
               Navigator.pop(ctx, true);
@@ -209,6 +361,7 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
             'document_type': documentType,
             'action': action,
             'note': noteController.text.trim(),
+            if (action == 'reject') 'rejection_reason': noteController.text.trim(),
           });
       final data = _asMap(result.data);
       if (data['success'] != true) {
@@ -231,19 +384,35 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
     }
   }
 
-  Future<void> _review(String businessId, String action) async {
+  Future<void> _review(
+    String businessId,
+    String action, {
+    bool approvalOverride = false,
+  }) async {
     final noteController = TextEditingController();
-    final requireNote = action == 'reject';
+    final requireNote = action == 'reject' || approvalOverride;
 
     final proceed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(action == 'approve' ? 'Approve fleet' : 'Reject fleet'),
+        title: Text(
+          approvalOverride
+              ? 'Approve fleet (override)'
+              : action == 'approve'
+                  ? 'Approve fleet'
+                  : 'Reject fleet',
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            if (requireNote)
+            if (approvalOverride)
+              const Text(
+                'Documents are incomplete. Override approval requires a written reason '
+                'and is recorded in the audit log.',
+                style: TextStyle(fontSize: 13),
+              )
+            else if (requireNote)
               const Text(
                 'A rejection note is required.',
                 style: TextStyle(fontSize: 13),
@@ -257,7 +426,11 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
             TextField(
               controller: noteController,
               decoration: InputDecoration(
-                labelText: requireNote ? 'Rejection reason' : 'Note (optional)',
+                labelText: approvalOverride
+                    ? 'Override reason (required)'
+                    : requireNote
+                        ? 'Rejection reason'
+                        : 'Note (optional)',
                 border: const OutlineInputBorder(),
               ),
               maxLines: 3,
@@ -279,7 +452,7 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
               }
               Navigator.pop(ctx, true);
             },
-            child: Text(action == 'approve' ? 'Approve' : 'Reject'),
+            child: Text(approvalOverride ? 'Manual override approve' : action == 'approve' ? 'Approve fleet' : 'Reject fleet'),
           ),
         ],
       ),
@@ -299,6 +472,7 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
             'business_id': businessId,
             'action': action,
             'note': noteController.text.trim(),
+            if (approvalOverride) 'approval_override': true,
           });
 
       final data = _asMap(result.data);
@@ -306,8 +480,12 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
         final reason = data['reason']?.toString() ?? 'review_failed';
         if (reason == 'fleet_documents_incomplete') {
           throw StateError(
-            'Cannot approve: required fleet documents are not all approved.',
+            'Cannot approve: required fleet documents are not all approved. '
+            'Use override only with a documented reason.',
           );
+        }
+        if (reason == 'override_note_required') {
+          throw StateError('Override approval requires a reason of at least 3 characters.');
         }
         throw StateError(reason);
       }
@@ -318,7 +496,11 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            action == 'approve' ? 'Fleet approved' : 'Fleet rejected',
+            approvalOverride
+                ? 'Fleet approved with manual override'
+                : action == 'approve'
+                    ? 'Fleet approved'
+                    : 'Fleet rejected',
           ),
         ),
       );
@@ -428,6 +610,78 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
     );
   }
 
+  Widget _buildDocumentCard({
+    required String businessId,
+    required Map<String, dynamic> doc,
+  }) {
+    final docType = _text(doc['document_type']);
+    final docStatusRaw = _text(doc['status']);
+    final docStatus =
+        docStatusRaw.isEmpty ? 'not_submitted' : docStatusRaw.toLowerCase();
+    final label = _text(doc['label']).isEmpty ? docType : _text(doc['label']);
+    final url = _text(doc['download_url']);
+    final isSubmitted = docStatus != 'not_submitted';
+    final canReviewDoc = isSubmitted &&
+        (docStatus == 'pending' ||
+            docStatus == 'rejected' ||
+            docStatus == 'resubmission_required');
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(label, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+            const SizedBox(height: 6),
+            Text(
+              'Status: ${_documentStatusLabel(docStatus)}',
+              style: const TextStyle(fontSize: 13),
+            ),
+            if (!isSubmitted) ...<Widget>[
+              const SizedBox(height: 8),
+              const Text(
+                'Not submitted',
+                style: TextStyle(color: AdminThemeTokens.slate, fontSize: 13),
+              ),
+            ],
+            if (isSubmitted && url.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () => _viewDocument(url),
+                icon: const Icon(Icons.open_in_new, size: 16),
+                label: const Text('View document'),
+              ),
+            ],
+            if (canReviewDoc && docType.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: <Widget>[
+                    FilledButton(
+                      onPressed: businessId.isEmpty
+                          ? null
+                          : () => _reviewDocument(businessId, docType, 'approve'),
+                      child: const Text('Approve document'),
+                    ),
+                    OutlinedButton(
+                      onPressed: businessId.isEmpty
+                          ? null
+                          : () => _reviewDocument(businessId, docType, 'reject'),
+                      child: const Text('Reject document'),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildDetailPanel() {
     if (_detailForId == null) {
       return const AdminSurfaceCard(
@@ -453,49 +707,82 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
 
     final businessId = _text(account['business_id']);
     final status = _text(account['merchant_status']).toLowerCase();
-    final canReview = status == 'pending_review' || status == 'pending';
+    final canReviewFleet = status == 'pending_review' ||
+        status == 'pending' ||
+        status == 'pending_documents';
     final docsComplete = account['required_documents_complete'] == true;
     final verificationType = _text(account['verification_type']);
     final readiness = account['readiness'];
     final documents = account['verification_documents'];
+    final missingRequirements = readiness is Map ? readiness['missing_requirements'] : null;
 
     return AdminSurfaceCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          Text(
-            _text(account['business_name']).isEmpty
-                ? 'Fleet business'
-                : _text(account['business_name']),
-            style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w800,
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      _text(account['business_name']).isEmpty
+                          ? 'Fleet business'
+                          : _text(account['business_name']),
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _statusChip(_text(account['merchant_status'])),
+                  ],
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _detailLoading ? null : _refreshDetail,
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('Refresh'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Account details',
+            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
           ),
           const SizedBox(height: 8),
-          _statusChip(_text(account['merchant_status'])),
-          const SizedBox(height: 16),
-          _detailLine('Business ID', businessId),
           _detailLine('Owner', _text(account['owner_name'])),
-          _detailLine('Email', _text(account['contact_email'])),
           _detailLine('Phone', _text(account['phone'])),
-          _detailLine('Address', _text(account['address'])),
-          _detailLine('Region', _text(account['region_id'])),
-          _detailLine('City', _text(account['city_id'])),
-          _detailLine('Verification', _text(account['verification_status'])),
+          _detailLine('Status', _text(account['merchant_status'])),
           _detailLine(
             'Verification type',
-            verificationType.isEmpty ? 'cac_business' : verificationType,
+            _verificationTypeLabel(verificationType),
           ),
-          _detailLine(
-            'Documents complete',
-            docsComplete ? 'Yes' : 'No',
-          ),
+          _detailLine('Business ID', businessId),
+          _detailLine('Email', _text(account['contact_email'])),
+          _detailLine('Documents complete', docsComplete ? 'Yes' : 'No'),
           if (readiness is Map && readiness['readable_message'] != null)
             _detailLine(
               'Readiness',
               readiness['readable_message']?.toString() ?? '',
             ),
+          if (missingRequirements is List && missingRequirements.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            const Text(
+              'Missing or pending items',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+            ),
+            const SizedBox(height: 4),
+            ...missingRequirements.whereType<String>().map(
+                  (item) => Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text('• $item', style: const TextStyle(fontSize: 13)),
+                  ),
+                ),
+          ],
           if (_text(account['rejection_reason']).isNotEmpty)
             _detailLine('Rejection reason', _text(account['rejection_reason'])),
           const SizedBox(height: 16),
@@ -505,89 +792,188 @@ class _AdminDispatchFleetScreenState extends State<AdminDispatchFleetScreen> {
           ),
           const SizedBox(height: 8),
           if (documents is List && documents.isNotEmpty)
-            ...documents.whereType<Map>().map((raw) {
-              final doc = raw.map((k, v) => MapEntry(k.toString(), v));
-              final docType = _text(doc['document_type']);
-              final docStatus = _text(doc['status']);
-              final label = _text(doc['label']).isEmpty ? docType : _text(doc['label']);
-              final url = _text(doc['download_url']);
-              return Card(
-                margin: const EdgeInsets.only(bottom: 8),
-                child: Padding(
+            ...documents.whereType<Map>().map(
+                  (raw) => _buildDocumentCard(
+                    businessId: businessId,
+                    doc: raw.map((k, v) => MapEntry(k.toString(), v)),
+                  ),
+                )
+          else
+            const Text(
+              'No verification documents on file yet.',
+              style: TextStyle(color: AdminThemeTokens.slate),
+            ),
+          const SizedBox(height: 20),
+          Row(
+            children: <Widget>[
+              const Expanded(
+                child: Text(
+                  'Linked bikers',
+                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _linkedBikersLoading || businessId.isEmpty
+                    ? null
+                    : () => _loadLinkedBikers(businessId),
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('Refresh'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (_linkedBikersLoading && _linkedBikers.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (_linkedBikersError != null)
+            Text(
+              _linkedBikersError!,
+              style: const TextStyle(color: AdminThemeTokens.slate, fontSize: 13),
+            )
+          else if (_linkedBikers.isEmpty)
+            const Text(
+              'No linked bikers yet.',
+              style: TextStyle(color: AdminThemeTokens.slate),
+            )
+          else
+            ..._linkedBikers.map((item) {
+              final driverId = _text(item['driver_id']);
+              final name = _text(item['driver_name']);
+              final status = _text(item['business_link_status']);
+              final vehicle = _text(item['dispatch_vehicle_type']);
+              final ownership = _text(item['ownership_mode']);
+              final online = item['online'] == true;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Container(
                   padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: AdminThemeTokens.border),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
-                      Text('Status: $docStatus'),
-                      if (url.isNotEmpty)
+                      Text(
+                        name.isNotEmpty ? name : driverId,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      if (name.isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 2),
+                        Text(
+                          driverId,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AdminThemeTokens.slate,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: <Widget>[
+                          _statusChip(status.isEmpty ? 'approved' : status),
+                          if (vehicle.isNotEmpty)
+                            Chip(
+                              label: Text(vehicle),
+                              visualDensity: VisualDensity.compact,
+                            ),
+                          if (ownership.isNotEmpty)
+                            Chip(
+                              label: Text(ownership),
+                              visualDensity: VisualDensity.compact,
+                            ),
+                          Chip(
+                            label: Text(online ? 'Online' : 'Offline'),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          Chip(
+                            label: Text('Linked ${_formatLinkedAt(item['linked_at'])}'),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ],
+                      ),
+                      if (_text(item['phone']).isNotEmpty)
                         Padding(
                           padding: const EdgeInsets.only(top: 6),
-                          child: SelectableText(url, style: const TextStyle(fontSize: 11)),
-                        ),
-                      if (docStatus == 'pending' && docType.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Wrap(
-                            spacing: 8,
-                            children: <Widget>[
-                              OutlinedButton(
-                                onPressed: businessId.isEmpty
-                                    ? null
-                                    : () => _reviewDocument(
-                                          businessId,
-                                          docType,
-                                          'approve',
-                                        ),
-                                child: const Text('Approve doc'),
-                              ),
-                              OutlinedButton(
-                                onPressed: businessId.isEmpty
-                                    ? null
-                                    : () => _reviewDocument(
-                                          businessId,
-                                          docType,
-                                          'reject',
-                                        ),
-                                child: const Text('Reject doc'),
-                              ),
-                            ],
-                          ),
+                          child: Text('Phone: ${_text(item['phone'])}'),
                         ),
                     ],
                   ),
                 ),
               );
-            })
-          else
-            const Text(
-              'No documents uploaded yet.',
-              style: TextStyle(color: AdminThemeTokens.slate),
+            }),
+          if (_linkedBikersHasMore) ...<Widget>[
+            const SizedBox(height: 8),
+            OutlinedButton(
+              onPressed: _linkedBikersLoading || businessId.isEmpty
+                  ? null
+                  : () => _loadLinkedBikers(businessId, append: true),
+              child: _linkedBikersLoading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Load more bikers'),
             ),
+          ],
           const SizedBox(height: 20),
-          if (canReview)
+          if (canReviewFleet)
             AdminPermissionGate(
               session: widget.session,
               permission: 'merchants.write',
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  Expanded(
-                    child: FilledButton(
+                  const Text(
+                    'Fleet decision',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: !docsComplete || businessId.isEmpty
+                              ? null
+                              : () => _review(businessId, 'approve'),
+                          child: const Text('Approve fleet'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: businessId.isEmpty
+                              ? null
+                              : () => _review(businessId, 'reject'),
+                          child: const Text('Reject fleet'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (!docsComplete) ...<Widget>[
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Approve fleet stays disabled until every required document is approved.',
+                      style: TextStyle(fontSize: 12, color: AdminThemeTokens.slate),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
                       onPressed: businessId.isEmpty
                           ? null
-                          : () => _review(businessId, 'approve'),
-                      child: const Text('Approve'),
+                          : () => _review(
+                                businessId,
+                                'approve',
+                                approvalOverride: true,
+                              ),
+                      icon: const Icon(Icons.gpp_maybe_outlined, size: 18),
+                      label: const Text('Manual override approve'),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: businessId.isEmpty
-                          ? null
-                          : () => _review(businessId, 'reject'),
-                      child: const Text('Reject'),
-                    ),
-                  ),
+                  ],
                 ],
               ),
             ),

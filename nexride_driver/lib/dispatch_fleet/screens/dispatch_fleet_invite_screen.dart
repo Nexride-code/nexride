@@ -150,7 +150,7 @@ class _DispatchFleetInviteScreenState extends State<DispatchFleetInviteScreen> {
         return;
       }
       final dest = destinationForFleetAccountResponse(response);
-      if (dest != DispatchFleetAccountDestination.invites) {
+      if (dest != DispatchFleetAccountDestination.dashboard) {
         final route = switch (dest) {
           DispatchFleetAccountDestination.rejected => DispatchFleetRoutes.rejected,
           DispatchFleetAccountDestination.suspended => DispatchFleetRoutes.suspended,

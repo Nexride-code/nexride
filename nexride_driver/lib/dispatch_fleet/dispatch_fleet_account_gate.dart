@@ -6,7 +6,7 @@ enum DispatchFleetAccountDestination {
   pending,
   rejected,
   suspended,
-  invites,
+  dashboard,
 }
 
 Map<String, dynamic>? dfAccountMap(Map<String, dynamic>? response) {
@@ -40,7 +40,7 @@ DispatchFleetAccountDestination destinationForFleetAccountResponse(
   }
   final status = dfAccountStatus(account);
   if (status == 'approved') {
-    return DispatchFleetAccountDestination.invites;
+    return DispatchFleetAccountDestination.dashboard;
   }
   if (status == 'suspended') {
     return DispatchFleetAccountDestination.suspended;

@@ -5,6 +5,7 @@ import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/material.dart';
 
 import '../config/driver_app_config.dart';
+import 'driver_redeem_fleet_invite_screen.dart';
 import 'driver_subscription_payment_screen.dart';
 import '../support/driver_profile_support.dart';
 import '../support/realtime_database_error_support.dart';
@@ -471,6 +472,53 @@ class _DriverBusinessModelScreenState extends State<DriverBusinessModelScreen> {
                             fontSize: 14,
                             height: 1.5,
                           ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                        color: Colors.black.withValues(alpha: 0.08),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        const Text(
+                          'Fleet Business link',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.black87,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'If your employer gave you a Dispatch Fleet invite code, '
+                          'link your account here.',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.black.withValues(alpha: 0.68),
+                            height: 1.45,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton.tonal(
+                          onPressed: () {
+                            Navigator.of(context).push<void>(
+                              MaterialPageRoute<void>(
+                                builder: (_) => DriverRedeemFleetInviteScreen(
+                                  driverId: widget.driverId,
+                                ),
+                              ),
+                            );
+                          },
+                          child: const Text('Redeem Fleet Invite'),
                         ),
                       ],
                     ),

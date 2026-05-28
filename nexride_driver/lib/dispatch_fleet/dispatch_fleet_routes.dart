@@ -8,5 +8,7 @@ class DispatchFleetRoutes {
   static const String rejected = '/rejected';
   static const String suspended = '/suspended';
   static const String invites = '/invites';
+  static const String dashboard = '/dashboard';
+  static const String bikers = '/bikers';
   static const String support = '/support';
 }

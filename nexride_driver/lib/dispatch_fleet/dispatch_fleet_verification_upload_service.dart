@@ -10,11 +10,13 @@ class FleetVerificationDocumentType {
     required this.key,
     required this.label,
     this.preferCamera = false,
+    this.uploadHint,
   });
 
   final String key;
   final String label;
   final bool preferCamera;
+  final String? uploadHint;
 
   static const List<FleetVerificationDocumentType> cacBusiness = <FleetVerificationDocumentType>[
     FleetVerificationDocumentType(key: 'cac_document', label: 'CAC certificate'),
@@ -24,7 +26,12 @@ class FleetVerificationDocumentType {
       label: 'Owner selfie',
       preferCamera: true,
     ),
-    FleetVerificationDocumentType(key: 'address_proof', label: 'Address proof'),
+    FleetVerificationDocumentType(
+      key: 'address_proof',
+      label: 'Address proof',
+      uploadHint:
+          'Upload a utility bill, bank statement, rent/tenancy document, or official address proof.',
+    ),
   ];
 
   static const List<FleetVerificationDocumentType> ninBusiness = <FleetVerificationDocumentType>[
@@ -34,7 +41,12 @@ class FleetVerificationDocumentType {
       label: 'Owner selfie',
       preferCamera: true,
     ),
-    FleetVerificationDocumentType(key: 'address_proof', label: 'Address proof'),
+    FleetVerificationDocumentType(
+      key: 'address_proof',
+      label: 'Address proof',
+      uploadHint:
+          'Upload a utility bill, bank statement, rent/tenancy document, or official address proof.',
+    ),
   ];
 
   static List<FleetVerificationDocumentType> forVerificationType(String? type) {

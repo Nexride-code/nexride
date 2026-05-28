@@ -79,6 +79,25 @@ class DispatchFleetFunctions {
     return _asMap(result.data);
   }
 
+  Future<Map<String, dynamic>> fleetListLinkedDriversPage({
+    int limit = 25,
+    String? cursorDriverId,
+    bool includeSummary = false,
+  }) async {
+    final result = await _fn
+        .httpsCallable(
+          'fleetListLinkedDriversPage',
+          options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+        )
+        .call(<String, dynamic>{
+          'limit': limit,
+          if (cursorDriverId != null && cursorDriverId.isNotEmpty)
+            'cursor_driver_id': cursorDriverId,
+          if (includeSummary) 'include_summary': true,
+        });
+    return _asMap(result.data);
+  }
+
   Map<String, dynamic> _asMap(dynamic data) {
     if (data is Map) {
       return data.map((dynamic k, dynamic v) => MapEntry(k.toString(), v));
@@ -141,5 +160,24 @@ String dfInviteCreateErrorMessage(String? reason) {
         return 'Could not create invite. Please try again.';
       }
       return 'Could not create invite ($r).';
+  }
+}
+
+String dfLinkedBikersErrorMessage(String? reason) {
+  final r = reason?.trim().toLowerCase() ?? '';
+  switch (r) {
+    case 'unauthorized':
+      return 'You are not signed in. Log out and sign in again.';
+    case 'not_found':
+      return 'No Dispatch Fleet account found for this login.';
+    case 'forbidden':
+      return 'Your account cannot view linked bikers.';
+    case 'not_dispatch_fleet':
+      return 'This login is not linked to a Dispatch Fleet account.';
+    default:
+      if (r.isEmpty) {
+        return 'Could not load linked bikers. Please try again.';
+      }
+      return 'Could not load linked bikers ($r).';
   }
 }

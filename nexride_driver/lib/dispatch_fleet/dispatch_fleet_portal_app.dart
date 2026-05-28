@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../admin/admin_config.dart';
 import 'dispatch_fleet_routes.dart';
+import 'screens/dispatch_fleet_bikers_screen.dart';
+import 'screens/dispatch_fleet_dashboard_screen.dart';
 import 'screens/dispatch_fleet_invite_screen.dart';
 import 'screens/dispatch_fleet_landing_screen.dart';
 import 'screens/dispatch_fleet_login_screen.dart';
@@ -31,6 +33,8 @@ class DispatchFleetPortalApp extends StatelessWidget {
         DispatchFleetRoutes.pending: (_) => const DispatchFleetPendingScreen(),
         DispatchFleetRoutes.rejected: (_) => const DispatchFleetRejectedScreen(),
         DispatchFleetRoutes.suspended: (_) => const DispatchFleetSuspendedScreen(),
+        DispatchFleetRoutes.dashboard: (_) => const DispatchFleetDashboardScreen(),
+        DispatchFleetRoutes.bikers: (_) => const DispatchFleetBikersScreen(),
         DispatchFleetRoutes.invites: (_) => const DispatchFleetInviteScreen(),
         DispatchFleetRoutes.support: (_) => const DispatchFleetSupportScreen(),
       },

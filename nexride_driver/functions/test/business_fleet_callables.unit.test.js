@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
+const { test, afterEach } = require("node:test");
 const admin = require("firebase-admin");
 
 const fleet = require("../business_fleet_callables");
@@ -10,6 +10,10 @@ const merchantPublicSync = require("../merchant_public_sync");
 if (!admin.apps.length) {
   admin.initializeApp({ projectId: "nexride-test" });
 }
+
+afterEach(() => {
+  fleet.setFirestoreForTests(null);
+});
 
 const APPROVED_FLEET_MERCHANT = {
   owner_uid: "owner_1",
@@ -47,8 +51,50 @@ function createMockDb(initial = {}) {
 
   function ref(path = "") {
     const p = String(path || "");
-    return {
+    /** @type {{ orderByKey: boolean; startAfter: string | null; limit: number | null }} */
+    const queryState = {
+      orderByKey: false,
+      startAfter: null,
+      limit: null,
+    };
+
+    const api = {
+      orderByKey() {
+        queryState.orderByKey = true;
+        return api;
+      },
+      startAfter(key) {
+        queryState.startAfter = String(key || "");
+        return api;
+      },
+      limitToFirst(n) {
+        queryState.limit = Math.max(0, Number(n) || 0);
+        return api;
+      },
       async get() {
+        if (queryState.orderByKey && queryState.limit != null) {
+          const obj = buildObjectForPath(p) || {};
+          let keys = Object.keys(obj).sort();
+          if (queryState.startAfter) {
+            keys = keys.filter((k) => k > queryState.startAfter);
+          }
+          const slice = keys.slice(0, queryState.limit);
+          if (!slice.length) {
+            return {
+              exists: () => false,
+              val: () => null,
+            };
+          }
+          const out = {};
+          for (const k of slice) {
+            out[k] = obj[k];
+          }
+          return {
+            exists: () => true,
+            val: () => out,
+          };
+        }
+
         let val = Object.prototype.hasOwnProperty.call(store, p) ? store[p] : undefined;
         if (val === undefined) {
           val = buildObjectForPath(p);
@@ -68,7 +114,7 @@ function createMockDb(initial = {}) {
           }
           return;
         }
-        const cur = (await this.get()).val();
+        const cur = (await api.get()).val();
         if (cur && typeof cur === "object" && v && typeof v === "object") {
           store[p] = { ...cur, ...v };
         } else {
@@ -76,7 +122,7 @@ function createMockDb(initial = {}) {
         }
       },
       async transaction(fn) {
-        const curSnap = await this.get();
+        const curSnap = await api.get();
         const current = curSnap.val();
         const next = fn(current);
         if (next === undefined) {
@@ -113,6 +159,8 @@ function createMockDb(initial = {}) {
         };
       },
     };
+
+    return api;
   }
 
   return {
@@ -212,6 +260,35 @@ test("fleetAccountApprovedForInvites requires dispatch fleet + approved + docs c
       account_kind: "dispatch_fleet",
       merchant_status: "approved",
       verification_status: "approved",
+      required_documents_complete: false,
+    }),
+    false,
+  );
+  assert.equal(
+    fleet.fleetAccountApprovedForInvites({
+      account_kind: "dispatch_fleet",
+      merchant_status: "approved",
+      verification_status: "approved_override",
+      required_documents_complete: false,
+    }),
+    true,
+  );
+  assert.equal(
+    fleet.fleetAccountApprovedForInvites({
+      account_kind: "dispatch_fleet",
+      merchant_status: "approved",
+      verification_status: "approved",
+      approval_override: true,
+      override_note: "Verified offline by ops",
+      required_documents_complete: false,
+    }),
+    true,
+  );
+  assert.equal(
+    fleet.fleetAccountApprovedForInvites({
+      account_kind: "dispatch_fleet",
+      merchant_status: "approved",
+      approval_override: true,
       required_documents_complete: false,
     }),
     false,
@@ -401,6 +478,30 @@ test("random user cannot read another fleet account", async () => {
     const res = await fleet.dispatchFleetGetMyAccount({}, { auth: { uid: "random_user" } }, db);
     assert.equal(res.success, false);
     assert.equal(res.reason, "not_found");
+  } finally {
+    fleet.setFirestoreForTests(null);
+  }
+});
+
+test("invite allowed after manual override approval", async () => {
+  const db = createMockDb();
+  const merchants = {};
+  seedFleetAccount(db, merchants, "owner_1", "biz_override", {
+    ...APPROVED_FLEET_MERCHANT,
+    required_documents_complete: false,
+    verification_status: "approved_override",
+    approval_override: true,
+    override_note: "Manual verification completed offline",
+  });
+  fleet.setFirestoreForTests(createMockFirestore(merchants));
+  try {
+    const res = await fleet.businessCreateDriverInvite(
+      { dispatch_vehicle_type: "bike" },
+      { auth: { uid: "owner_1" } },
+      db,
+    );
+    assert.equal(res.success, true);
+    assert.ok(res.invite_code);
   } finally {
     fleet.setFirestoreForTests(null);
   }
@@ -995,6 +1096,120 @@ test("adminReviewDispatchFleet approve updates statuses and audit", async () => 
   }
 });
 
+test("adminListDispatchFleetPage returns firestore_index_required when composite index missing", async () => {
+  const fs = {
+    collection(name) {
+      if (name !== "merchants") {
+        throw new Error(`unexpected collection: ${name}`);
+      }
+      const chain = {
+        where() {
+          return chain;
+        },
+        orderBy() {
+          return chain;
+        },
+        startAfter() {
+          return chain;
+        },
+        limit() {
+          return {
+            async get() {
+              const err = new Error("FAILED_PRECONDITION");
+              err.code = 9;
+              err.details =
+                "The query requires an index. You can create it here: https://console.firebase.google.com/v1/r/project/nexride-8d5bc/firestore/indexes?create_composite=TEST";
+              throw err;
+            },
+          };
+        },
+      };
+      return chain;
+    },
+  };
+  fleet.setFirestoreForTests(fs);
+  try {
+    const res = await fleet.adminListDispatchFleetPage(
+      { status: "pending_review", limit: 10 },
+      adminContext(),
+      adminRtdb(),
+    );
+    assert.equal(res.success, false);
+    assert.equal(res.reason, "firestore_index_required");
+    assert.ok(String(res.index_url || "").includes("console.firebase.google.com"));
+  } finally {
+    fleet.setFirestoreForTests(null);
+  }
+});
+
+test("adminReviewDispatchFleet override approve requires note", async () => {
+  const merchants = {
+    fleet_ov: {
+      account_kind: "dispatch_fleet",
+      merchant_status: "pending_review",
+      verification_type: "cac_business",
+      required_documents_complete: false,
+      created_at: 1000,
+    },
+  };
+  const fs = createFleetAdminMockFirestore(merchants, {});
+  fleet.setFirestoreForTests(fs);
+  fleetVerification.setFirestoreForTests(fs);
+  try {
+    const res = await fleet.adminReviewDispatchFleet(
+      { business_id: "fleet_ov", action: "approve", approval_override: true, note: "ab" },
+      adminContext(),
+      adminRtdb(),
+    );
+    assert.equal(res.success, false);
+    assert.equal(res.reason, "override_note_required");
+  } finally {
+    fleet.setFirestoreForTests(null);
+    fleetVerification.setFirestoreForTests(null);
+  }
+});
+
+test("adminReviewDispatchFleet override approve records audit override flag", async () => {
+  const merchants = {
+    fleet_ov2: {
+      account_kind: "dispatch_fleet",
+      merchant_status: "pending_review",
+      verification_type: "cac_business",
+      required_documents_complete: false,
+      owner_uid: "owner_ov",
+      created_at: 1000,
+    },
+  };
+  const fs = createFleetAdminMockFirestore(merchants, {});
+  const db = adminRtdb();
+  fleet.setFirestoreForTests(fs);
+  fleetVerification.setFirestoreForTests(fs);
+  try {
+    const res = await fleet.adminReviewDispatchFleet(
+      {
+        business_id: "fleet_ov2",
+        action: "approve",
+        approval_override: true,
+        note: "Manual verification completed offline",
+      },
+      adminContext(),
+      db,
+    );
+    assert.equal(res.success, true);
+    assert.equal(res.approval_override, true);
+    assert.equal(merchants.fleet_ov2.merchant_status, "approved");
+    const audits = auditLogsFromDb(db);
+    const row = audits.find((a) => a.type === "DISPATCH_FLEET_REVIEWED");
+    assert.ok(row);
+    assert.equal(row.after.approval_override, true);
+    assert.equal(row.after.override_reason, "Manual verification completed offline");
+    assert.equal(row.action, "dispatch_fleet_approved_override");
+  } finally {
+    fleet.setFirestoreForTests(null);
+    fleetVerification.setFirestoreForTests(null);
+  }
+});
+
 test("adminReviewDispatchFleet reject stores rejection reason", async () => {
   const merchants = {
     fleet_2: {
@@ -1020,4 +1235,123 @@ test("adminReviewDispatchFleet reject stores rejection reason", async () => {
   assert.equal(res.merchant_status, "rejected");
   assert.equal(merchants.fleet_2.rejection_reason, "Incomplete business details");
   assert.equal(merchants.fleet_2.verification_status, "rejected");
+});
+
+function seedLinkedDriver(db, businessId, driverId, linkRow, driverRow = {}) {
+  db._store[`business_driver_links/${businessId}/${driverId}`] = {
+    driver_id: driverId,
+    business_id: businessId,
+    status: "approved",
+    ownership_mode: "business_managed",
+    dispatch_vehicle_type: "bike",
+    linked_at: Date.now(),
+    ...linkRow,
+  };
+  db._store[`drivers/${driverId}`] = {
+    name: `Driver ${driverId}`,
+    phone: "+2348000000000",
+    isOnline: false,
+    ownership_mode: "business_managed",
+    business_id: businessId,
+    business_link_status: "approved",
+    dispatch_vehicle_type: "bike",
+    ...driverRow,
+  };
+}
+
+test("fleetListLinkedDriversPage returns paginated linked drivers for fleet owner", async () => {
+  const db = createMockDb();
+  const merchants = {};
+  seedFleetAccount(db, merchants, "owner_1", "biz_1", { ...APPROVED_FLEET_MERCHANT });
+  seedLinkedDriver(db, "biz_1", "driver_a", { linked_at: 1000 });
+  seedLinkedDriver(db, "biz_1", "driver_b", { linked_at: 2000, dispatch_vehicle_type: "car" });
+  seedLinkedDriver(db, "biz_1", "driver_c", { linked_at: 3000 });
+  fleet.setFirestoreForTests(createMockFirestore(merchants));
+  try {
+    const page1 = await fleet.fleetListLinkedDriversPage(
+      { limit: 2, include_summary: true },
+      { auth: { uid: "owner_1" } },
+      db,
+    );
+    assert.equal(page1.success, true);
+    assert.equal(page1.items.length, 2);
+    assert.equal(page1.items[0].driver_id, "driver_a");
+    assert.equal(page1.items[0].driver_name, "Driver driver_a");
+    assert.equal(page1.items[0].ownership_mode, "business_managed");
+    assert.equal(page1.has_more, true);
+    assert.equal(page1.next_cursor_driver_id, "driver_b");
+    assert.equal(page1.summary.total_linked_bikers, 3);
+    assert.equal(page1.summary.active_linked_bikers, 3);
+
+    const page2 = await fleet.fleetListLinkedDriversPage(
+      { limit: 2, cursor_driver_id: page1.next_cursor_driver_id },
+      { auth: { uid: "owner_1" } },
+      db,
+    );
+    assert.equal(page2.success, true);
+    assert.equal(page2.items.length, 1);
+    assert.equal(page2.items[0].driver_id, "driver_c");
+    assert.equal(page2.has_more, false);
+    assert.equal(page2.next_cursor_driver_id, null);
+  } finally {
+    fleet.setFirestoreForTests(null);
+  }
+});
+
+test("fleetListLinkedDriversPage rejects unauthorized caller", async () => {
+  const db = createMockDb();
+  const res = await fleet.fleetListLinkedDriversPage({}, {}, db);
+  assert.equal(res.success, false);
+  assert.equal(res.reason, "unauthorized");
+});
+
+test("adminListFleetLinkedDriversPage returns linked drivers for dispatch fleet", async () => {
+  const db = createMockDb({
+    "admins/admin_1": { enabled: true, admin_role: "super_admin" },
+  });
+  seedLinkedDriver(db, "biz_1", "driver_1", {}, { isOnline: true, is_online: true });
+  const merchants = {
+    biz_1: {
+      account_kind: "dispatch_fleet",
+      merchant_status: "approved",
+      business_name: "Fleet One",
+    },
+  };
+  fleet.setFirestoreForTests(createMockFirestore(merchants));
+  try {
+    const res = await fleet.adminListFleetLinkedDriversPage(
+      { business_id: "biz_1", limit: 10 },
+      adminContext(),
+      db,
+    );
+    assert.equal(res.success, true);
+    assert.equal(res.items.length, 1);
+    assert.equal(res.items[0].driver_id, "driver_1");
+    assert.equal(res.items[0].online, true);
+    assert.equal(res.items[0].dispatch_vehicle_type, "bike");
+  } finally {
+    fleet.setFirestoreForTests(null);
+  }
+});
+
+test("adminListFleetLinkedDriversPage rejects non-fleet merchant", async () => {
+  const merchants = {
+    biz_rest: {
+      account_kind: "restaurant",
+      merchant_status: "approved",
+      business_name: "Restaurant",
+    },
+  };
+  fleet.setFirestoreForTests(createMockFirestore(merchants));
+  try {
+    const res = await fleet.adminListFleetLinkedDriversPage(
+      { business_id: "biz_rest" },
+      adminContext(),
+      adminRtdb(),
+    );
+    assert.equal(res.success, false);
+    assert.equal(res.reason, "not_dispatch_fleet");
+  } finally {
+    fleet.setFirestoreForTests(null);
+  }
 });

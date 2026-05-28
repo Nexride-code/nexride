@@ -75,8 +75,8 @@ class _DispatchFleetSessionGateScreenState
         return DispatchFleetRoutes.rejected;
       case DispatchFleetAccountDestination.suspended:
         return DispatchFleetRoutes.suspended;
-      case DispatchFleetAccountDestination.invites:
-        return DispatchFleetRoutes.invites;
+      case DispatchFleetAccountDestination.dashboard:
+        return DispatchFleetRoutes.dashboard;
     }
   }
 

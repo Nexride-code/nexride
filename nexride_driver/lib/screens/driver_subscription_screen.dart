@@ -9,6 +9,7 @@ import '../support/driver_profile_support.dart';
 import '../support/friendly_firebase_errors.dart';
 import '../support/realtime_database_error_support.dart';
 import 'driver_business_model_screen.dart';
+import 'driver_redeem_fleet_invite_screen.dart';
 import 'driver_subscription_payment_screen.dart';
 import 'driver_wallet_topup_screen.dart';
 
@@ -137,6 +138,16 @@ class _DriverSubscriptionScreenState extends State<DriverSubscriptionScreen> {
       ),
     );
     await _load();
+  }
+
+  Future<void> _openRedeemFleetInvite() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => DriverRedeemFleetInviteScreen(
+          driverId: widget.driverId,
+        ),
+      ),
+    );
   }
 
   Future<double> _fetchWalletBalanceNgn() async {
@@ -435,6 +446,17 @@ class _DriverSubscriptionScreenState extends State<DriverSubscriptionScreen> {
                       FilledButton.tonal(
                         onPressed: _openBusinessModel,
                         child: const Text('Switch commission / subscription model'),
+                      ),
+                      const SizedBox(height: 12),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.link),
+                        title: const Text('Redeem Fleet Invite'),
+                        subtitle: const Text(
+                          'Link to a Dispatch Fleet business with an invite code. '
+                          'Also in Driver Hub or Business model.',
+                        ),
+                        onTap: _openRedeemFleetInvite,
                       ),
                       if (model == 'subscription') ...<Widget>[
                         const SizedBox(height: 12),

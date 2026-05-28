@@ -230,6 +230,7 @@ const CALLABLE_PERMISSIONS = {
   adminListMerchantsPage: "merchants.read",
   adminListDispatchFleetPage: "merchants.read",
   adminGetDispatchFleetAccount: "merchants.read",
+  adminListFleetLinkedDriversPage: "merchants.read",
   adminReviewDispatchFleet: "merchants.write",
   adminReviewFleetVerificationDocument: "merchants.write",
   adminGetMerchantProfile: "merchants.read",
@@ -259,6 +260,8 @@ const CALLABLE_PERMISSIONS = {
   adminListRiderVerificationDocuments: "verification.read",
   // index.js privileged
   createWalletTransaction: "finance.write",
+  adminApplyRiderTripCredit: "finance.write",
+  adminApplyDriverWalletCredit: "finance.write",
   recordTripCompletion: "trips.write",
 };
 
