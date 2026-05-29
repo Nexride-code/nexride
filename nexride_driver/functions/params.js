@@ -14,6 +14,13 @@ const flutterwaveSecretKey = defineSecret("FLUTTERWAVE_SECRET_KEY");
 const flutterwaveWebhookSecret = defineSecret("FLUTTERWAVE_WEBHOOK_SECRET");
 const agoraAppIdSecret = defineSecret("AGORA_APP_ID");
 const agoraAppCertificateSecret = defineSecret("AGORA_APP_CERTIFICATE");
+/**
+ * Server pepper for HMAC-SHA256 hashing of worker identity claims. Bind on the
+ * observe-only identity functions so Cloud Run injects
+ * `process.env.WORKER_IDENTITY_CLAIM_PEPPER` (otherwise the code falls back to a
+ * non-secret dev pepper). Read in `worker_identity_claims.js`.
+ */
+const workerIdentityClaimPepper = defineSecret("WORKER_IDENTITY_CLAIM_PEPPER");
 
 const nexridePlatformFeeNgn = defineString("NEXRIDE_PLATFORM_FEE_NGN", {
   default: "30",
@@ -121,6 +128,7 @@ module.exports = {
   flutterwaveWebhookSecret,
   agoraAppIdSecret,
   agoraAppCertificateSecret,
+  workerIdentityClaimPepper,
   nexridePlatformFeeNgn,
   flutterwavePublicKey,
   REGION,

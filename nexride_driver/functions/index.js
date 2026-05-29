@@ -11,6 +11,7 @@ const {
   flutterwaveWebhookSecret,
   agoraAppIdSecret,
   agoraAppCertificateSecret,
+  workerIdentityClaimPepper,
   REGION,
   platformFeeNgn,
 } = require("./params");
@@ -369,8 +370,10 @@ exports.dispatchFleetGetMyAccount = onCall(rideCallOpts, async (request) =>
 exports.businessCreateDriverInvite = onCall(rideCallOpts, async (request) =>
   businessFleet.businessCreateDriverInvite(request.data, callableContext(request), db),
 );
-exports.driverRedeemBusinessInvite = onCall(rideCallOpts, async (request) =>
-  businessFleet.driverRedeemBusinessInvite(request.data, callableContext(request), db),
+exports.driverRedeemBusinessInvite = onCall(
+  { ...rideCallOpts, secrets: [workerIdentityClaimPepper] },
+  async (request) =>
+    businessFleet.driverRedeemBusinessInvite(request.data, callableContext(request), db),
 );
 exports.fleetListLinkedDriversPage = onCall(rideCallOpts, async (request) =>
   businessFleet.fleetListLinkedDriversPage(request.data, callableContext(request), db),
@@ -691,12 +694,14 @@ exports.adminListVerificationUploads = onCall(rideCallOpts, async (request) =>
     db,
   ),
 );
-exports.adminReviewDriverDocument = onCall(rideCallOpts, async (request) =>
-  verificationCenter.adminReviewDriverDocument(
-    request.data,
-    callableContext(request),
-    db,
-  ),
+exports.adminReviewDriverDocument = onCall(
+  { ...rideCallOpts, secrets: [workerIdentityClaimPepper] },
+  async (request) =>
+    verificationCenter.adminReviewDriverDocument(
+      request.data,
+      callableContext(request),
+      db,
+    ),
 );
 exports.adminListDriverVerificationDocuments = onCall(rideCallOpts, async (request) =>
   verificationCenter.adminListDriverVerificationDocuments(
@@ -1533,16 +1538,20 @@ exports.driverGetWithdrawalDestination = onCall(rideCallOpts, async (request) =>
   withdrawFlow.driverGetWithdrawalDestination(request.data, callableContext(request), db),
 );
 
-exports.driverUpdateWithdrawalDestination = onCall(rideCallOpts, async (request) =>
-  withdrawFlow.driverUpdateWithdrawalDestination(request.data, callableContext(request), db),
+exports.driverUpdateWithdrawalDestination = onCall(
+  { ...rideCallOpts, secrets: [workerIdentityClaimPepper] },
+  async (request) =>
+    withdrawFlow.driverUpdateWithdrawalDestination(request.data, callableContext(request), db),
 );
 
 exports.approveWithdrawal = onCall(rideCallOpts, async (request) =>
   withdrawFlow.approveWithdrawal(request.data, callableContext(request), db),
 );
 
-exports.workerRunIdentityDuplicateCheck = onCall(rideCallOpts, async (request) =>
-  workerIdentity.workerRunIdentityDuplicateCheck(request.data, callableContext(request), db),
+exports.workerRunIdentityDuplicateCheck = onCall(
+  { ...rideCallOpts, secrets: [workerIdentityClaimPepper] },
+  async (request) =>
+    workerIdentity.workerRunIdentityDuplicateCheck(request.data, callableContext(request), db),
 );
 
 exports.recordTripCompletion = onCall(
