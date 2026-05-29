@@ -31,6 +31,7 @@ import '../services/dispatch_photo_upload_service.dart';
 import '../services/driver_alert_sound_service.dart';
 import '../services/local_backend_simulation_service.dart';
 import '../services/ride_cloud_functions_service.dart';
+import '../services/delivery_cloud_functions_service.dart';
 import '../services/road_route_service.dart';
 import '../services/driver_trip_safety_service.dart';
 import '../services/rider_accountability_service.dart';
@@ -300,6 +301,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       FirebaseFunctions.instanceFor(region: 'us-central1');
   late final RideCloudFunctionsService _rideCloud =
       RideCloudFunctionsService(functions: _functions);
+  late final DeliveryCloudFunctionsService _deliveryCloud =
+      DeliveryCloudFunctionsService(functions: _functions);
   final RoadRouteService _roadRouteService = RoadRouteService();
   final Set<String> _presentedRideIds = <String>{};
   final Set<String> _timedOutRideIds = <String>{};
@@ -538,6 +541,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
   /// One backend [acceptRide] call per ride; duplicate taps await the same future.
   final Map<String, Future<bool>> _acceptRideInFlightById = <String, Future<bool>>{};
+  /// In-flight dedupe for dispatch-delivery accepts (Slice 2). Kept separate
+  /// from [_acceptRideInFlightById] so ride accept bookkeeping is untouched.
+  final Map<String, Future<bool>> _acceptDeliveryInFlightById =
+      <String, Future<bool>>{};
   final Map<String, Future<void>> _arrivedInFlightByRideId = <String, Future<void>>{};
   bool _startTripInFlight = false;
   bool _completeTripInFlight = false;
@@ -13498,13 +13505,26 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                               _setApiStatus('loading');
                               _clearRidePopupTimer();
                               setDialogState(() {});
-                              final accepted = await _acceptRide(
-                                activePopupRide.rideId,
-                                driverName: driverName,
-                                car: car,
-                                plate: plate,
-                                acceptRequestedAt: acceptRequestedAt,
-                              ).timeout(
+                              // Slice 2: dispatch-delivery offers accept via
+                              // acceptDeliveryRequest; normal ride offers keep
+                              // the exact existing _acceptRide path unchanged.
+                              final bool isDeliveryOffer = _serviceTypeKey(
+                                    activePopupRide.serviceType,
+                                  ) ==
+                                  'dispatch_delivery';
+                              final accepted = await (isDeliveryOffer
+                                      ? _acceptDeliveryOffer(
+                                          activePopupRide.rideId,
+                                          acceptRequestedAt: acceptRequestedAt,
+                                        )
+                                      : _acceptRide(
+                                          activePopupRide.rideId,
+                                          driverName: driverName,
+                                          car: car,
+                                          plate: plate,
+                                          acceptRequestedAt: acceptRequestedAt,
+                                        ))
+                                  .timeout(
                                 const Duration(seconds: 20),
                                 onTimeout: () {
                                   _logRideReq(
@@ -13741,6 +13761,110 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       scheduleMicrotask(() {
         unawaited(_flushRideRequestPopupQueueAfterClose());
       });
+    }
+  }
+
+  /// Slice 2: accept a dispatch-delivery offer via the dedicated
+  /// `acceptDeliveryRequest` callable. This is intentionally separate from the
+  /// ride accept path (`_acceptRide` / `_acceptRideOnce`) and does NOT start the
+  /// ride lifecycle or any active-delivery tracking (that is Slice 3). It only
+  /// performs the backend accept and lets the popup clear its loading state.
+  Future<bool> _acceptDeliveryOffer(
+    String deliveryId, {
+    int? acceptRequestedAt,
+  }) async {
+    final rid = deliveryId.trim();
+    if (!_isValidRideId(rid)) {
+      _logRideReq(
+        '[DELIVERY_ACCEPT_FAIL] deliveryId=$deliveryId reason=delivery_id_missing',
+      );
+      return false;
+    }
+    final existing = _acceptDeliveryInFlightById[rid];
+    if (existing != null) {
+      _logRideReq('[DELIVERY_ACCEPT_JOIN_IN_FLIGHT] deliveryId=$rid');
+      return existing;
+    }
+    final acceptFuture = _acceptDeliveryOfferOnce(
+      rid,
+      acceptRequestedAt: acceptRequestedAt,
+    );
+    _acceptDeliveryInFlightById[rid] = acceptFuture;
+    try {
+      return await acceptFuture;
+    } finally {
+      _acceptDeliveryInFlightById.remove(rid);
+    }
+  }
+
+  Future<bool> _acceptDeliveryOfferOnce(
+    String deliveryId, {
+    int? acceptRequestedAt,
+  }) async {
+    if (_effectiveDriverId.isEmpty ||
+        FirebaseAuth.instance.currentUser?.uid != _effectiveDriverId ||
+        !_isOnline) {
+      _logRideReq(
+        '[DELIVERY_ACCEPT_FAIL] deliveryId=$deliveryId reason=driver_not_ready',
+      );
+      _showSnackBarSafely(
+        const SnackBar(
+          content: Text(
+            'You need to be online and signed in before accepting a request.',
+          ),
+        ),
+      );
+      return false;
+    }
+    final startedAt =
+        acceptRequestedAt ?? DateTime.now().millisecondsSinceEpoch;
+    _offerDiscoveryLog('DELIVERY_ACCEPT_START', rideId: deliveryId);
+    _logRideReq(
+      '[DELIVERY_ACCEPT_START] deliveryId=$deliveryId '
+      'driverId=$_effectiveDriverId ts=$startedAt',
+    );
+    try {
+      final response = await _deliveryCloud.acceptDeliveryRequest(
+        deliveryId: deliveryId,
+      );
+      if (deliveryCallableSucceeded(response)) {
+        _offerDiscoveryLog('DELIVERY_ACCEPT_OK', rideId: deliveryId);
+        _logRideReq('[DELIVERY_ACCEPT_OK] deliveryId=$deliveryId');
+        // Slice 2 scope: clear this offer from the local discovery caches and
+        // mark it handled so the popup dismisses cleanly. Active delivery
+        // tracking + updateDeliveryState lifecycle is intentionally deferred
+        // to Slice 3 — no ride lifecycle is started here.
+        _driverOfferQueueReplica.remove(deliveryId);
+        _driverOfferRideCache.remove(deliveryId);
+        _handledRideIds.add(deliveryId.trim());
+        return true;
+      }
+      final reason = _valueAsText(response['reason']).isNotEmpty
+          ? _valueAsText(response['reason'])
+          : (_valueAsText(response['error']).isNotEmpty
+              ? _valueAsText(response['error'])
+              : 'unknown');
+      _offerDiscoveryLog('DELIVERY_ACCEPT_FAIL', rideId: deliveryId);
+      _logRideReq(
+        '[DELIVERY_ACCEPT_FAIL] deliveryId=$deliveryId reason=$reason',
+      );
+      _showSnackBarSafely(
+        SnackBar(content: Text('Could not accept delivery request: $reason')),
+      );
+      return false;
+    } catch (error) {
+      _offerDiscoveryLog('DELIVERY_ACCEPT_FAIL', rideId: deliveryId);
+      _logRideReq(
+        '[DELIVERY_ACCEPT_FAIL] deliveryId=$deliveryId error=$error',
+      );
+      _showSnackBarSafely(
+        const SnackBar(
+          content: Text(
+            'Could not accept delivery request. Please try again.',
+          ),
+        ),
+      );
+      return false;
     }
   }
 
