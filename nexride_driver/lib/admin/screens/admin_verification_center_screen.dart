@@ -12,7 +12,9 @@ import '../models/admin_models.dart';
 import '../platform/admin_action_policy.dart';
 import '../platform/admin_error_code.dart';
 import '../services/admin_action_executor.dart';
+import '../services/admin_data_service.dart';
 import '../widgets/admin_components.dart';
+import '../widgets/admin_identity_reviews_panel.dart';
 import '../widgets/admin_sensitive_action_dialog.dart';
 
 /// Phase 2D — `/admin/verification`: riders, drivers, merchants (unified list + actions).
@@ -33,6 +35,7 @@ class _AdminVerificationCenterScreenState extends State<AdminVerificationCenterS
       FirebaseFunctions.instanceFor(region: 'us-central1');
 
   static const AdminActionExecutor _mutations = AdminActionExecutor();
+  final AdminDataService _data = AdminDataService();
 
   bool _loading = true;
   String? _error;
@@ -46,16 +49,25 @@ class _AdminVerificationCenterScreenState extends State<AdminVerificationCenterS
     'all',
   ];
 
+  /// Index of the observe-only "Identity Reviews" tab (after the upload tabs).
+  static const int _identityTabIndex = 4;
+  static const int _tabCount = 5;
+
+  bool get _onIdentityTab => _tabs.index == _identityTabIndex;
+
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: _tabUserTypes.length, vsync: this);
+    _tabs = TabController(length: _tabCount, vsync: this);
     _tabs.addListener(_onTab);
     _load();
   }
 
   void _onTab() {
     if (_tabs.indexIsChanging) return;
+    // The Identity Reviews tab manages its own data; don't load upload rows.
+    setState(() {});
+    if (_onIdentityTab) return;
     _load();
   }
 
@@ -411,42 +423,43 @@ class _AdminVerificationCenterScreenState extends State<AdminVerificationCenterS
               'Review and approve rider identity, driver KYC uploads, and merchant verification documents in one queue. Default view is pending items.',
         ),
         const SizedBox(height: 12),
-        Wrap(
-          spacing: 12,
-          runSpacing: 8,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: <Widget>[
-            DropdownButton<String>(
-              value: _statusFilter,
-              items: const <DropdownMenuItem<String>>[
-                DropdownMenuItem(value: 'pending', child: Text('Pending')),
-                DropdownMenuItem(value: 'all', child: Text('All statuses')),
-                DropdownMenuItem(value: 'approved', child: Text('Approved')),
-                DropdownMenuItem(value: 'rejected', child: Text('Rejected')),
-                DropdownMenuItem(
-                  value: 'resubmission_required',
-                  child: Text('Resubmission required'),
-                ),
-              ],
-              onChanged: (v) {
-                if (v == null) return;
-                setState(() => _statusFilter = v);
-                _load();
-              },
-            ),
-            OutlinedButton.icon(
-              onPressed: _loading ? null : _load,
-              icon: _loading
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.refresh_rounded, size: 18),
-              label: const Text('Refresh'),
-            ),
-          ],
-        ),
+        if (!_onIdentityTab)
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              DropdownButton<String>(
+                value: _statusFilter,
+                items: const <DropdownMenuItem<String>>[
+                  DropdownMenuItem(value: 'pending', child: Text('Pending')),
+                  DropdownMenuItem(value: 'all', child: Text('All statuses')),
+                  DropdownMenuItem(value: 'approved', child: Text('Approved')),
+                  DropdownMenuItem(value: 'rejected', child: Text('Rejected')),
+                  DropdownMenuItem(
+                    value: 'resubmission_required',
+                    child: Text('Resubmission required'),
+                  ),
+                ],
+                onChanged: (v) {
+                  if (v == null) return;
+                  setState(() => _statusFilter = v);
+                  _load();
+                },
+              ),
+              OutlinedButton.icon(
+                onPressed: _loading ? null : _load,
+                icon: _loading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('Refresh'),
+              ),
+            ],
+          ),
         Material(
           color: AdminThemeTokens.canvas,
           child: TabBar(
@@ -457,24 +470,44 @@ class _AdminVerificationCenterScreenState extends State<AdminVerificationCenterS
               Tab(text: 'Drivers'),
               Tab(text: 'Merchants'),
               Tab(text: 'All'),
+              Tab(text: 'Identity Reviews'),
             ],
           ),
         ),
-        if (_error != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-          ),
-        if (_loading)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
-            child: Center(child: CircularProgressIndicator()),
-          )
-        else
+        if (_onIdentityTab)
           SizedBox(
-            height: MediaQuery.sizeOf(context).height * 0.58,
-            child: _buildGroupedList(),
-          ),
+            height: MediaQuery.sizeOf(context).height * 0.62,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.only(top: 12, bottom: 24),
+              child: AdminIdentityReviewsPanel(
+                onFetchPage: ({String? cursor, String? status, bool flaggedOnly = false}) =>
+                    _data.fetchWorkerIdentityReviewsPage(
+                  cursor: cursor,
+                  status: status,
+                  flaggedOnly: flaggedOnly,
+                ),
+                onFetchDetail: (String driverId) =>
+                    _data.fetchWorkerIdentityReviewDetail(driverId),
+              ),
+            ),
+          )
+        else ...<Widget>[
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            ),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else
+            SizedBox(
+              height: MediaQuery.sizeOf(context).height * 0.58,
+              child: _buildGroupedList(),
+            ),
+        ],
       ],
     );
   }

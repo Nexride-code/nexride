@@ -566,6 +566,116 @@ class AdminWithdrawalsPageResult {
   final bool hasMore;
 }
 
+/// Observe-only duplicate identity review signal (read-only) from
+/// `adminListWorkerIdentityReviewsPage` / `adminGetWorkerIdentityReview`.
+///
+/// Never carries raw NIN/BVN/bank/plate values or claim hashes — only claim
+/// *type names* and matched account ids.
+class AdminIdentityReview {
+  const AdminIdentityReview({
+    required this.driverId,
+    required this.status,
+    required this.duplicateReviewRequired,
+    required this.matchedClaimTypes,
+    required this.blockingClaimTypes,
+    required this.warningClaimTypes,
+    required this.matchedWorkerIds,
+    required this.matchedWorkerCount,
+    required this.matchedBusinessIds,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.resolved,
+    required this.resolutionStatus,
+    required this.driverName,
+    required this.phone,
+    required this.email,
+    required this.serviceType,
+    required this.ownershipMode,
+    required this.businessId,
+    required this.dispatchVehicleType,
+  });
+
+  final String driverId;
+  /// clear | warning | duplicate_review_required
+  final String status;
+  final bool duplicateReviewRequired;
+  final List<String> matchedClaimTypes;
+  final List<String> blockingClaimTypes;
+  final List<String> warningClaimTypes;
+  final List<String> matchedWorkerIds;
+  final int matchedWorkerCount;
+  final List<String> matchedBusinessIds;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+  final bool resolved;
+  final String resolutionStatus;
+  final String driverName;
+  final String phone;
+  final String email;
+  final String serviceType;
+  final String ownershipMode;
+  final String businessId;
+  final String dispatchVehicleType;
+
+  bool get isFlagged => status == 'warning' || status == 'duplicate_review_required';
+
+  factory AdminIdentityReview.fromMap(Map<String, dynamic> raw) {
+    List<String> list(dynamic v) {
+      if (v is! List) return const <String>[];
+      return v.map((dynamic e) => e?.toString().trim() ?? '').where((s) => s.isNotEmpty).toList();
+    }
+
+    String str(dynamic v) => (v?.toString() ?? '').trim();
+    DateTime? fromMs(dynamic v) {
+      if (v is! num || v <= 0) return null;
+      return DateTime.fromMillisecondsSinceEpoch(v.toInt());
+    }
+
+    final List<String> workers = list(raw['matched_worker_ids']);
+    final String status = str(raw['identity_review_status']).toLowerCase();
+    return AdminIdentityReview(
+      driverId: str(raw['driver_id']),
+      status: status.isEmpty ? 'clear' : status,
+      duplicateReviewRequired: raw['duplicate_review_required'] == true,
+      matchedClaimTypes: list(raw['matched_claim_types']),
+      blockingClaimTypes: list(raw['blocking_claim_types']),
+      warningClaimTypes: list(raw['warning_claim_types']),
+      matchedWorkerIds: workers,
+      matchedWorkerCount: (raw['matched_worker_count'] as num?)?.toInt() ?? workers.length,
+      matchedBusinessIds: list(raw['matched_business_ids']),
+      createdAt: fromMs(raw['created_at']),
+      updatedAt: fromMs(raw['updated_at']),
+      resolved: raw['resolved'] == true,
+      resolutionStatus: str(raw['resolution_status']),
+      driverName: str(raw['driver_name']),
+      phone: str(raw['phone']),
+      email: str(raw['email']),
+      serviceType: str(raw['service_type']),
+      ownershipMode: str(raw['ownership_mode']),
+      businessId: str(raw['business_id']),
+      dispatchVehicleType: str(raw['dispatch_vehicle_type']),
+    );
+  }
+}
+
+class AdminIdentityReviewsPageResult {
+  const AdminIdentityReviewsPageResult({
+    required this.reviews,
+    required this.nextCursor,
+    required this.hasMore,
+  });
+
+  final List<AdminIdentityReview> reviews;
+  final String? nextCursor;
+  final bool hasMore;
+
+  static const AdminIdentityReviewsPageResult empty = AdminIdentityReviewsPageResult(
+    reviews: <AdminIdentityReview>[],
+    nextCursor: null,
+    hasMore: false,
+  );
+}
+
 /// Slim row from [adminListSupportTicketsPage].
 class AdminSupportTicketListItem {
   const AdminSupportTicketListItem({

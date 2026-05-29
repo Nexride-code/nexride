@@ -1223,6 +1223,85 @@ class AdminDataService {
     }
   }
 
+  /// Read-only paginated list of observe-only identity reviews.
+  Future<AdminIdentityReviewsPageResult> fetchWorkerIdentityReviewsPage({
+    String? cursor,
+    int limit = 50,
+    String? status,
+    bool flaggedOnly = false,
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListWorkerIdentityReviewsPage',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'limit': limit,
+        if (cursor != null && cursor.isNotEmpty) 'cursor': cursor,
+        if (status != null && status.isNotEmpty && status != 'all') 'status': status,
+        if (flaggedOnly) 'flagged_only': true,
+      });
+      final data = _map(result.data);
+      if (data['success'] != true) {
+        return AdminIdentityReviewsPageResult.empty;
+      }
+      final List<AdminIdentityReview> reviews = <AdminIdentityReview>[];
+      final dynamic raw = data['reviews'];
+      if (raw is List) {
+        for (final dynamic item in raw) {
+          reviews.add(AdminIdentityReview.fromMap(_map(item)));
+        }
+      }
+      final dynamic rawNext = data['nextCursor'];
+      final String? nextCursor = rawNext == null
+          ? null
+          : rawNext.toString().trim().isEmpty
+              ? null
+              : rawNext.toString().trim();
+      return AdminIdentityReviewsPageResult(
+        reviews: reviews,
+        nextCursor: nextCursor,
+        hasMore: data['hasMore'] == true,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchWorkerIdentityReviewsPage error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchWorkerIdentityReviewsPage stack',
+        stackTrace: stackTrace,
+      );
+      return AdminIdentityReviewsPageResult.empty;
+    }
+  }
+
+  /// Read-only detail for a single driver's identity review. Returns null when
+  /// no review/profile exists for the driver.
+  Future<AdminIdentityReview?> fetchWorkerIdentityReviewDetail(
+    String driverId,
+  ) async {
+    final String id = driverId.trim();
+    if (id.isEmpty) {
+      return null;
+    }
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminGetWorkerIdentityReview',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'driver_id': id,
+      'driverId': id,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    if (data['found'] != true) {
+      return null;
+    }
+    return AdminIdentityReview.fromMap(_map(data['review']));
+  }
+
   Future<AdminSupportTicketsPageResult> fetchSupportTicketsPageForAdmin({
     String? cursor,
     int limit = 50,

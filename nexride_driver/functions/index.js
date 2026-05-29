@@ -48,6 +48,7 @@ const delivery = require("./delivery_callables");
 const paymentFlow = require("./payment_flow");
 const withdrawFlow = require("./withdraw_flow");
 const workerIdentity = require("./worker_identity_claims");
+const workerIdentityAdmin = require("./worker_identity_admin");
 const trackPublic = require("./track_public");
 const adminCallables = require("./admin_callables");
 const riderFirestoreIdentity = require("./rider_firestore_identity");
@@ -1558,6 +1559,22 @@ exports.workerRunIdentityDuplicateCheck = onCall(
   { ...rideCallOpts, secrets: [workerIdentityClaimPepper] },
   async (request) =>
     workerIdentity.workerRunIdentityDuplicateCheck(request.data, callableContext(request), db),
+);
+
+// Observe-only duplicate review visibility (read-only; no pepper needed).
+exports.adminListWorkerIdentityReviewsPage = onCall(rideCallOpts, async (request) =>
+  workerIdentityAdmin.adminListWorkerIdentityReviewsPage(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+exports.adminGetWorkerIdentityReview = onCall(rideCallOpts, async (request) =>
+  workerIdentityAdmin.adminGetWorkerIdentityReview(
+    request.data,
+    callableContext(request),
+    db,
+  ),
 );
 
 exports.recordTripCompletion = onCall(

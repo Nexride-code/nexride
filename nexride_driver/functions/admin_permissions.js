@@ -254,6 +254,9 @@ const CALLABLE_PERMISSIONS = {
   adminReviewMerchantDocument: "merchants.write",
   adminGetMerchantReadiness: "merchants.read",
   adminRecomputeMerchantReadiness: "merchants.write",
+  // worker_identity_admin (observe-only duplicate review visibility)
+  adminListWorkerIdentityReviewsPage: "verification.read",
+  adminGetWorkerIdentityReview: "verification.read",
   // verification_center_callables
   adminListVerificationUploads: "verification.read",
   adminReviewDriverDocument: "verification.approve",
