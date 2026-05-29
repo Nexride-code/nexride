@@ -53,8 +53,19 @@
           "canonical_market_id": { ".write": false },
           "market": { ".write": false },
           "dispatch_market_id": { ".write": false }
-        }
+        },
+        "identity_review_status": { ".write": false },
+        "duplicate_review_required": { ".write": false },
+        "possible_duplicate_worker_ids": { ".write": false }
       }
+    },
+    "worker_identity_claims": {
+      ".read": false,
+      ".write": false
+    },
+    "worker_identity_reviews": {
+      ".read": false,
+      ".write": false
     },
     "dispatch_index": {
       ".read": "auth != null",
