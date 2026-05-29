@@ -349,4 +349,28 @@ void main() {
   test('driver dispatch radius stays scoped to nearby requests', () {
     expect(DriverDispatchConfig.nearbyRequestRadiusMeters, 30000);
   });
+
+  // Slice 1 (Dispatch Delivery Stabilization, Option A): the parallel
+  // `delivery_offer_queue/{uid}` listener reuses the ride popup pipeline.
+  // Offers only surface if `dispatch_delivery` qualifies as an active request
+  // service type, so lock that invariant here to guard against regressions
+  // that would silently stop delivery popups from showing.
+  test('dispatch_delivery qualifies as an active request service type', () {
+    expect(
+      DriverFeatureFlags.activeRequestServiceTypes.contains('dispatch_delivery'),
+      isTrue,
+    );
+    expect(
+      DriverFeatureFlags.serviceCanReceiveRequestsWithoutVerification(
+        'dispatch_delivery',
+      ),
+      isTrue,
+    );
+    expect(
+      DriverFeatureFlags.serviceCanReceiveRequestsWithoutVerification(
+        'Dispatch_Delivery',
+      ),
+      isTrue,
+    );
+  });
 }

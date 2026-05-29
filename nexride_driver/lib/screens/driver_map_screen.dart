@@ -341,6 +341,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   StreamSubscription<rtdb.DatabaseEvent>? _rideRequestSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _driverOfferQueueChildRemovedSubscription;
 
+  /// Parallel dispatch-delivery offer reception (Slice 1, Option A). Listens to
+  /// the dedicated `delivery_offer_queue/{uid}` and feeds the SAME popup
+  /// pipeline as ride offers so delivery offers surface independently.
+  StreamSubscription<rtdb.DatabaseEvent>? _deliveryOfferQueueChildAddedSubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _deliveryOfferQueueChildRemovedSubscription;
+
   /// Incremental mirror of RTDB `driver_offer_queue/{uid}/*` for ChildAdded/Removed processing.
   final Map<String, dynamic> _driverOfferQueueReplica = <String, dynamic>{};
 
@@ -348,6 +354,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   String? _rideRequestsListenerBoundCity;
   /// Auth uid bound to `driver_offer_queue/{uid}` (null if no listener).
   String? _driverOfferQueueBoundUid;
+  /// Auth uid bound to `delivery_offer_queue/{uid}` (null if no delivery listener).
+  String? _deliveryOfferQueueBoundUid;
   /// Synthetic ride snapshots built from [driver_offer_queue] entries (preflight accept).
   final Map<String, Map<String, dynamic>> _driverOfferRideCache =
       <String, Map<String, dynamic>>{};
@@ -2130,6 +2138,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (_driverOfferQueueChildRemovedSubscription != null) {
       count++;
     }
+    if (_deliveryOfferQueueChildAddedSubscription != null) {
+      count++;
+    }
+    if (_deliveryOfferQueueChildRemovedSubscription != null) {
+      count++;
+    }
     if (_activeRideSubscription != null) {
       count++;
     }
@@ -2175,7 +2189,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _lastResourceCountLogAt = now;
     final offerListeners =
         (_rideRequestSubscription != null ? 1 : 0) +
-        (_driverOfferQueueChildRemovedSubscription != null ? 1 : 0);
+        (_driverOfferQueueChildRemovedSubscription != null ? 1 : 0) +
+        (_deliveryOfferQueueChildAddedSubscription != null ? 1 : 0) +
+        (_deliveryOfferQueueChildRemovedSubscription != null ? 1 : 0);
     final activeTripListeners = _activeRideSubscription != null ? 1 : 0;
     final chatListeners = _driverChatSubscriptions.length;
     final activeTimers = _countActiveDriverTimers();
@@ -2970,7 +2986,13 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _rideRequestSubscription = null;
     _driverOfferQueueChildRemovedSubscription?.cancel();
     _driverOfferQueueChildRemovedSubscription = null;
+    _deliveryOfferQueueChildAddedSubscription?.cancel();
+    _deliveryOfferQueueChildAddedSubscription = null;
+    _deliveryOfferQueueChildRemovedSubscription?.cancel();
+    _deliveryOfferQueueChildRemovedSubscription = null;
     _rideRequestsListenerBoundCity = null;
+    _driverOfferQueueBoundUid = null;
+    _deliveryOfferQueueBoundUid = null;
     _driverActiveRideSubscription?.cancel();
     _driverActiveRideSubscription = null;
     _activeRideSubscription?.cancel();
@@ -8755,15 +8777,22 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
     final subscription = _rideRequestSubscription;
     final removedSub = _driverOfferQueueChildRemovedSubscription;
+    final deliveryAddedSub = _deliveryOfferQueueChildAddedSubscription;
+    final deliveryRemovedSub = _deliveryOfferQueueChildRemovedSubscription;
     _rideRequestSubscription = null;
     _driverOfferQueueChildRemovedSubscription = null;
+    _deliveryOfferQueueChildAddedSubscription = null;
+    _deliveryOfferQueueChildRemovedSubscription = null;
     _driverOfferQueueReplica.clear();
     _socketStatus = 'disconnected';
     _setApiStatus('idle');
     _rideRequestsListenerBoundCity = null;
     _driverOfferQueueBoundUid = null;
+    _deliveryOfferQueueBoundUid = null;
     await subscription?.cancel();
     await removedSub?.cancel();
+    await deliveryAddedSub?.cancel();
+    await deliveryRemovedSub?.cancel();
     if (hadListener) {
       _logRideReq(
         '[MATCH_DEBUG][QUERY_DETACH:ride_requests?orderByChild=market_pool&equalTo=${previousCity ?? 'none'}] '
@@ -12297,6 +12326,96 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         },
         onError: onOfferQueueChildError,
       );
+
+      // Slice 1 (Option A): parallel listener on the dedicated dispatch-delivery
+      // offer queue. Delivery offers are merged into the SAME replica and pushed
+      // through queueRideMapProcessing, so the existing single-popup selection /
+      // dedup applies (no duplicate popup, no second popup system). Delivery
+      // queue stream errors must NEVER tear down ride discovery.
+      _deliveryOfferQueueBoundUid = discoveryUid;
+      final deliveryOfferQueueRef = rtdb.FirebaseDatabase.instance
+          .ref('delivery_offer_queue/$discoveryUid');
+      void onDeliveryOfferQueueError(Object error) {
+        final stale = listenerToken != _rideRequestListenerToken ||
+            _deliveryOfferQueueBoundUid != discoveryUid;
+        if (stale) {
+          return;
+        }
+        _logRideReq(
+          '[DELIVERY_OFFER_QUEUE] stream error (ride discovery unaffected) '
+          'path=delivery_offer_queue/$discoveryUid '
+          'permissionDenied=${isRealtimeDatabasePermissionDenied(error)} '
+          'error=$error',
+        );
+      }
+
+      _logRideReq(
+        'request listener SUBSCRIBE onChildAdded/onChildRemoved '
+        'path=delivery_offer_queue/$discoveryUid market=$driverCity '
+        'reason=$reason token=$listenerToken',
+      );
+      dispatchVerboseLog(
+        '[RTDB_DISCOVERY] DELIVERY_OFFER_QUEUE_SUBSCRIBE '
+        'path=delivery_offer_queue/$discoveryUid market=$driverCity',
+      );
+      _deliveryOfferQueueChildAddedSubscription =
+          deliveryOfferQueueRef.onChildAdded.listen(
+        (event) async {
+          offerQueueStreamNoteEvent();
+          final key = event.snapshot.key?.trim();
+          if (key == null || key.isEmpty) {
+            return;
+          }
+          final rawOffer = _asStringDynamicMap(event.snapshot.value);
+          final offerRideData = _rideDataFromDriverOfferQueue(key, rawOffer);
+          if (offerRideData != null &&
+              _rideExpiredWithOfferGrace(offerRideData)) {
+            _offerDiscoveryLog('DELIVERY_OFFER_EXPIRED', rideId: key);
+            _driverOfferQueueReplica.remove(key);
+            _driverOfferRideCache.remove(key);
+            return;
+          }
+          _offerDiscoveryLog('DELIVERY_OFFER_RECEIVED', rideId: key);
+          _pinPendingOfferPopupRideId(key);
+          _driverOfferQueueReplica[key] = event.snapshot.value;
+          try {
+            await queueRideMapProcessing(
+              Map<String, dynamic>.from(_driverOfferQueueReplica),
+              source: 'delivery_child_added',
+              listenerToken: listenerToken,
+            );
+          } catch (error) {
+            _logRideReq(
+              'rideMap handler ERROR source=delivery_child_added error=$error',
+            );
+          }
+        },
+        onError: onDeliveryOfferQueueError,
+      );
+      _deliveryOfferQueueChildRemovedSubscription =
+          deliveryOfferQueueRef.onChildRemoved.listen(
+        (event) async {
+          offerQueueStreamNoteEvent();
+          final key = event.snapshot.key?.trim();
+          if (key != null && key.isNotEmpty) {
+            _driverOfferQueueReplica.remove(key);
+            _driverOfferRideCache.remove(key);
+          }
+          try {
+            await queueRideMapProcessing(
+              Map<String, dynamic>.from(_driverOfferQueueReplica),
+              source: 'delivery_child_removed',
+              listenerToken: listenerToken,
+            );
+          } catch (error) {
+            _logRideReq(
+              'rideMap handler ERROR source=delivery_child_removed error=$error',
+            );
+          }
+        },
+        onError: onDeliveryOfferQueueError,
+      );
+
       _logRideReq(
         '[MATCH_DEBUG][DRIVER_ATTACH] market=$driverCity token=$listenerToken '
         'reason=$reason prime_get=skipped_ios_safe',
