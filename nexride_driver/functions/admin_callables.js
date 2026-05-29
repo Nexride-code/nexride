@@ -2739,6 +2739,104 @@ async function adminListTripsPage(data, context, db) {
   };
 }
 
+function normalizeOwnershipModeForView(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "business_managed" || s === "individual" ? s : "";
+}
+
+function normalizeServiceTypeForView(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return ["car_ride", "bike_dispatch", "van_dispatch", "unknown_dispatch"].includes(s) ? s : "";
+}
+
+function normalizeVehicleTypeForView(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return ["bike", "car", "van"].includes(s) ? s : "";
+}
+
+/** Infer canonical service_type from a legacy driver profile when not explicit. */
+function inferServiceTypeFromProfileForView(profile) {
+  const explicit = normalizeServiceTypeForView(profile.service_type ?? profile.serviceType);
+  if (explicit) return explicit;
+  const vt = normalizeVehicleTypeForView(profile.dispatch_vehicle_type ?? profile.dispatchVehicleType);
+  if (vt === "bike") return "bike_dispatch";
+  if (vt === "van") return "van_dispatch";
+  const list = []
+    .concat(profile.serviceTypes ?? profile.service_types ?? [])
+    .concat(profile.driver_service_types ?? [])
+    .map((x) => String(x).toLowerCase());
+  const hasDispatch = list.some((x) => x.includes("dispatch"));
+  const hasRide = list.some((x) => x.includes("ride") || x.includes("car"));
+  if (hasRide) return "car_ride";
+  if (hasDispatch) return "unknown_dispatch";
+  if (vt === "car") return "car_ride";
+  return "";
+}
+
+/**
+ * Classifies a withdrawal row for admin display. Pure: takes the row's
+ * entity_type and the (already keyed-read) driver profile. Never mutates input.
+ * @param {string} entityType
+ * @param {Record<string, unknown> | null} driverProfile
+ */
+function buildWithdrawalRowEnrichment(entityType, driverProfile) {
+  const et = String(entityType ?? "").trim().toLowerCase();
+  if (et === "merchant") {
+    return {
+      user_type: "merchant",
+      wallet_source: "merchant_wallet",
+      service_type: null,
+      ownership_mode: null,
+      business_id: null,
+      dispatch_vehicle_type: null,
+    };
+  }
+  const hasProfile = !!(
+    driverProfile &&
+    typeof driverProfile === "object" &&
+    Object.keys(driverProfile).length > 0
+  );
+  const profile = hasProfile ? driverProfile : {};
+  const ownership_mode = normalizeOwnershipModeForView(profile.ownership_mode ?? profile.ownershipMode);
+  const service_type = inferServiceTypeFromProfileForView(profile);
+  const dispatch_vehicle_type = normalizeVehicleTypeForView(
+    profile.dispatch_vehicle_type ?? profile.dispatchVehicleType,
+  );
+  const businessRaw = profile.business_id ?? profile.businessId;
+  const business_id =
+    businessRaw != null && String(businessRaw).trim() ? String(businessRaw).trim() : null;
+
+  let user_type;
+  if (!hasProfile) {
+    user_type = "unknown_driver";
+  } else if (ownership_mode === "business_managed") {
+    user_type = "business_managed_biker";
+  } else {
+    const isDispatch =
+      service_type === "bike_dispatch" ||
+      service_type === "van_dispatch" ||
+      service_type === "unknown_dispatch" ||
+      dispatch_vehicle_type === "bike" ||
+      dispatch_vehicle_type === "van";
+    if (isDispatch) {
+      user_type = "independent_dispatch";
+    } else if (service_type === "car_ride" || dispatch_vehicle_type === "car") {
+      user_type = "car_driver";
+    } else {
+      user_type = "unknown_driver";
+    }
+  }
+
+  return {
+    user_type,
+    wallet_source: "driver_wallet",
+    service_type: service_type || null,
+    ownership_mode: ownership_mode || null,
+    business_id,
+    dispatch_vehicle_type: dispatch_vehicle_type || null,
+  };
+}
+
 function withdrawalRowMatches(id, row, f) {
   if (!row || typeof row !== "object") return false;
   const st = String(row.status ?? "").toLowerCase();
@@ -2825,6 +2923,13 @@ async function adminListWithdrawalsPage(data, context, db) {
                   "",
               ).trim()
             : "";
+        const bankCodeFromSnap =
+          snap && typeof snap === "object" ? String(snap.bank_code ?? "").trim() : "";
+        const bankCodeFromWa =
+          wa && typeof wa === "object"
+            ? String(wa.bankCode ?? wa.bank_code ?? "").trim()
+            : "";
+        const bank_code = bankCodeFromSnap || bankCodeFromWa;
         const bank_name = bankFromSnap || bankFromWa;
         const account_number = acctFromSnap || acctFromWa;
         const account_holder_name = holderFromSnap || holderFromWa;
@@ -2844,6 +2949,7 @@ async function adminListWithdrawalsPage(data, context, db) {
           bank_name: bank_name || null,
           account_number: account_number || null,
           account_holder_name: account_holder_name || null,
+          bank_code: bank_code || null,
           has_destination: has_destination,
         };
         if (Object.keys(matches).length >= limit + 1) break;
@@ -2861,6 +2967,26 @@ async function adminListWithdrawalsPage(data, context, db) {
   const page = {};
   for (const k of pageKeys) {
     page[k] = matches[k];
+  }
+  // Slice 1 enrichment: classify withdrawal type + account source for the
+  // visible page only, using one keyed read per driver row (no extra scans).
+  for (const k of pageKeys) {
+    const rowView = page[k];
+    let driverProfile = null;
+    if (rowView.entity_type !== "merchant" && rowView.driver_id) {
+      try {
+        const dSnap = await db.ref(`drivers/${rowView.driver_id}`).get();
+        const dVal = dSnap && typeof dSnap.val === "function" ? dSnap.val() : null;
+        driverProfile = dVal && typeof dVal === "object" ? dVal : null;
+      } catch (e) {
+        logger.warn("adminListWithdrawalsPage enrich read failed", {
+          id: k,
+          err: String(e?.message || e),
+        });
+        driverProfile = null;
+      }
+    }
+    Object.assign(rowView, buildWithdrawalRowEnrichment(rowView.entity_type, driverProfile));
   }
   const hasMore = hasMoreFromMatches || (pageKeys.length === limit && lastBatchFull && scanned < MAX_SCAN);
   const nextCursor = lastScannedKey && hasMore ? lastScannedKey : null;
@@ -3727,6 +3853,7 @@ module.exports = {
   adminGetRiderProfile,
   adminListTripsPage,
   adminListWithdrawalsPage,
+  buildWithdrawalRowEnrichment,
   adminListSupportTicketsPage,
   adminListRiders,
   adminReviewSubscriptionRequest,
