@@ -167,33 +167,9 @@ function deliveryHasVerifiedOnlinePayment(row) {
 }
 
 function paymentAllowsDispatchDelivery(row) {
-  if (!row || typeof row !== "object") return false;
-  const pm = String(row.payment_method ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-  const ps = String(row.payment_status ?? "").trim().toLowerCase();
-  if (pm === "cash") return false;
-
-  if (
-    pm === "card" ||
-    pm === "flutterwave" ||
-    pm === "credit_card" ||
-    pm === "creditcard" ||
-    pm === "debit_card"
-  ) {
-    if (["paid", "verified", "prepaid"].includes(ps)) return true;
-    return ps === "pending";
-  }
-
-  if (pm === "bank_transfer") {
-    if (ps === "bank_transfer_expired" || ps === "failed" || ps === "declined") {
-      return false;
-    }
-    return ["pending_transfer", "pending_review", "paid", "verified"].includes(ps);
-  }
-
-  return ["paid", "verified", "pending"].includes(ps);
+  // P0-1: dispatch offers and driver accept require settled online payment only.
+  // Fan-out after verify/webhook/admin-approve uses the same gate.
+  return deliveryHasVerifiedOnlinePayment(row);
 }
 
 /**
@@ -887,7 +863,6 @@ async function createDeliveryRequest(data, context, db) {
   });
 
   console.log("DELIVERY_CREATE_SUCCESS", deliveryId, market);
-  await fanOutDeliveryOffersIfEligible(db, deliveryId, row);
   await writeAudit(db, {
     type: "delivery_create",
     delivery_id: deliveryId,
@@ -1532,6 +1507,8 @@ module.exports = {
   attemptGuardedDeliveryDirectWrite,
   DRIVER_DELIVERY_NEXT,
   deliveryUiMirrorFields,
+  deliveryHasVerifiedOnlinePayment,
+  paymentAllowsDispatchDelivery,
   clearDeliveryFanoutAndOffers,
   setActiveDeliveryPointers,
   repairDeliveryActivePointers,

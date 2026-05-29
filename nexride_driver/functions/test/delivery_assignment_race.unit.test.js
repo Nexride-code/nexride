@@ -10,7 +10,25 @@ const driverA = "drv_a";
 const driverB = "drv_b";
 const now = 1_700_200_000_000;
 
-test("evaluateDeliveryAcceptTransactionDecision commits open searching row", () => {
+test("evaluateDeliveryAcceptTransactionDecision commits open searching row when payment verified", () => {
+  const decision = evaluateDeliveryAcceptTransactionDecision(
+    {
+      delivery_state: "searching",
+      driver_id: "waiting",
+      customer_id: "cust_1",
+      payment_method: "flutterwave",
+      payment_status: "verified",
+      payment_transaction_id: "flw_123",
+      expires_at: now + 60_000,
+    },
+    driverA,
+    { now },
+  );
+  assert.equal(decision.action, "commit");
+  assert.equal(decision.patch.matched_driver_id, driverA);
+});
+
+test("evaluateDeliveryAcceptTransactionDecision aborts when payment pending", () => {
   const decision = evaluateDeliveryAcceptTransactionDecision(
     {
       delivery_state: "searching",
@@ -23,8 +41,8 @@ test("evaluateDeliveryAcceptTransactionDecision commits open searching row", () 
     driverA,
     { now },
   );
-  assert.equal(decision.action, "commit");
-  assert.equal(decision.patch.matched_driver_id, driverA);
+  assert.equal(decision.action, "abort");
+  assert.equal(decision.reason, "payment_not_verified");
 });
 
 test("evaluateDeliveryAcceptTransactionDecision aborts when already taken", () => {
