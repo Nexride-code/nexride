@@ -457,11 +457,18 @@ class AdminWithdrawalRecord {
     required this.requestDate,
     required this.processedDate,
     required this.bankName,
+    required this.bankCode,
     required this.accountName,
     required this.accountNumber,
     required this.hasPayoutDestination,
     required this.payoutReference,
     required this.notes,
+    required this.userType,
+    required this.walletSource,
+    required this.serviceType,
+    required this.ownershipMode,
+    required this.businessId,
+    required this.dispatchVehicleType,
     required this.sourcePaths,
     required this.rawData,
   });
@@ -477,14 +484,26 @@ class AdminWithdrawalRecord {
   final DateTime? requestDate;
   final DateTime? processedDate;
   final String bankName;
+  final String bankCode;
   final String accountName;
   final String accountNumber;
   /// False when payout bank fields are missing on the withdrawal row (driver).
   final bool hasPayoutDestination;
   final String payoutReference;
   final String notes;
+  // Slice 1 enrichment (server-derived; empty when unavailable).
+  /// car_driver | independent_dispatch | business_managed_biker | merchant | unknown_driver
+  final String userType;
+  /// driver_wallet | merchant_wallet | fleet_business_wallet_future
+  final String walletSource;
+  final String serviceType;
+  final String ownershipMode;
+  final String businessId;
+  final String dispatchVehicleType;
   final List<String> sourcePaths;
   final Map<String, dynamic> rawData;
+
+  bool get isPending => status.trim().toLowerCase() == 'pending';
 
   factory AdminWithdrawalRecord.fromAdminListPageEntry(
     String id,
@@ -504,6 +523,7 @@ class AdminWithdrawalRecord {
     final String holder = (raw['account_holder_name']?.toString() ?? '').trim();
     final bool hasDest = raw['has_destination'] == true ||
         (bank.isNotEmpty && acct.isNotEmpty && holder.isNotEmpty);
+    String str(dynamic v) => (v?.toString() ?? '').trim();
 
     return AdminWithdrawalRecord(
       id: id,
@@ -516,11 +536,18 @@ class AdminWithdrawalRecord {
       requestDate: fromMs(raw['requestedAt'] ?? raw['requested_at']),
       processedDate: fromMs(raw['updated_at'] ?? raw['updatedAt']),
       bankName: bank,
+      bankCode: str(raw['bank_code']),
       accountName: holder,
       accountNumber: acct,
       hasPayoutDestination: entity == 'merchant' ? true : hasDest,
       payoutReference: '',
       notes: '',
+      userType: str(raw['user_type']),
+      walletSource: str(raw['wallet_source']),
+      serviceType: str(raw['service_type']),
+      ownershipMode: str(raw['ownership_mode']),
+      businessId: str(raw['business_id']),
+      dispatchVehicleType: str(raw['dispatch_vehicle_type']),
       sourcePaths: const <String>[],
       rawData: Map<String, dynamic>.from(raw),
     );

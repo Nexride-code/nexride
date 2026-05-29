@@ -1746,6 +1746,56 @@ class AdminDataService {
     ensureAdminCallableSuccess(data);
   }
 
+  /// Explicit "mark paid" using the Slice 2 callable. A stable idempotency key
+  /// keyed on the withdrawal id makes retries safe (server also dedupes).
+  Future<void> markWithdrawalPaid({
+    required AdminWithdrawalRecord withdrawal,
+    required String payoutReference,
+    String adminNote = '',
+  }) async {
+    final reference = payoutReference.trim();
+    final note = adminNote.trim();
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminMarkWithdrawalPaid',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawal_id': withdrawal.id,
+      'withdrawalId': withdrawal.id,
+      'idempotency_key': 'paid_${withdrawal.id}',
+      if (reference.isNotEmpty) 'payout_reference': reference,
+      if (reference.isNotEmpty) 'payoutReference': reference,
+      if (note.isNotEmpty) 'admin_note': note,
+      if (note.isNotEmpty) 'adminNote': note,
+    });
+    ensureAdminCallableSuccess(_map(result.data));
+  }
+
+  /// Explicit "reject" using the Slice 2 callable. Reason is required server-side
+  /// (>= 3 chars) and never debits the wallet.
+  Future<void> rejectWithdrawalRequest({
+    required AdminWithdrawalRecord withdrawal,
+    required String reason,
+  }) async {
+    final trimmed = reason.trim();
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminRejectWithdrawalRequest',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawal_id': withdrawal.id,
+      'withdrawalId': withdrawal.id,
+      'reason': trimmed,
+      'admin_note': trimmed,
+      'adminNote': trimmed,
+    });
+    ensureAdminCallableSuccess(_map(result.data));
+  }
+
   Future<void> reviewVerificationCase({
     required AdminVerificationCase verificationCase,
     required String action,
@@ -2521,6 +2571,12 @@ class AdminDataService {
           raw['updated_at'],
         ]),
         bankName: bankName,
+        bankCode: _firstText(<dynamic>[
+          snap['bank_code'],
+          _map(raw['withdrawalAccount'])['bankCode'],
+          raw['bankCode'],
+          raw['bank_code'],
+        ]),
         accountName: accountName,
         accountNumber: accountNumber,
         hasPayoutDestination: hasPayoutDestination,
@@ -2534,6 +2590,12 @@ class AdminDataService {
           raw['adminNote'],
           raw['message'],
         ]),
+        userType: _firstText(<dynamic>[raw['user_type']]),
+        walletSource: _firstText(<dynamic>[raw['wallet_source']]),
+        serviceType: _firstText(<dynamic>[raw['service_type']]),
+        ownershipMode: _firstText(<dynamic>[raw['ownership_mode']]),
+        businessId: _firstText(<dynamic>[raw['business_id']]),
+        dispatchVehicleType: _firstText(<dynamic>[raw['dispatch_vehicle_type']]),
         sourcePaths: accumulator.sourcePaths.toList(growable: false),
         rawData: raw,
       );

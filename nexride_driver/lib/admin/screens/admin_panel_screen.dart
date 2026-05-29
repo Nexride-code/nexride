@@ -27,6 +27,7 @@ import '../widgets/admin_delivery_chat_transcript_sheet.dart';
 import '../widgets/admin_health_drilldown_nav.dart';
 import '../widgets/admin_permission_gate.dart';
 import '../widgets/admin_shell.dart';
+import '../widgets/admin_withdrawal_actions.dart';
 import 'admin_live_operations_screen.dart';
 import 'admin_live_ops_dashboard_screen.dart';
 import 'admin_system_health_screen.dart';
@@ -2744,12 +2745,12 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           ),
           columns: const <DataColumn>[
             DataColumn(label: Text('Entity')),
+            DataColumn(label: Text('Type')),
             DataColumn(label: Text('Party')),
             DataColumn(label: Text('Amount')),
             DataColumn(label: Text('Payout destination')),
             DataColumn(label: Text('Requested')),
-            DataColumn(label: Text('Status')),
-            DataColumn(label: Text('Reference')),
+            DataColumn(label: Text('Actions')),
           ],
           rows: rows.map((AdminWithdrawalRecord item) {
             final bool missingDriverDest = item.entityType == 'driver' &&
@@ -2760,10 +2761,49 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             final String partySub = item.entityType == 'merchant'
                 ? (item.driverName.isNotEmpty ? item.driverName : '')
                 : item.driverId;
+            final String typeLabel = item.userType.isNotEmpty
+                ? sentenceCaseStatus(item.userType)
+                : sentenceCaseStatus(item.entityType);
+            final List<String> typeSubParts = <String>[
+              if (item.serviceType.isNotEmpty)
+                sentenceCaseStatus(item.serviceType),
+              if (item.dispatchVehicleType.isNotEmpty)
+                sentenceCaseStatus(item.dispatchVehicleType),
+              if (item.ownershipMode.isNotEmpty)
+                sentenceCaseStatus(item.ownershipMode),
+            ];
             return DataRow(
               onSelectChanged: (_) => _showWithdrawalDialog(item),
               cells: <DataCell>[
                 DataCell(Text(item.entityType)),
+                DataCell(
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[
+                      Text(
+                        typeLabel,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      if (typeSubParts.isNotEmpty)
+                        Text(
+                          typeSubParts.join(' · '),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AdminThemeTokens.slate,
+                          ),
+                        ),
+                      if (item.walletSource.isNotEmpty)
+                        Text(
+                          sentenceCaseStatus(item.walletSource),
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AdminThemeTokens.slate,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
                 DataCell(
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -2778,6 +2818,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                           partySub,
                           style: const TextStyle(
                             fontSize: 12,
+                            color: AdminThemeTokens.slate,
+                          ),
+                        ),
+                      if (item.businessId.isNotEmpty)
+                        Text(
+                          'Business: ${item.businessId}',
+                          style: const TextStyle(
+                            fontSize: 11,
                             color: AdminThemeTokens.slate,
                           ),
                         ),
@@ -2812,16 +2860,19 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                         item.accountName.isNotEmpty ? item.accountName : '—',
                         style: const TextStyle(fontSize: 12),
                       ),
+                      if (item.bankCode.isNotEmpty)
+                        Text(
+                          'Code: ${item.bankCode}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AdminThemeTokens.slate,
+                          ),
+                        ),
                     ],
                   ),
                 ),
                 DataCell(Text(formatAdminDateTime(item.requestDate))),
-                DataCell(AdminStatusChip(item.status)),
-                DataCell(Text(
-                  item.payoutReference.isNotEmpty
-                      ? item.payoutReference
-                      : '—',
-                )),
+                DataCell(_withdrawalActionsFor(item)),
               ],
             );
           }).toList(),
@@ -5835,228 +5886,253 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
   }
 
-  Future<void> _showWithdrawalDialog(AdminWithdrawalRecord withdrawal) async {
-    final referenceController =
-        TextEditingController(text: withdrawal.payoutReference);
-    final noteController = TextEditingController(text: withdrawal.notes);
-    String selectedStatus = withdrawal.status;
+  bool get _canApproveWithdrawals =>
+      widget.session.hasPermission('withdrawals.approve');
 
+  /// Explicit "mark paid" via the Slice 2 callable. Requires a payout reference
+  /// (validated in the dialog before this runs).
+  Future<void> _markWithdrawalPaidAction(
+    AdminWithdrawalRecord withdrawal,
+    String payoutReference,
+  ) async {
+    if (!mounted) {
+      return;
+    }
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'withdrawal_mark_paid',
+      successMessage: 'Withdrawal marked paid.',
+      useDefaultMutationThrottle: true,
+      invoke: () => _dataService.markWithdrawalPaid(
+        withdrawal: withdrawal,
+        payoutReference: payoutReference,
+      ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        return _withdrawalAudit(
+          action: 'withdrawal_mark_paid',
+          withdrawalId: withdrawal.id,
+          before: withdrawal.status,
+          after: success ? 'paid' : null,
+          metadata: <String, dynamic>{
+            'driverId': withdrawal.driverId,
+            'merchantId': withdrawal.merchantId,
+            'payoutReference': payoutReference,
+            if (!success && error != null) 'error': error.toString(),
+          },
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        unawaited(_refresh());
+      },
+    );
+  }
+
+  /// Explicit "reject" via the Slice 2 callable. Requires a reason (validated in
+  /// the dialog before this runs).
+  Future<void> _rejectWithdrawalAction(
+    AdminWithdrawalRecord withdrawal,
+    String reason,
+  ) async {
+    if (!mounted) {
+      return;
+    }
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'withdrawal_reject',
+      successMessage: 'Withdrawal rejected.',
+      useDefaultMutationThrottle: true,
+      invoke: () => _dataService.rejectWithdrawalRequest(
+        withdrawal: withdrawal,
+        reason: reason,
+      ),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        return _withdrawalAudit(
+          action: 'withdrawal_reject',
+          withdrawalId: withdrawal.id,
+          before: withdrawal.status,
+          after: success ? 'rejected' : null,
+          metadata: <String, dynamic>{
+            'driverId': withdrawal.driverId,
+            'merchantId': withdrawal.merchantId,
+            'reason': reason,
+            if (!success && error != null) 'error': error.toString(),
+          },
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (_) {
+        unawaited(_refresh());
+      },
+    );
+  }
+
+  AdminWithdrawalActions _withdrawalActionsFor(AdminWithdrawalRecord item) {
+    return AdminWithdrawalActions(
+      status: item.status,
+      canApprove: _canApproveWithdrawals,
+      onMarkPaid: (String payoutReference) =>
+          _markWithdrawalPaidAction(item, payoutReference),
+      onReject: (String reason) => _rejectWithdrawalAction(item, reason),
+    );
+  }
+
+  Future<void> _showWithdrawalDialog(AdminWithdrawalRecord withdrawal) async {
     await showDialog<void>(
       context: context,
       builder: (BuildContext dialogContext) {
-        return StatefulBuilder(
-          builder:
-              (BuildContext context, void Function(void Function()) setState) {
-            return Dialog(
-              insetPadding: const EdgeInsets.all(24),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(28),
-              ),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 760),
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        'Withdrawal ${withdrawal.id}',
-                        style: const TextStyle(
+        return Dialog(
+          insetPadding: const EdgeInsets.all(24),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(28),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Expanded(
+                          child: Text(
+                            'Withdrawal ${withdrawal.id}',
+                            style: const TextStyle(
+                              color: AdminThemeTokens.ink,
+                              fontSize: 24,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        AdminStatusChip(withdrawal.status),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${sentenceCaseStatus(withdrawal.entityType)} • ${formatAdminCurrency(withdrawal.amount)}',
+                      style: const TextStyle(color: Color(0xFF6B655B)),
+                    ),
+                    if (withdrawal.entityType == 'driver' &&
+                        !withdrawal.hasPayoutDestination) ...<Widget>[
+                      const SizedBox(height: 12),
+                      AdminStatusChip(
+                        'Missing withdrawal destination',
+                        color: AdminThemeTokens.warning,
+                      ),
+                    ],
+                    const SizedBox(height: 18),
+                    AdminKeyValueWrap(
+                      items: <String, String>{
+                        'Entity type': withdrawal.entityType,
+                        'User type': withdrawal.userType.isNotEmpty
+                            ? sentenceCaseStatus(withdrawal.userType)
+                            : '—',
+                        'Wallet source': withdrawal.walletSource.isNotEmpty
+                            ? sentenceCaseStatus(withdrawal.walletSource)
+                            : '—',
+                        'Service type': withdrawal.serviceType.isNotEmpty
+                            ? sentenceCaseStatus(withdrawal.serviceType)
+                            : '—',
+                        'Ownership mode': withdrawal.ownershipMode.isNotEmpty
+                            ? sentenceCaseStatus(withdrawal.ownershipMode)
+                            : '—',
+                        'Dispatch vehicle':
+                            withdrawal.dispatchVehicleType.isNotEmpty
+                                ? sentenceCaseStatus(
+                                    withdrawal.dispatchVehicleType)
+                                : '—',
+                        'Business ID': withdrawal.businessId.isNotEmpty
+                            ? withdrawal.businessId
+                            : '—',
+                        'Driver UID': withdrawal.entityType == 'driver'
+                            ? (withdrawal.driverId.isNotEmpty
+                                ? withdrawal.driverId
+                                : '—')
+                            : '—',
+                        'Merchant ID': withdrawal.entityType == 'merchant'
+                            ? (withdrawal.merchantId.isNotEmpty
+                                ? withdrawal.merchantId
+                                : '—')
+                            : '—',
+                        'Party name': withdrawal.driverName.isNotEmpty
+                            ? withdrawal.driverName
+                            : '—',
+                        'Amount': formatAdminCurrency(withdrawal.amount),
+                        'Current status':
+                            sentenceCaseStatus(withdrawal.status),
+                        'Requested at':
+                            formatAdminDateTime(withdrawal.requestDate),
+                        'Processed at':
+                            formatAdminDateTime(withdrawal.processedDate),
+                        'Bank name': withdrawal.bankName.isNotEmpty
+                            ? withdrawal.bankName
+                            : '—',
+                        'Bank code': withdrawal.bankCode.isNotEmpty
+                            ? withdrawal.bankCode
+                            : '—',
+                        'Account number': withdrawal.accountNumber.isNotEmpty
+                            ? withdrawal.accountNumber
+                            : '—',
+                        'Account holder name': withdrawal.accountName.isNotEmpty
+                            ? withdrawal.accountName
+                            : '—',
+                      },
+                    ),
+                    const SizedBox(height: 18),
+                    if (withdrawal.isPending) ...<Widget>[
+                      const Text(
+                        'Actions',
+                        style: TextStyle(
                           color: AdminThemeTokens.ink,
-                          fontSize: 24,
+                          fontSize: 16,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
-                      const SizedBox(height: 8),
-                      Text(
-                        '${sentenceCaseStatus(withdrawal.entityType)} • ${formatAdminCurrency(withdrawal.amount)}',
-                        style: const TextStyle(color: Color(0xFF6B655B)),
-                      ),
-                      if (withdrawal.entityType == 'driver' &&
-                          !withdrawal.hasPayoutDestination) ...<Widget>[
-                        const SizedBox(height: 12),
-                        AdminStatusChip(
-                          'Missing withdrawal destination',
-                          color: AdminThemeTokens.warning,
-                        ),
-                      ],
-                      const SizedBox(height: 18),
-                      AdminKeyValueWrap(
-                        items: <String, String>{
-                          'Entity type': withdrawal.entityType,
-                          'Driver UID': withdrawal.entityType == 'driver'
-                              ? (withdrawal.driverId.isNotEmpty
-                                  ? withdrawal.driverId
-                                  : '—')
-                              : '—',
-                          'Merchant ID': withdrawal.entityType == 'merchant'
-                              ? (withdrawal.merchantId.isNotEmpty
-                                  ? withdrawal.merchantId
-                                  : '—')
-                              : '—',
-                          'Party name': withdrawal.driverName.isNotEmpty
-                              ? withdrawal.driverName
-                              : '—',
-                          'Amount': formatAdminCurrency(withdrawal.amount),
-                          'Current status':
-                              sentenceCaseStatus(withdrawal.status),
-                          'Requested at':
-                              formatAdminDateTime(withdrawal.requestDate),
-                          'Processed at':
-                              formatAdminDateTime(withdrawal.processedDate),
-                          'Bank name': withdrawal.bankName.isNotEmpty
-                              ? withdrawal.bankName
-                              : '—',
-                          'Account number': withdrawal.accountNumber.isNotEmpty
-                              ? withdrawal.accountNumber
-                              : '—',
-                          'Account holder name':
-                              withdrawal.accountName.isNotEmpty
-                                  ? withdrawal.accountName
-                                  : '—',
+                      const SizedBox(height: 12),
+                      AdminWithdrawalActions(
+                        status: withdrawal.status,
+                        canApprove: _canApproveWithdrawals,
+                        onMarkPaid: (String payoutReference) async {
+                          Navigator.of(dialogContext).pop();
+                          await _markWithdrawalPaidAction(
+                            withdrawal,
+                            payoutReference,
+                          );
+                        },
+                        onReject: (String reason) async {
+                          Navigator.of(dialogContext).pop();
+                          await _rejectWithdrawalAction(withdrawal, reason);
                         },
                       ),
-                      const SizedBox(height: 18),
-                      AdminFilterDropdown<String>(
-                        value: selectedStatus,
-                        items: _dropdownItems(<String>[
-                          'pending',
-                          'processing',
-                          'paid',
-                          'failed',
-                        ]),
-                        onChanged: (String? value) {
-                          setState(() {
-                            selectedStatus = value ?? selectedStatus;
-                          });
-                        },
+                    ] else
+                      AdminWithdrawalActions(
+                        status: withdrawal.status,
+                        canApprove: _canApproveWithdrawals,
+                        onMarkPaid: (_) async {},
+                        onReject: (_) async {},
                       ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: referenceController,
-                        decoration: _dialogInputDecoration('Payout reference'),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: noteController,
-                        minLines: 2,
-                        maxLines: 4,
-                        decoration: _dialogInputDecoration('Audit note'),
-                      ),
-                      const SizedBox(height: 18),
-                      Row(
-                        children: <Widget>[
-                          Expanded(
-                            child: Builder(
-                              builder: (BuildContext buttonContext) {
-                              final bool needsWithdrawalApprove =
-                                  selectedStatus == 'paid' ||
-                                      selectedStatus == 'rejected';
-                              final bool canMutateWithdrawal =
-                                  needsWithdrawalApprove
-                                      ? widget.session.hasPermission(
-                                          'withdrawals.approve',
-                                        )
-                                      : widget.session.hasPermission(
-                                          'finance.write',
-                                        );
-                              final Future<void> Function()? onSave =
-                                  canMutateWithdrawal
-                                      ? () async {
-                                if (selectedStatus == 'paid' &&
-                                    withdrawal.entityType == 'driver' &&
-                                    !withdrawal.hasPayoutDestination) {
-                                  ScaffoldMessenger.of(buttonContext).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'Missing withdrawal destination. Cannot mark paid until payout details exist on this request.',
-                                      ),
-                                    ),
-                                  );
-                                  return;
-                                }
-                                final String auditNote = noteController.text.trim();
-                                if (selectedStatus == 'paid' &&
-                                    auditNote.length < 8) {
-                                  ScaffoldMessenger.of(buttonContext).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'Audit note is required (at least 8 characters) before marking paid.',
-                                      ),
-                                    ),
-                                  );
-                                  return;
-                                }
-                                Navigator.of(dialogContext).pop();
-                                if (!mounted) {
-                                  return;
-                                }
-                                await _actionExecutor.run<void>(
-                                  context: context,
-                                  actionName: 'withdrawal_update',
-                                  successMessage: 'Payout record updated.',
-                                  useDefaultMutationThrottle: true,
-                                  invoke: () => _dataService.updateWithdrawal(
-                                    withdrawal: withdrawal,
-                                    status: selectedStatus,
-                                    payoutReference: referenceController.text,
-                                    note: noteController.text,
-                                  ),
-                                  emitAudit: ({
-                                    required bool success,
-                                    Object? value,
-                                    Object? error,
-                                    required String correlationId,
-                                  }) {
-                                    return _withdrawalAudit(
-                                      action: 'withdrawal_update',
-                                      withdrawalId: withdrawal.id,
-                                      before: withdrawal.status,
-                                      after: success ? selectedStatus : null,
-                                      metadata: <String, dynamic>{
-                                        'driverId': withdrawal.driverId,
-                                        'payoutReference': referenceController.text,
-                                        'note': noteController.text,
-                                        if (!success && error != null) 'error': error.toString(),
-                                      },
-                                      correlationId: correlationId,
-                                    );
-                                  },
-                                  onSuccess: (_) {
-                                    unawaited(_refresh());
-                                  },
-                                );
-                              }
-                                      : null;
-                              final Widget button = AdminPrimaryButton(
-                                label: 'Save payout update',
-                                onPressed: onSave,
-                              );
-                              if (canMutateWithdrawal) {
-                                return button;
-                              }
-                              return Tooltip(
-                                message: kAdminNoPermissionTooltip,
-                                child: button,
-                              );
-                            },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+                  ],
                 ),
               ),
-            );
-          },
+            ),
+          ),
         );
       },
     );
-
-    referenceController.dispose();
-    noteController.dispose();
   }
 
   Future<void> _showSupportDialog(AdminSupportIssueRecord issue) async {
