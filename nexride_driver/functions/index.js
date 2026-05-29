@@ -250,7 +250,7 @@ async function verifyPaymentInternal(reference, callerUid = "") {
       updated_at: ts,
     });
     const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val() || {};
-    await delivery.fanOutDeliveryOffersIfEligible(db, deliveryId, freshDel);
+    await delivery.fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, freshDel);
   }
   return {
     success: true,

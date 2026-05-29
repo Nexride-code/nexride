@@ -15,7 +15,7 @@ const {
   canonicalAssignedDriverId,
 } = require("./ride_callables");
 const {
-  fanOutDeliveryOffersIfEligible,
+  fanOutDeliveryOffersAfterVerifiedPayment,
   clearDeliveryFanoutAndOffers,
   deliveryUiMirrorFields,
   DELIVERY_STATE,
@@ -1351,7 +1351,7 @@ async function adminApproveManualPayment(data, context, db) {
       updated_at: now,
     });
     const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val();
-    await fanOutDeliveryOffersIfEligible(db, deliveryId, freshDel || {});
+    await fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, freshDel || {});
   }
 
   await writeAdminAudit(db, {

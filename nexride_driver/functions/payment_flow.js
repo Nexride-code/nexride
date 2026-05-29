@@ -21,7 +21,10 @@ const {
   coordsInNgBox,
   canonicalDispatchMarket,
 } = require("./ride_callables");
-const { fanOutDeliveryOffersIfEligible } = require("./delivery_callables");
+const {
+  fanOutDeliveryOffersAfterVerifiedPayment,
+  fanOutDeliveryOffersIfEligible,
+} = require("./delivery_callables");
 const { syncRideTrackPublic } = require("./track_public");
 const { buildFlutterwaveRedirectUrl } = require("./payment_redirect");
 const { logger } = require("firebase-functions");
@@ -1539,7 +1542,7 @@ async function verifyFlutterwavePayment(data, context, db) {
     await syncRideTrackPublic(db, rideId);
   } else {
     const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val() || {};
-    await fanOutDeliveryOffersIfEligible(db, deliveryId, freshDel);
+    await fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, freshDel);
   }
   return { success: true, reason: "verified", amount: v.amount, transaction_id: payKey };
 }
@@ -2097,7 +2100,7 @@ async function handleFlutterwaveWebhook(req, res, db) {
         updated_at: now,
       });
       const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val();
-      await fanOutDeliveryOffersIfEligible(db, deliveryId, freshDel || deliveryRecord || {});
+      await fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, freshDel || deliveryRecord || {});
     }
 
     if (pt && String(pt.provider || "").trim() === "flutterwave_va" && finalTxRef) {

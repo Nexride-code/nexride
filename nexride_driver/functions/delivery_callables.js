@@ -56,6 +56,8 @@ const TERMINAL_DELIVERY = new Set([DELIVERY_STATE.completed, DELIVERY_STATE.canc
 const DELIVERY_MATCH_LOCK_MAX_AGE_MS = 120_000;
 const DELIVERY_ACCEPT_TX_MAX_ATTEMPTS = 8;
 const DELIVERY_GEO_GATE_RADIUS_M = 150;
+/** Driver search / offer accept window from create or verified-payment fan-out. */
+const DELIVERY_SEARCH_TTL_MS = 180_000;
 
 const DELIVERY_CATEGORIES = new Set(["parcel", "food", "document", "grocery", "other"]);
 
@@ -170,6 +172,55 @@ function paymentAllowsDispatchDelivery(row) {
   // P0-1: dispatch offers and driver accept require settled online payment only.
   // Fan-out after verify/webhook/admin-approve uses the same gate.
   return deliveryHasVerifiedOnlinePayment(row);
+}
+
+/**
+ * Fresh search/accept expiry fields for a verified-payment fan-out.
+ * Mirrors createDeliveryRequest TTL fields (no search_expires_at in schema).
+ */
+function deliverySearchExpiryFields(now = nowMs()) {
+  const expiresAt = now + DELIVERY_SEARCH_TTL_MS;
+  return {
+    expires_at: expiresAt,
+    search_timeout_at: expiresAt,
+    request_expires_at: expiresAt,
+    updated_at: now,
+  };
+}
+
+/**
+ * P0-A: extend the driver search window when payment is verified, before fan-out.
+ * Skips pending_transfer / pending_review and non-verified rows.
+ * @returns {Promise<object>} row merged with refreshed expiry when updated
+ */
+async function refreshDeliverySearchExpiryForVerifiedFanout(db, deliveryId, row, options = {}) {
+  const rid = normUid(deliveryId);
+  if (!rid || !row || typeof row !== "object") {
+    return row && typeof row === "object" ? row : {};
+  }
+  const ps = String(row.payment_status ?? "").trim().toLowerCase();
+  if (ps === "pending_transfer" || ps === "pending_review") {
+    return row;
+  }
+  if (!deliveryHasVerifiedOnlinePayment(row)) {
+    return row;
+  }
+  const patch = deliverySearchExpiryFields(options.now ?? nowMs());
+  await db.ref(`delivery_requests/${rid}`).update(patch);
+  console.log(
+    "DELIVERY_SEARCH_EXPIRY_REFRESH",
+    `deliveryId=${rid}`,
+    `expires_at=${patch.expires_at}`,
+  );
+  return { ...row, ...patch };
+}
+
+/**
+ * Verified-payment fan-out entry: refresh search TTL, then fan out with fresh row.
+ */
+async function fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, row) {
+  const refreshed = await refreshDeliverySearchExpiryForVerifiedFanout(db, deliveryId, row);
+  await fanOutDeliveryOffersIfEligible(db, deliveryId, refreshed);
 }
 
 /**
@@ -334,7 +385,7 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
   const pickup = row.pickup && typeof row.pickup === "object" ? row.pickup : {};
   const dropoff = row.dropoff && typeof row.dropoff === "object" ? row.dropoff : null;
   const now = nowMs();
-  const expiresAt = now + 180000;
+  const expiresAt = now + DELIVERY_SEARCH_TTL_MS;
   let offersWritten = 0;
   let scanCount = 0;
 
@@ -803,7 +854,7 @@ async function createDeliveryRequest(data, context, db) {
     return { success: false, reason: "invalid_eta" };
   }
 
-  const expiresAt = nowMs() + 180000;
+  const expiresAt = nowMs() + DELIVERY_SEARCH_TTL_MS;
   const delRef = db.ref("delivery_requests").push();
   const deliveryId = normUid(delRef.key);
   if (!deliveryId) {
@@ -1509,6 +1560,10 @@ module.exports = {
   deliveryUiMirrorFields,
   deliveryHasVerifiedOnlinePayment,
   paymentAllowsDispatchDelivery,
+  DELIVERY_SEARCH_TTL_MS,
+  deliverySearchExpiryFields,
+  refreshDeliverySearchExpiryForVerifiedFanout,
+  fanOutDeliveryOffersAfterVerifiedPayment,
   clearDeliveryFanoutAndOffers,
   setActiveDeliveryPointers,
   repairDeliveryActivePointers,
