@@ -121,6 +121,8 @@ const CALLABLE_PERMISSIONS = {
   adminListOnlineDrivers: "drivers.read",
   adminApproveWithdrawal: "withdrawals.approve",
   adminRejectWithdrawal: "withdrawals.approve",
+  adminMarkWithdrawalPaid: "withdrawals.approve",
+  adminRejectWithdrawalRequest: "withdrawals.approve",
   adminUpdateWithdrawalStatus: "withdrawals.approve",
   adminReviewDriverVerificationCase: "verification.approve",
   adminGetAppPricingConfig: "settings.read",

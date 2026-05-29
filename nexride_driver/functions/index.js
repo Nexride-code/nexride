@@ -1214,6 +1214,12 @@ exports.adminApproveWithdrawal = onCall(rideCallOpts, async (request) =>
 exports.adminRejectWithdrawal = onCall(rideCallOpts, async (request) =>
   adminCallables.adminRejectWithdrawal(request.data, callableContext(request), db),
 );
+exports.adminMarkWithdrawalPaid = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminMarkWithdrawalPaid(request.data, callableContext(request), db),
+);
+exports.adminRejectWithdrawalRequest = onCall(rideCallOpts, async (request) =>
+  adminCallables.adminRejectWithdrawalRequest(request.data, callableContext(request), db),
+);
 exports.adminUpdateWithdrawalStatus = onCall(rideCallOpts, async (request) =>
   adminCallables.adminUpdateWithdrawalStatus(request.data, callableContext(request), db),
 );

@@ -1111,6 +1111,68 @@ async function adminRejectWithdrawal(data, context, db) {
   );
 }
 
+/**
+ * Explicit "mark paid" action. Thin wrapper over approveWithdrawal(status:"paid")
+ * that requires an idempotency_key from the caller. The underlying wallet/ledger
+ * debit is keyed by withdrawalId (`withdraw_paid_{id}`) and guarded by the
+ * already_finalized transition check, so retries never double-debit.
+ */
+async function adminMarkWithdrawalPaid(data, context, db) {
+  const _rbac = await _adminGate("adminMarkWithdrawalPaid", context, db);
+  if (_rbac) return _rbac;
+  const withdrawalId = normUid(data?.withdrawal_id ?? data?.withdrawalId);
+  if (!withdrawalId) {
+    return { success: false, reason: "withdrawal_id_required" };
+  }
+  const idempotencyKey = String(data?.idempotency_key ?? data?.idempotencyKey ?? "").trim();
+  if (!idempotencyKey) {
+    return { success: false, reason: "idempotency_key_required" };
+  }
+  const adminNote = String(data?.admin_note ?? data?.adminNote ?? data?.note ?? "").trim();
+  const payoutReference = String(
+    data?.payout_reference ?? data?.payoutReference ?? data?.reference ?? "",
+  ).trim();
+  // Explicit whitelist only — never forward arbitrary request fields (esp. status).
+  return withdrawFlow.approveWithdrawal(
+    {
+      withdrawalId,
+      status: "paid",
+      admin_note: adminNote || null,
+      payout_reference: payoutReference || null,
+      idempotency_key: idempotencyKey,
+    },
+    context,
+    db,
+  );
+}
+
+/**
+ * Explicit "reject" action. Requires a reason (>= 3 chars). Delegates to
+ * approveWithdrawal(status:"rejected"), which sets the terminal status without
+ * any wallet debit; the reserved/pending balance frees because "rejected" is not
+ * a reserving status.
+ */
+async function adminRejectWithdrawalRequest(data, context, db) {
+  const _rbac = await _adminGate("adminRejectWithdrawalRequest", context, db);
+  if (_rbac) return _rbac;
+  const withdrawalId = normUid(data?.withdrawal_id ?? data?.withdrawalId);
+  if (!withdrawalId) {
+    return { success: false, reason: "withdrawal_id_required" };
+  }
+  const reason = String(
+    data?.reason ?? data?.admin_note ?? data?.adminNote ?? data?.note ?? "",
+  ).trim();
+  if (reason.length < 3) {
+    return { success: false, reason: "reason_required" };
+  }
+  // Explicit whitelist only — never forward arbitrary request fields (esp. status).
+  return withdrawFlow.approveWithdrawal(
+    { withdrawalId, status: "rejected", admin_note: reason },
+    context,
+    db,
+  );
+}
+
 async function adminVerifyDriver(data, context, db) {
   const _rbac = await _adminGate("adminVerifyDriver", context, db);
   if (_rbac) return _rbac;
@@ -3830,6 +3892,8 @@ module.exports = {
   adminListOnlineDrivers,
   adminApproveWithdrawal,
   adminRejectWithdrawal,
+  adminMarkWithdrawalPaid,
+  adminRejectWithdrawalRequest,
   adminVerifyDriver,
   adminApproveManualPayment,
   adminSuspendDriver,
