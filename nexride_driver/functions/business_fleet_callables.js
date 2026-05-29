@@ -8,6 +8,7 @@ const adminPerms = require("./admin_permissions");
 const { writeAdminAuditLog } = require("./admin_audit_log");
 const merchantVerification = require("./merchant/merchant_verification");
 const fleetVerification = require("./fleet_verification");
+const workerIdentity = require("./worker_identity_claims");
 
 const DISPATCH_VEHICLE_TYPES = new Set(["bike", "car", "van"]);
 const OWNERSHIP_MODES = new Set(["individual", "business_managed"]);
@@ -942,6 +943,17 @@ async function driverRedeemBusinessInvite(data, context, db) {
     `inviteCode=${inviteCode}`,
     `idempotent=${alreadyLinked}`,
   );
+  // Observe-only identity claim refresh. Best-effort; never blocks the link.
+  try {
+    await workerIdentity.runWorkerIdentityDuplicateCheck(db, driverId, { now });
+  } catch (e) {
+    console.log(
+      "WORKER_IDENTITY_CHECK_SKIPPED",
+      `driverId=${driverId}`,
+      `source=fleet_redeem`,
+      `reason=${String((e && e.message) || e)}`,
+    );
+  }
   return {
     success: true,
     reason: alreadyLinked ? "already_linked" : "linked",

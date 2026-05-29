@@ -8,6 +8,7 @@ const { createWalletTransactionInternal } = require("./wallet_core");
 const adminPerms = require("./admin_permissions");
 const { applyMerchantWithdrawalPaidDebit } = require("./merchant/merchant_wallet");
 const { writeAdminAuditLog } = require("./admin_audit_log");
+const workerIdentity = require("./worker_identity_claims");
 
 function normUid(uid) {
   return String(uid ?? "").trim();
@@ -94,6 +95,17 @@ async function driverUpdateWithdrawalDestination(data, context, db) {
     updated_by_uid: uid,
   };
   await db.ref(`drivers/${driverId}/withdrawal_destination`).set(payload);
+  // Observe-only identity claim refresh. Best-effort; never blocks the save.
+  try {
+    await workerIdentity.runWorkerIdentityDuplicateCheck(db, driverId, { now });
+  } catch (e) {
+    console.log(
+      "WORKER_IDENTITY_CHECK_SKIPPED",
+      `driverId=${driverId}`,
+      "source=withdrawal_destination",
+      `reason=${String((e && e.message) || e)}`,
+    );
+  }
   return { success: true, destination: payload };
 }
 

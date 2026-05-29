@@ -314,6 +314,140 @@ async function upsertWorkerIdentityClaims(db, uid, claims, meta = {}) {
   return { success: true, written: entries.length };
 }
 
+/**
+ * Extracts raw claim sources from a driver profile + their documents map.
+ * Pure: reads only the known field shapes, returns raw values (not hashed).
+ * @param {Record<string, unknown>} [profile]
+ * @param {Record<string, unknown>} [documents] driver_documents/{uid} subtree
+ * @returns {Record<string, unknown>}
+ */
+function extractClaimSources(profile = {}, documents = {}) {
+  const p = profile && typeof profile === "object" ? profile : {};
+  const docs = documents && typeof documents === "object" ? documents : {};
+  const docNumber = (type) => {
+    const d = docs[type];
+    if (!d || typeof d !== "object") return "";
+    return d.documentNumber ?? d.document_number ?? d.number ?? "";
+  };
+  const dest =
+    p.withdrawal_destination && typeof p.withdrawal_destination === "object"
+      ? p.withdrawal_destination
+      : {};
+  return {
+    phone: p.phone ?? p.phone_number ?? p.phoneNumber,
+    nin: docNumber("nin"),
+    bvn: docNumber("bvn"),
+    bank_account: dest.account_number ?? dest.accountNumber,
+    bank_code: dest.bank_code ?? dest.bankCode,
+    plate:
+      docNumber("vehicle_documents") ||
+      p.plate ||
+      p.vehicle_plate_number ||
+      p.plate_number,
+  };
+}
+
+/**
+ * Observe-only orchestrator. Gathers a driver's current claim sources via two
+ * keyed reads, upserts hashed claims, evaluates duplicate status, and writes
+ * observe-only metadata. NEVER blocks any flow; callers should treat failures
+ * as best-effort. Keyed reads/writes only — no scans, no listeners.
+ * @param {import("firebase-admin/database").Database} db
+ * @param {string} uid
+ * @param {{ now?: number, pepper?: string }} [opts]
+ */
+async function runWorkerIdentityDuplicateCheck(db, uid, opts = {}) {
+  const u = String(uid ?? "").trim();
+  if (!u) {
+    return { success: false, reason: "invalid_uid" };
+  }
+  const now = Number(opts.now) || Date.now();
+
+  const profileSnap = await db.ref(`drivers/${u}`).get();
+  const profileVal = profileSnap && typeof profileSnap.val === "function" ? profileSnap.val() : null;
+  const profile = profileVal && typeof profileVal === "object" ? profileVal : {};
+
+  const docsSnap = await db.ref(`driver_documents/${u}`).get();
+  const docsVal = docsSnap && typeof docsSnap.val === "function" ? docsSnap.val() : null;
+  const documents = docsVal && typeof docsVal === "object" ? docsVal : {};
+
+  const claims = buildDriverClaims(extractClaimSources(profile, documents), opts.pepper);
+
+  const ownershipMode =
+    normalizeOwnershipMode(profile.ownership_mode ?? profile.ownershipMode) || "individual";
+  const businessId =
+    profile.business_id != null && String(profile.business_id).trim()
+      ? String(profile.business_id).trim()
+      : null;
+  const businessLinkStatus =
+    String(profile.business_link_status ?? profile.businessLinkStatus ?? "")
+      .trim()
+      .toLowerCase() || null;
+
+  await upsertWorkerIdentityClaims(db, u, claims, {
+    ownership_mode: ownershipMode,
+    business_id: businessId,
+    business_link_status: businessLinkStatus,
+    created_at: now,
+  });
+
+  const matches = await findDuplicateWorkerIds(db, claims, u);
+  const review = evaluateDuplicateReview(matches);
+
+  // Observe-only metadata — surfaces status without blocking any flow.
+  await db.ref(`drivers/${u}`).update({
+    identity_review_status: review.status,
+    duplicate_review_required: review.duplicate_review_required === true,
+    possible_duplicate_worker_ids: review.matched_worker_ids,
+    identity_review_updated_at: now,
+  });
+
+  // Detail record in the locked review node for later admin review (Slice D).
+  await db.ref(`worker_identity_reviews/${u}`).set({
+    status: review.status,
+    matched_claim_types: review.matched_claim_types,
+    blocking_claim_types: review.blocking_claim_types,
+    warning_claim_types: review.warning_claim_types,
+    matched_worker_ids: review.matched_worker_ids,
+    matched_business_ids: review.matched_business_ids,
+    updated_at: now,
+  });
+
+  return {
+    success: true,
+    status: review.status,
+    duplicate_review_required: review.duplicate_review_required,
+    claim_types: Object.keys(claims),
+    matched_claim_types: review.matched_claim_types,
+    matched_worker_ids: review.matched_worker_ids,
+    matched_business_ids: review.matched_business_ids,
+  };
+}
+
+/**
+ * Auth-required callable wrapper. Recomputes observe-only status for the
+ * caller. Returns a minimal summary (no other workers' ids exposed to drivers).
+ * @param {object} _data
+ * @param {{ auth?: { uid?: string } }} context
+ * @param {import("firebase-admin/database").Database} db
+ */
+async function workerRunIdentityDuplicateCheck(_data, context, db) {
+  if (!context || !context.auth || !context.auth.uid) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const uid = String(context.auth.uid).trim();
+  const res = await runWorkerIdentityDuplicateCheck(db, uid);
+  if (res.success === false) {
+    return res;
+  }
+  return {
+    success: true,
+    status: res.status,
+    duplicate_review_required: res.duplicate_review_required,
+    matched_claim_types: res.matched_claim_types,
+  };
+}
+
 module.exports = {
   CLAIM_VERSION,
   DUPLICATE_SENSITIVE_CLAIM_TYPES,
@@ -328,4 +462,7 @@ module.exports = {
   findDuplicateWorkerIds,
   evaluateDuplicateReview,
   upsertWorkerIdentityClaims,
+  extractClaimSources,
+  runWorkerIdentityDuplicateCheck,
+  workerRunIdentityDuplicateCheck,
 };

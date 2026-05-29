@@ -46,6 +46,7 @@ const ride = require("./ride_callables");
 const delivery = require("./delivery_callables");
 const paymentFlow = require("./payment_flow");
 const withdrawFlow = require("./withdraw_flow");
+const workerIdentity = require("./worker_identity_claims");
 const trackPublic = require("./track_public");
 const adminCallables = require("./admin_callables");
 const riderFirestoreIdentity = require("./rider_firestore_identity");
@@ -1538,6 +1539,10 @@ exports.driverUpdateWithdrawalDestination = onCall(rideCallOpts, async (request)
 
 exports.approveWithdrawal = onCall(rideCallOpts, async (request) =>
   withdrawFlow.approveWithdrawal(request.data, callableContext(request), db),
+);
+
+exports.workerRunIdentityDuplicateCheck = onCall(rideCallOpts, async (request) =>
+  workerIdentity.workerRunIdentityDuplicateCheck(request.data, callableContext(request), db),
 );
 
 exports.recordTripCompletion = onCall(

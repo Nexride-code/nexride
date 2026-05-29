@@ -11,6 +11,15 @@ const merchantVerification = require("./merchant/merchant_verification");
 const adminCallables = require("./admin_callables");
 const productionOps = require("./production_ops_callables");
 const { writeAdminAuditLog } = require("./admin_audit_log");
+const workerIdentity = require("./worker_identity_claims");
+
+/** Document types whose approval refreshes the observe-only identity claims. */
+const IDENTITY_CLAIM_DOCUMENT_TYPES = new Set([
+  "selfie",
+  "nin",
+  "bvn",
+  "vehicle_documents",
+]);
 
 const firestore = () => admin.firestore();
 
@@ -467,6 +476,21 @@ async function adminReviewDriverDocument(data, context, db) {
     type: "driver_verification_document_review",
     created_at: now,
   });
+
+  // Observe-only identity claim refresh on approval of identity-bearing docs.
+  // Best-effort; never blocks or reverses the review decision.
+  if (action === "approve" && IDENTITY_CLAIM_DOCUMENT_TYPES.has(documentType)) {
+    try {
+      await workerIdentity.runWorkerIdentityDuplicateCheck(db, driverId, { now });
+    } catch (e) {
+      logger.warn("worker_identity_check_skipped", {
+        driverId,
+        source: "document_approval",
+        documentType,
+        err: String((e && e.message) || e),
+      });
+    }
+  }
 
   return { success: true, driver_id: driverId, document_type: documentType, status: nextStatus };
 }
