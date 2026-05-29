@@ -49,6 +49,7 @@ import '../support/realtime_database_error_support.dart';
 import '../support/realtime_database_write_queue.dart';
 import '../support/rtdb_flow_debug_log.dart';
 import '../support/ride_chat_support.dart';
+import '../support/driver_active_delivery_restore_support.dart';
 import '../support/driver_active_ride_restore_support.dart';
 import '../support/nex_trace.dart';
 import '../support/ride_pipeline_guard.dart';
@@ -1132,6 +1133,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       driverId: driverId,
       source: 'startup_restore',
     );
+    DriverActiveDeliveryRestoreSupport.traceStartupCheck(
+      driverId: driverId,
+      source: 'startup_restore',
+    );
     _log('startup session restore requested driverId=$driverId');
 
     await _releaseLocalPendingAssignmentIfNeeded(
@@ -1145,6 +1150,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     await _stopIncomingCallMonitoring();
     _stopActiveRideListener();
     _stopDriverChatListener();
+    await _stopActiveDeliveryTracking(reason: 'startup_restore_reset');
     _clearRidePopupTimer();
 
     _isOnline = false;
@@ -1162,10 +1168,15 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         query: _driversRef.root.child('driver_active_ride/$driverId'),
         path: 'driver_active_ride/$driverId',
       ),
+      _readStartupSnapshot(
+        query: _driversRef.root.child('driver_active_delivery/$driverId'),
+        path: 'driver_active_delivery/$driverId',
+      ),
     ]);
     final driverRecord =
         _asStringDynamicMap(snapshots[0]?.value) ?? <String, dynamic>{};
     final activeRideMarker = _asStringDynamicMap(snapshots[1]?.value);
+    final activeDeliveryMarker = _asStringDynamicMap(snapshots[2]?.value);
     final pointerRideId = _valueAsText(
       activeRideMarker?['ride_id'] ?? activeRideMarker?['rideId'],
     );
@@ -1345,6 +1356,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         _rideCloud.refreshDriverAvailability(source: 'startup_rehydrate_online'),
       );
       unawaited(_listenForRideRequests(reason: 'startup_rehydrate_online'));
+      await _restoreActiveDeliveryIfEligible(
+        driverId: driverId,
+        activeDeliveryMarker: activeDeliveryMarker,
+        rideWasRestored: false,
+      );
       return;
     }
 
@@ -1382,6 +1398,44 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _updateDriverMarker();
     _log(
       'startup session restored offline-safe state driverId=$driverId remoteOnline=$remoteOnline lastIntent=$_lastAvailabilityIntentValue',
+    );
+    await _restoreActiveDeliveryIfEligible(
+      driverId: driverId,
+      activeDeliveryMarker: activeDeliveryMarker,
+      rideWasRestored: false,
+    );
+  }
+
+  /// P0-B: cold-start restore for active dispatch deliveries (parallel to ride
+  /// restore; never touches TripStateMachine or ride listeners).
+  Future<void> _restoreActiveDeliveryIfEligible({
+    required String driverId,
+    required Map<String, dynamic>? activeDeliveryMarker,
+    required bool rideWasRestored,
+  }) async {
+    final deliveryId = DriverActiveDeliveryRestoreSupport.resolveStartupDeliveryRestore(
+      pointer: activeDeliveryMarker,
+      rideWasRestored: rideWasRestored,
+    );
+    if (deliveryId == null) {
+      return;
+    }
+    DriverActiveDeliveryRestoreSupport.tracePointerFound(
+      driverId: driverId,
+      deliveryId: deliveryId,
+      pointerUpdatedAt: DriverActiveDeliveryRestoreSupport.pointerUpdatedAtMs(
+        activeDeliveryMarker,
+      ),
+      source: 'startup_restore',
+    );
+    _log(
+      'startup session restoring active delivery driverId=$driverId deliveryId=$deliveryId',
+    );
+    await _startActiveDeliveryTracking(deliveryId);
+    DriverActiveDeliveryRestoreSupport.traceUiRestored(
+      driverId: driverId,
+      deliveryId: deliveryId,
+      source: 'startup_restore',
     );
   }
 
@@ -13919,7 +13973,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (rid.isEmpty) {
       return;
     }
-    if (_activeDeliveryId == rid && _activeDeliverySubscription != null) {
+    if (DriverActiveDeliveryRestoreSupport.shouldSkipTrackingAttach(
+      trackedDeliveryId: _activeDeliveryId,
+      hasActiveDeliverySubscription: _activeDeliverySubscription != null,
+      candidateDeliveryId: rid,
+    )) {
       return;
     }
     await _stopActiveDeliveryTracking(reason: 'restart_tracking');
