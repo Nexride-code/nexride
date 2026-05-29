@@ -32,6 +32,8 @@ import '../services/driver_alert_sound_service.dart';
 import '../services/local_backend_simulation_service.dart';
 import '../services/ride_cloud_functions_service.dart';
 import '../services/delivery_cloud_functions_service.dart';
+import '../trip_sync/delivery_state_machine.dart';
+import '../widgets/driver_active_delivery_panel.dart';
 import '../services/road_route_service.dart';
 import '../services/driver_trip_safety_service.dart';
 import '../services/rider_accountability_service.dart';
@@ -283,6 +285,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     with WidgetsBindingObserver {
   final rtdb.DatabaseReference _rideRequestsRef =
       rtdb.FirebaseDatabase.instance.ref('ride_requests');
+  /// Slice 3: dedicated delivery request node (parallel to ride_requests).
+  final rtdb.DatabaseReference _deliveryRequestsRef =
+      rtdb.FirebaseDatabase.instance.ref('delivery_requests');
   final rtdb.DatabaseReference _driversRef =
       rtdb.FirebaseDatabase.instance.ref('drivers');
   final CallService _callService = CallService(callTraceRole: 'driver');
@@ -370,6 +375,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   Future<void> _rideDiscoveryAttachChain = Future<void>.value();
   StreamSubscription<rtdb.DatabaseEvent>? _driverActiveRideSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _activeRideSubscription;
+
+  /// Slice 3: active dispatch-delivery tracking. Fully independent of the ride
+  /// active-trip listener/state above — driven by [DeliveryStateMachine] over
+  /// `delivery_requests/{deliveryId}` and `driver_active_delivery/{driverId}`.
+  StreamSubscription<rtdb.DatabaseEvent>? _activeDeliverySubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _driverActiveDeliverySubscription;
+  String? _activeDeliveryId;
+  Map<String, dynamic>? _activeDeliveryData;
+  DeliveryLifecycleState _activeDeliveryState =
+      DeliveryLifecycleState.searching;
+  bool _deliveryActionInFlight = false;
   final List<StreamSubscription<rtdb.DatabaseEvent>> _driverChatSubscriptions =
       <StreamSubscription<rtdb.DatabaseEvent>>[];
   final Map<String, RideChatMessage> _driverChatMessagesById =
@@ -750,6 +766,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
   bool get _hasRenderableActiveRide =>
       _hasRenderableActiveRideData(_currentRideData);
+
+  /// Slice 3: true while the driver is tracking an active dispatch delivery.
+  bool get _hasActiveDelivery =>
+      _activeDeliveryId != null &&
+      _activeDeliveryData != null &&
+      DeliveryStateMachine.isDriverActiveDeliveryState(_activeDeliveryState);
 
   bool get _canOpenChat =>
       _hasRenderableActiveRide && _isActiveRideStatus(_rideStatus);
@@ -2154,6 +2176,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (_activeRideSubscription != null) {
       count++;
     }
+    if (_activeDeliverySubscription != null) {
+      count++;
+    }
+    if (_driverActiveDeliverySubscription != null) {
+      count++;
+    }
     return count;
   }
 
@@ -2199,7 +2227,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
         (_driverOfferQueueChildRemovedSubscription != null ? 1 : 0) +
         (_deliveryOfferQueueChildAddedSubscription != null ? 1 : 0) +
         (_deliveryOfferQueueChildRemovedSubscription != null ? 1 : 0);
-    final activeTripListeners = _activeRideSubscription != null ? 1 : 0;
+    final activeTripListeners = (_activeRideSubscription != null ? 1 : 0) +
+        (_activeDeliverySubscription != null ? 1 : 0) +
+        (_driverActiveDeliverySubscription != null ? 1 : 0);
     final chatListeners = _driverChatSubscriptions.length;
     final activeTimers = _countActiveDriverTimers();
     final activeSubscriptions = _countActiveDriverRtdbSubscriptions();
@@ -3005,6 +3035,12 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     _activeRideSubscription?.cancel();
     _activeRideSubscription = null;
     _activeRideListenerRideId = null;
+    _activeDeliverySubscription?.cancel();
+    _activeDeliverySubscription = null;
+    _driverActiveDeliverySubscription?.cancel();
+    _driverActiveDeliverySubscription = null;
+    _activeDeliveryId = null;
+    _activeDeliveryData = null;
     _stopDriverChatListener();
     _callSubscription?.cancel();
     _callSubscription = null;
@@ -13830,13 +13866,15 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       if (deliveryCallableSucceeded(response)) {
         _offerDiscoveryLog('DELIVERY_ACCEPT_OK', rideId: deliveryId);
         _logRideReq('[DELIVERY_ACCEPT_OK] deliveryId=$deliveryId');
-        // Slice 2 scope: clear this offer from the local discovery caches and
-        // mark it handled so the popup dismisses cleanly. Active delivery
-        // tracking + updateDeliveryState lifecycle is intentionally deferred
-        // to Slice 3 — no ride lifecycle is started here.
+        // Clear this offer from the local discovery caches and mark it handled
+        // so the popup dismisses cleanly.
         _driverOfferQueueReplica.remove(deliveryId);
         _driverOfferRideCache.remove(deliveryId);
         _handledRideIds.add(deliveryId.trim());
+        // Slice 3: begin active-delivery tracking (delivery_requests +
+        // driver_active_delivery listeners). This does NOT start the ride
+        // lifecycle or use TripStateMachine.
+        unawaited(_startActiveDeliveryTracking(deliveryId));
         return true;
       }
       final reason = _valueAsText(response['reason']).isNotEmpty
@@ -13866,6 +13904,220 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       );
       return false;
     }
+  }
+
+  // ===========================================================================
+  // Slice 3: active dispatch-delivery tracking + lifecycle.
+  // Self-contained and parallel to the ride active-trip flow. Uses
+  // DeliveryStateMachine over delivery_requests/{deliveryId} and
+  // driver_active_delivery/{driverId}; never touches TripStateMachine,
+  // _listenToActiveRide, or the ride lifecycle callables.
+  // ===========================================================================
+
+  Future<void> _startActiveDeliveryTracking(String deliveryId) async {
+    final rid = deliveryId.trim();
+    if (rid.isEmpty) {
+      return;
+    }
+    if (_activeDeliveryId == rid && _activeDeliverySubscription != null) {
+      return;
+    }
+    await _stopActiveDeliveryTracking(reason: 'restart_tracking');
+    _activeDeliveryId = rid;
+    _logRideReq(
+      '[DELIVERY_TRACK_ATTACH] deliveryId=$rid path=delivery_requests/$rid',
+    );
+    _activeDeliverySubscription =
+        _deliveryRequestsRef.child(rid).onValue.listen(
+      (event) {
+        _handleActiveDeliverySnapshot(
+          rid,
+          _asStringDynamicMap(event.snapshot.value),
+        );
+      },
+      onError: (Object error) {
+        _logRideReq(
+          '[DELIVERY_TRACK] delivery_requests listener error '
+          'deliveryId=$rid error=$error',
+        );
+      },
+    );
+
+    // driver_active_delivery/{driverId} is the backend-owned pointer set on
+    // accept. We use it ONLY as a restore signal (never to stop tracking, to
+    // avoid races right after accept); terminal/stop is driven by the
+    // delivery_requests snapshot below.
+    final driverId = _effectiveDriverId.trim();
+    if (driverId.isNotEmpty) {
+      _logRideReq(
+        '[DELIVERY_TRACK_ATTACH] driverId=$driverId '
+        'path=driver_active_delivery/$driverId',
+      );
+      _driverActiveDeliverySubscription = rtdb.FirebaseDatabase.instance
+          .ref('driver_active_delivery/$driverId')
+          .onValue
+          .listen(
+        (event) {
+          final pointer = _asStringDynamicMap(event.snapshot.value);
+          final pointerId =
+              pointer == null ? '' : _valueAsText(pointer['delivery_id']);
+          if (pointerId.isNotEmpty && _activeDeliveryId == null) {
+            _logRideReq(
+              '[DELIVERY_TRACK] driver_active_delivery restore '
+              'deliveryId=$pointerId',
+            );
+            unawaited(_startActiveDeliveryTracking(pointerId));
+          }
+        },
+        onError: (Object error) {
+          _logRideReq(
+            '[DELIVERY_TRACK] driver_active_delivery listener error '
+            'driverId=$driverId error=$error',
+          );
+        },
+      );
+    }
+    if (mounted) {
+      _setStateSafely(() {});
+    }
+  }
+
+  void _handleActiveDeliverySnapshot(
+    String deliveryId,
+    Map<String, dynamic>? data,
+  ) {
+    if (_activeDeliveryId != deliveryId) {
+      return;
+    }
+    if (data == null || data.isEmpty) {
+      unawaited(
+        _stopActiveDeliveryTracking(reason: 'delivery_missing'),
+      );
+      return;
+    }
+    final assigned = DeliveryStateMachine.canonicalAssignedDriverId(data);
+    if (assigned.isNotEmpty && assigned != _effectiveDriverId.trim()) {
+      _logRideReq(
+        '[DELIVERY_TRACK] reassigned deliveryId=$deliveryId assigned=$assigned',
+      );
+      unawaited(
+        _stopActiveDeliveryTracking(reason: 'reassigned_to_other_driver'),
+      );
+      return;
+    }
+    final state = DeliveryStateMachine.canonicalStateFromSnapshot(data);
+    if (state == DeliveryLifecycleState.completed ||
+        state == DeliveryLifecycleState.cancelled) {
+      _logRideReq(
+        '[DELIVERY_TRACK] terminal deliveryId=$deliveryId state=${state.name}',
+      );
+      unawaited(
+        _stopActiveDeliveryTracking(reason: 'delivery_${state.name}'),
+      );
+      return;
+    }
+    _logRideReq(
+      '[DELIVERY_TRACK] snapshot deliveryId=$deliveryId state=${state.name}',
+    );
+    _setStateSafely(() {
+      _activeDeliveryData = data;
+      _activeDeliveryState = state;
+    });
+  }
+
+  Future<void> _stopActiveDeliveryTracking({required String reason}) async {
+    final hadTracking = _activeDeliverySubscription != null ||
+        _driverActiveDeliverySubscription != null ||
+        _activeDeliveryId != null;
+    final sub = _activeDeliverySubscription;
+    final pointerSub = _driverActiveDeliverySubscription;
+    final priorId = _activeDeliveryId;
+    _activeDeliverySubscription = null;
+    _driverActiveDeliverySubscription = null;
+    _activeDeliveryId = null;
+    _activeDeliveryData = null;
+    _activeDeliveryState = DeliveryLifecycleState.searching;
+    _deliveryActionInFlight = false;
+    await sub?.cancel();
+    await pointerSub?.cancel();
+    if (hadTracking) {
+      _logRideReq(
+        '[DELIVERY_TRACK_DETACH] deliveryId=${priorId ?? 'none'} reason=$reason',
+      );
+    }
+    if (mounted) {
+      _setStateSafely(() {});
+    }
+  }
+
+  /// Advance the active delivery to [targetState] via `updateDeliveryState`.
+  /// Valid targets (driver progression): driver_arriving_pickup, picked_up,
+  /// on_delivery, arrived_dropoff, completed. The delivery_requests listener
+  /// reflects the new state; this never calls ride lifecycle callables.
+  Future<void> _advanceDeliveryState(String targetState) async {
+    final deliveryId = _activeDeliveryId?.trim();
+    if (deliveryId == null || deliveryId.isEmpty) {
+      _logRideReq(
+        '[DELIVERY_STATE_UPDATE_FAIL] target=$targetState reason=no_active_delivery',
+      );
+      return;
+    }
+    if (_deliveryActionInFlight) {
+      return;
+    }
+    _setStateSafely(() => _deliveryActionInFlight = true);
+    _logRideReq(
+      '[DELIVERY_STATE_UPDATE_START] deliveryId=$deliveryId target=$targetState',
+    );
+    try {
+      final response = await _deliveryCloud.updateDeliveryState(
+        deliveryId: deliveryId,
+        deliveryState: targetState,
+        driverLat: _driverLocation.latitude,
+        driverLng: _driverLocation.longitude,
+      );
+      if (deliveryCallableSucceeded(response)) {
+        _logRideReq(
+          '[DELIVERY_STATE_UPDATE_OK] deliveryId=$deliveryId target=$targetState',
+        );
+      } else {
+        final reason = _valueAsText(response['reason']).isNotEmpty
+            ? _valueAsText(response['reason'])
+            : (_valueAsText(response['error']).isNotEmpty
+                ? _valueAsText(response['error'])
+                : 'unknown');
+        _logRideReq(
+          '[DELIVERY_STATE_UPDATE_FAIL] deliveryId=$deliveryId '
+          'target=$targetState reason=$reason',
+        );
+        _showSnackBarSafely(
+          SnackBar(content: Text('Could not update delivery: $reason')),
+        );
+      }
+    } catch (error) {
+      _logRideReq(
+        '[DELIVERY_STATE_UPDATE_FAIL] deliveryId=$deliveryId '
+        'target=$targetState error=$error',
+      );
+      _showSnackBarSafely(
+        const SnackBar(
+          content: Text('Could not update delivery. Please try again.'),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        _setStateSafely(() => _deliveryActionInFlight = false);
+      }
+    }
+  }
+
+  Widget _buildActiveDeliveryDraggablePanel() {
+    return DriverActiveDeliveryPanel(
+      delivery: _activeDeliveryData ?? const <String, dynamic>{},
+      state: _activeDeliveryState,
+      busy: _deliveryActionInFlight,
+      onAdvance: _advanceDeliveryState,
+    );
   }
 
   Future<bool> _acceptRide(
@@ -19738,6 +19990,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
             },
           ),
           if (!_hasRenderableActiveRide &&
+              !_hasActiveDelivery &&
               shouldShowDriverRolloutBanner(
                 pendingAvailabilityMode: _pendingAvailabilityMode,
                 catalogLoading: _rolloutCatalogLoading,
@@ -19757,7 +20010,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                 child: _buildRolloutAreaBanner(),
               ),
             ),
-          if (!_hasRenderableActiveRide)
+          if (!_hasRenderableActiveRide && !_hasActiveDelivery)
             Positioned(
               bottom: 20,
               left: 20,
@@ -19796,6 +20049,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
               child: _buildDebugOverlay(),
             ),
           if (_hasRenderableActiveRide) _buildActiveTripDraggablePanel(),
+          if (_hasActiveDelivery) _buildActiveDeliveryDraggablePanel(),
         ],
       ),
     );
