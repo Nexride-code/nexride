@@ -245,12 +245,199 @@ async function refreshDeliverySearchExpiryForVerifiedFanout(db, deliveryId, row,
   return { ...row, ...patch };
 }
 
+const DELIVERY_FANOUT_AFTER_PAYMENT_IN_PROGRESS_AT_FIELD =
+  "delivery_fanout_after_payment_in_progress_at";
+const DELIVERY_FANOUT_AFTER_PAYMENT_COMPLETED_AT_FIELD =
+  "delivery_fanout_after_payment_completed_at";
+/** Short lease preventing concurrent verified-payment fan-out attempts. */
+const DELIVERY_FANOUT_AFTER_PAYMENT_LEASE_MS = 60_000;
+
+function deliveryFanoutLeaseIsStale(inProgressAt, now = nowMs()) {
+  const ts = Number(inProgressAt ?? 0) || 0;
+  if (ts <= 0) return true;
+  return now - ts >= DELIVERY_FANOUT_AFTER_PAYMENT_LEASE_MS;
+}
+
 /**
- * Verified-payment fan-out entry: refresh search TTL, then fan out with fresh row.
+ * Acquire in_progress lease for verified-payment fan-out (skip only when completed_at set).
+ * @returns {Promise<{ acquired: boolean, skipped?: boolean, reason?: string, leaseAcquiredAt?: number, row?: object }>}
+ */
+async function tryAcquireDeliveryVerifiedPaymentFanoutLease(db, deliveryId, options = {}) {
+  const rid = normUid(deliveryId);
+  if (!rid) {
+    return { acquired: false, reason: "invalid_delivery_id" };
+  }
+  const ref = db.ref(`delivery_requests/${rid}`);
+  const now = options.now ?? nowMs();
+  let abortReason = null;
+
+  const tx = await ref.transaction((current) => {
+    if (!current || typeof current !== "object") {
+      abortReason = "delivery_missing";
+      return;
+    }
+    if (!deliveryHasVerifiedOnlinePayment(current)) {
+      abortReason = "payment_not_verified";
+      return;
+    }
+    const completed =
+      Number(current[DELIVERY_FANOUT_AFTER_PAYMENT_COMPLETED_AT_FIELD] ?? 0) || 0;
+    if (completed > 0) {
+      abortReason = "fanout_completed";
+      return;
+    }
+    const inProgress =
+      Number(current[DELIVERY_FANOUT_AFTER_PAYMENT_IN_PROGRESS_AT_FIELD] ?? 0) || 0;
+    if (inProgress > 0 && !deliveryFanoutLeaseIsStale(inProgress, now)) {
+      abortReason = "fanout_in_progress";
+      return;
+    }
+    return {
+      ...current,
+      [DELIVERY_FANOUT_AFTER_PAYMENT_IN_PROGRESS_AT_FIELD]: now,
+      updated_at: now,
+    };
+  });
+
+  if (abortReason === "fanout_completed" || abortReason === "fanout_in_progress") {
+    console.log(
+      "DELIVERY_FANOUT_AFTER_PAYMENT_SKIP",
+      `deliveryId=${rid}`,
+      `reason=${abortReason}`,
+    );
+    return { acquired: false, skipped: true, reason: abortReason };
+  }
+  if (!tx.committed) {
+    console.log(
+      "DELIVERY_FANOUT_AFTER_PAYMENT_SKIP",
+      `deliveryId=${rid}`,
+      `reason=${abortReason || "transaction_aborted"}`,
+    );
+    return { acquired: false, reason: abortReason || "transaction_aborted" };
+  }
+
+  const row = tx.snapshot.val();
+  console.log(
+    "DELIVERY_FANOUT_AFTER_PAYMENT_LEASE",
+    `deliveryId=${rid}`,
+    `in_progress_at=${now}`,
+  );
+  return {
+    acquired: true,
+    leaseAcquiredAt: now,
+    row: row && typeof row === "object" ? row : {},
+  };
+}
+
+async function markDeliveryVerifiedPaymentFanoutCompleted(db, deliveryId, leaseAcquiredAt) {
+  const rid = normUid(deliveryId);
+  if (!rid) {
+    return { committed: false, reason: "invalid_delivery_id" };
+  }
+  const ref = db.ref(`delivery_requests/${rid}`);
+  const now = nowMs();
+  let abortReason = null;
+
+  const tx = await ref.transaction((current) => {
+    if (!current || typeof current !== "object") {
+      abortReason = "delivery_missing";
+      return;
+    }
+    const inProgress =
+      Number(current[DELIVERY_FANOUT_AFTER_PAYMENT_IN_PROGRESS_AT_FIELD] ?? 0) || 0;
+    const lease = Number(leaseAcquiredAt ?? 0) || 0;
+    if (lease > 0 && inProgress !== lease) {
+      abortReason = "lease_lost";
+      return;
+    }
+    const next = {
+      ...current,
+      [DELIVERY_FANOUT_AFTER_PAYMENT_COMPLETED_AT_FIELD]: now,
+      updated_at: now,
+    };
+    delete next[DELIVERY_FANOUT_AFTER_PAYMENT_IN_PROGRESS_AT_FIELD];
+    return next;
+  });
+
+  if (!tx.committed) {
+    return { committed: false, reason: abortReason || "transaction_aborted" };
+  }
+  console.log(
+    "DELIVERY_FANOUT_AFTER_PAYMENT_COMPLETE",
+    `deliveryId=${rid}`,
+    `completed_at=${now}`,
+  );
+  return { committed: true, completedAt: now };
+}
+
+async function releaseDeliveryVerifiedPaymentFanoutLease(db, deliveryId, leaseAcquiredAt) {
+  const rid = normUid(deliveryId);
+  if (!rid) {
+    return { committed: false, reason: "invalid_delivery_id" };
+  }
+  const ref = db.ref(`delivery_requests/${rid}`);
+  const now = nowMs();
+  let abortReason = null;
+
+  const tx = await ref.transaction((current) => {
+    if (!current || typeof current !== "object") {
+      abortReason = "delivery_missing";
+      return;
+    }
+    const inProgress =
+      Number(current[DELIVERY_FANOUT_AFTER_PAYMENT_IN_PROGRESS_AT_FIELD] ?? 0) || 0;
+    const lease = Number(leaseAcquiredAt ?? 0) || 0;
+    if (lease > 0 && inProgress !== lease) {
+      abortReason = "lease_lost";
+      return;
+    }
+    const next = { ...current, updated_at: now };
+    delete next[DELIVERY_FANOUT_AFTER_PAYMENT_IN_PROGRESS_AT_FIELD];
+    return next;
+  });
+
+  if (!tx.committed) {
+    return { committed: false, reason: abortReason || "transaction_aborted" };
+  }
+  console.log(
+    "DELIVERY_FANOUT_AFTER_PAYMENT_RELEASE",
+    `deliveryId=${rid}`,
+    `lease=${leaseAcquiredAt || 0}`,
+  );
+  return { committed: true };
+}
+
+/**
+ * Verified-payment fan-out entry: lease, refresh search TTL, fan out, complete marker.
+ * Idempotent across verifyFlutterwavePayment, webhook, admin approve, verifyPaymentInternal.
  */
 async function fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, row) {
-  const refreshed = await refreshDeliverySearchExpiryForVerifiedFanout(db, deliveryId, row);
-  await fanOutDeliveryOffersIfEligible(db, deliveryId, refreshed);
+  const acquire = await tryAcquireDeliveryVerifiedPaymentFanoutLease(db, deliveryId);
+  if (!acquire.acquired) {
+    return {
+      ok: true,
+      skipped: acquire.skipped === true,
+      reason: acquire.reason || "not_acquired",
+    };
+  }
+  const leaseAcquiredAt = acquire.leaseAcquiredAt;
+  try {
+    const mergedRow = {
+      ...(row && typeof row === "object" ? row : {}),
+      ...(acquire.row && typeof acquire.row === "object" ? acquire.row : {}),
+    };
+    const refreshed = await refreshDeliverySearchExpiryForVerifiedFanout(
+      db,
+      deliveryId,
+      mergedRow,
+    );
+    await fanOutDeliveryOffersIfEligible(db, deliveryId, refreshed);
+    await markDeliveryVerifiedPaymentFanoutCompleted(db, deliveryId, leaseAcquiredAt);
+    return { ok: true, skipped: false, reason: "fanout_done" };
+  } catch (err) {
+    await releaseDeliveryVerifiedPaymentFanoutLease(db, deliveryId, leaseAcquiredAt);
+    throw err;
+  }
 }
 
 /**
@@ -421,11 +608,8 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
 
   const driversSnap = await db.ref("drivers").orderByChild("dispatch_market").equalTo(market).get();
   const raw = driversSnap.val();
-  if (!raw || typeof raw !== "object") {
-    console.log("DELIVERY_DRIVER_SCAN_COUNT", "count=0");
-    return;
-  }
-  const entries = Object.entries(raw);
+  const entries =
+    raw && typeof raw === "object" ? Object.entries(raw) : [];
   scanCount = entries.length;
   console.log("DELIVERY_DRIVER_SCAN_COUNT", `count=${scanCount}`);
 
@@ -1626,6 +1810,13 @@ module.exports = {
   DELIVERY_SEARCH_TTL_MS,
   deliverySearchExpiryFields,
   refreshDeliverySearchExpiryForVerifiedFanout,
+  tryAcquireDeliveryVerifiedPaymentFanoutLease,
+  markDeliveryVerifiedPaymentFanoutCompleted,
+  releaseDeliveryVerifiedPaymentFanoutLease,
+  deliveryFanoutLeaseIsStale,
+  DELIVERY_FANOUT_AFTER_PAYMENT_IN_PROGRESS_AT_FIELD,
+  DELIVERY_FANOUT_AFTER_PAYMENT_COMPLETED_AT_FIELD,
+  DELIVERY_FANOUT_AFTER_PAYMENT_LEASE_MS,
   fanOutDeliveryOffersAfterVerifiedPayment,
   clearDeliveryFanoutAndOffers,
   setActiveDeliveryPointers,
