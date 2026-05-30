@@ -175,6 +175,36 @@ function paymentAllowsDispatchDelivery(row) {
 }
 
 /**
+ * Busy-driver guard for dispatch delivery offers/accept.
+ * Reuses ride pointer validation; incoming deliveryId is never treated as busy.
+ * @returns {Promise<{ busy: boolean, blockingTripId: string|null, cleared: string[], checks: object[] }>}
+ */
+async function resolveDeliveryBusyGuardForDriver(db, driverId, deliveryId, source) {
+  const d = normUid(driverId);
+  const rid = normUid(deliveryId);
+  if (!d) {
+    return { busy: false, blockingTripId: null, cleared: [], checks: [] };
+  }
+  const { resolveValidatedBlockingTripForDriver } = require("./driver_active_pointer_guard");
+  const blockCheck = await resolveValidatedBlockingTripForDriver(db, d, source, rid);
+  const blocking = normUid(blockCheck.blockingTripId);
+  if (!blocking || blocking === rid) {
+    return {
+      busy: false,
+      blockingTripId: null,
+      cleared: blockCheck.cleared || [],
+      checks: blockCheck.checks || [],
+    };
+  }
+  return {
+    busy: true,
+    blockingTripId: blocking,
+    cleared: blockCheck.cleared || [],
+    checks: blockCheck.checks || [],
+  };
+}
+
+/**
  * Fresh search/accept expiry fields for a verified-payment fan-out.
  * Mirrors createDeliveryRequest TTL fields (no search_expires_at in schema).
  */
@@ -427,6 +457,21 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
         "DELIVERY_DRIVER_FILTERED",
         `uid=${d}`,
         `reason=${geo.log || "geo"}:${geo.detail || ""}`,
+      );
+      continue;
+    }
+    const busyGuard = await resolveDeliveryBusyGuardForDriver(
+      db,
+      d,
+      rid,
+      "delivery_offer_write",
+    );
+    if (busyGuard.busy) {
+      console.log(
+        "DELIVERY_DRIVER_FILTERED",
+        `uid=${d}`,
+        "reason=driver_busy",
+        `blockingTripId=${busyGuard.blockingTripId || ""}`,
       );
       continue;
     }
@@ -978,6 +1023,23 @@ async function acceptDeliveryRequest(data, context, db) {
   }
   if (!paymentAllowsDispatchDelivery(pre)) {
     return { success: false, reason: "payment_not_verified" };
+  }
+
+  const busyGuard = await resolveDeliveryBusyGuardForDriver(
+    db,
+    driverId,
+    deliveryId,
+    "delivery_accept",
+  );
+  if (busyGuard.busy) {
+    console.log(
+      "DELIVERY_ACCEPT_FAIL",
+      deliveryId,
+      driverId,
+      "driver_busy",
+      `blockingTripId=${busyGuard.blockingTripId || ""}`,
+    );
+    return { success: false, reason: "driver_busy" };
   }
 
   const offerSnap = await db.ref(`delivery_offer_queue/${driverId}/${deliveryId}`).get();
@@ -1560,6 +1622,7 @@ module.exports = {
   deliveryUiMirrorFields,
   deliveryHasVerifiedOnlinePayment,
   paymentAllowsDispatchDelivery,
+  resolveDeliveryBusyGuardForDriver,
   DELIVERY_SEARCH_TTL_MS,
   deliverySearchExpiryFields,
   refreshDeliverySearchExpiryForVerifiedFanout,
