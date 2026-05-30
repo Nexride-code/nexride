@@ -17,6 +17,7 @@ const {
 const {
   fanOutDeliveryOffersAfterVerifiedPayment,
   clearDeliveryFanoutAndOffers,
+  clearDeliveryActivePointers,
   deliveryUiMirrorFields,
   DELIVERY_STATE,
   TERMINAL_DELIVERY,
@@ -901,11 +902,12 @@ async function adminCancelTrip(data, context, db) {
       updated_at: now,
     });
     await clearDeliveryFanoutAndOffers(db, tripId, driverId || "");
-    const u = {};
-    u[`active_deliveries/${tripId}`] = null;
-    u[`user_active_delivery/${customerId}`] = null;
-    if (driverId) u[`driver_active_delivery/${driverId}`] = null;
-    await db.ref().update(u);
+    await clearDeliveryActivePointers(db, {
+      deliveryId: tripId,
+      customerId,
+      driverId,
+      merchantId: normUid(row.merchant_id ?? row.merchantId),
+    });
     await writeAdminAudit(db, {
       type: "admin_cancel_trip",
       trip_kind: "delivery",

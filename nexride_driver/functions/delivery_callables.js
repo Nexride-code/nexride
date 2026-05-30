@@ -922,6 +922,39 @@ async function setActiveDeliveryPointers(db, deliveryId, customerId, driverId, r
   await db.ref().update(u);
 }
 
+/**
+ * Clear all server-owned delivery active pointers for terminal/cancel/expire paths.
+ * @returns {Promise<{ cleared: number }>}
+ */
+async function clearDeliveryActivePointers(
+  db,
+  { deliveryId, customerId, driverId, merchantId } = {},
+) {
+  const rid = normUid(deliveryId);
+  const c = normUid(customerId);
+  const d = normUid(driverId);
+  const m = normUid(merchantId);
+  const updates = {};
+  if (rid) {
+    updates[`active_deliveries/${rid}`] = null;
+  }
+  if (c) {
+    updates[`user_active_delivery/${c}`] = null;
+    updates[`customer_active_delivery/${c}`] = null;
+  }
+  if (d) {
+    updates[`driver_active_delivery/${d}`] = null;
+  }
+  if (m) {
+    updates[`merchant_active_delivery/${m}`] = null;
+  }
+  if (Object.keys(updates).length === 0) {
+    return { cleared: 0 };
+  }
+  await db.ref().update(updates);
+  return { cleared: Object.keys(updates).length };
+}
+
 /** Idempotent repair when accept succeeded but pointers lagged. */
 async function repairDeliveryActivePointers(db, deliveryId) {
   const rid = normUid(deliveryId);
@@ -1593,22 +1626,18 @@ async function updateDeliveryState(data, context, db) {
 
   await ref.set(nextRow);
 
-  const updates = {};
   if (TERMINAL_DELIVERY.has(nextState)) {
-    updates[`active_deliveries/${deliveryId}`] = null;
-    updates[`user_active_delivery/${normUid(cur.customer_id)}`] = null;
-    updates[`customer_active_delivery/${normUid(cur.customer_id)}`] = null;
-    updates[`driver_active_delivery/${driverId}`] = null;
-    const merchantId = normUid(cur.merchant_id ?? cur.merchantId);
-    if (merchantId) {
-      updates[`merchant_active_delivery/${merchantId}`] = null;
-    }
+    await clearDeliveryActivePointers(db, {
+      deliveryId,
+      customerId: normUid(cur.customer_id),
+      driverId,
+      merchantId: normUid(cur.merchant_id ?? cur.merchantId),
+    });
   } else {
-    updates[`active_deliveries/${deliveryId}/delivery_state`] = nextState;
-    updates[`active_deliveries/${deliveryId}/updated_at`] = now;
-  }
-  if (Object.keys(updates).length) {
-    await db.ref().update(updates);
+    await db.ref().update({
+      [`active_deliveries/${deliveryId}/delivery_state`]: nextState,
+      [`active_deliveries/${deliveryId}/updated_at`]: now,
+    });
   }
 
   await writeAudit(db, {
@@ -1651,7 +1680,21 @@ async function expireDeliveryRequest(data, context, db) {
     updated_at: now,
   });
   await clearDeliveryFanoutAndOffers(db, deliveryId, "");
-  await db.ref(`user_active_delivery/${customerId}`).remove();
+  let driverId = canonicalAssignedDeliveryDriverId(row);
+  const merchantId = normUid(row.merchant_id ?? row.merchantId);
+  if (!driverId) {
+    const activeSnap = await db.ref(`active_deliveries/${deliveryId}`).get();
+    const active = activeSnap.val();
+    if (active && typeof active === "object") {
+      driverId = normUid(active.driver_id ?? active.driverId);
+    }
+  }
+  await clearDeliveryActivePointers(db, {
+    deliveryId,
+    customerId,
+    driverId,
+    merchantId,
+  });
   await writeAudit(db, {
     type: "delivery_expire",
     delivery_id: deliveryId,
@@ -1710,13 +1753,12 @@ async function cancelDeliveryRequest(data, context, db) {
     updated_at: now,
   });
   await clearDeliveryFanoutAndOffers(db, deliveryId, isDriver ? uid : "");
-  const u = {};
-  u[`active_deliveries/${deliveryId}`] = null;
-  u[`user_active_delivery/${customerId}`] = null;
-  if (driverId) {
-    u[`driver_active_delivery/${driverId}`] = null;
-  }
-  await db.ref().update(u);
+  await clearDeliveryActivePointers(db, {
+    deliveryId,
+    customerId,
+    driverId,
+    merchantId: normUid(row.merchant_id ?? row.merchantId),
+  });
   await writeAudit(db, {
     type: "delivery_cancel",
     delivery_id: deliveryId,
@@ -1819,6 +1861,7 @@ module.exports = {
   DELIVERY_FANOUT_AFTER_PAYMENT_LEASE_MS,
   fanOutDeliveryOffersAfterVerifiedPayment,
   clearDeliveryFanoutAndOffers,
+  clearDeliveryActivePointers,
   setActiveDeliveryPointers,
   repairDeliveryActivePointers,
   ensureDeliveryChatMeta,
