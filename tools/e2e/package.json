@@ -1,0 +1,19 @@
+{
+  "name": "nexride-e2e",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test:guard": "node --test scenarios/project-guard.test.mjs",
+    "test:phase0": "node --test scenarios/phase0-smoke.test.mjs",
+    "test:phase1": "node --test scenarios/ride-happy-path.test.mjs",
+    "test:rtdb-repro": "node --test scenarios/rtdb-transaction-repro.test.mjs",
+    "test:rtdb-repro:force-exit": "node --test --test-force-exit scenarios/rtdb-transaction-repro.test.mjs"
+  },
+  "dependencies": {
+    "firebase": "^11.6.0",
+    "firebase-admin": "^12.7.0"
+  }
+}

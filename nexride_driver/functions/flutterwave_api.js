@@ -5,12 +5,21 @@
 const { flutterwaveSecretForVerify } = require("./params");
 const { logger } = require("firebase-functions");
 
+function flutterwaveApiBase() {
+  const override = String(process.env.E2E_FLUTTERWAVE_API_BASE || "").trim();
+  if (override) {
+    return override.replace(/\/$/, "");
+  }
+  return "https://api.flutterwave.com";
+}
+
 function flutterwaveVerifyUrl(refOrNumericId) {
+  const base = flutterwaveApiBase();
   const s = String(refOrNumericId || "").trim();
   if (/^\d+$/.test(s)) {
-    return `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(s)}/verify`;
+    return `${base}/v3/transactions/${encodeURIComponent(s)}/verify`;
   }
-  return `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(s)}`;
+  return `${base}/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(s)}`;
 }
 
 /**
@@ -73,7 +82,7 @@ async function verifyTransactionByIdStrict(transactionId, expect = {}) {
   if (!secret) {
     return { ok: false, reason: "flutterwave_secret_missing" };
   }
-  const url = `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(id)}/verify`;
+  const url = `${flutterwaveApiBase()}/v3/transactions/${encodeURIComponent(id)}/verify`;
   let response;
   let payload = {};
   try {
@@ -182,7 +191,7 @@ async function createHostedPaymentLink(body) {
   }
   let response;
   try {
-    response = await fetch("https://api.flutterwave.com/v3/payments", {
+    response = await fetch(`${flutterwaveApiBase()}/v3/payments`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${secret}`,

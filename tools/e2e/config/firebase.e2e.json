@@ -1,0 +1,4 @@
+{
+  "_note": "Use repo-root firebase.e2e.json — Firebase resolves paths from the config file directory.",
+  "redirect": "../firebase.e2e.json"
+}

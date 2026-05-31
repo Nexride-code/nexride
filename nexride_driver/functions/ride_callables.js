@@ -3017,7 +3017,8 @@ async function createRideRequest(data, context, db) {
   /** @type {string} */
   let prepaidTransactionId = "";
   if (prepaidFwRef) {
-    const ptxSnap = await db.ref(`payment_transactions/${prepaidFwRef}`).get();
+    const prepaidPtxRef = db.ref(`payment_transactions/${prepaidFwRef}`);
+    const ptxSnap = await prepaidPtxRef.get();
     const ptx = ptxSnap.val();
     if (!ptx || typeof ptx !== "object") {
       console.log("RIDER_CREATE_FAIL", riderId, "prepaid_transaction_missing");
@@ -3412,8 +3413,13 @@ async function createRideRequest(data, context, db) {
   });
 
   if (prepaidFwRef) {
-    const ptRef = db.ref(`payment_transactions/${prepaidFwRef}`);
+    const prepaidPath = `payment_transactions/${prepaidFwRef}`;
+    const ptRef = db.ref(prepaidPath);
+
     const ptTxn = await ptRef.transaction((cur) => {
+      if (cur === null) {
+        return cur;
+      }
       if (!cur || typeof cur !== "object") {
         return undefined;
       }
@@ -3436,7 +3442,23 @@ async function createRideRequest(data, context, db) {
         updated_at: ts,
       };
     });
-    if (!ptTxn.committed) {
+
+    const consumedSnap = ptTxn.snapshot;
+    const consumedRow =
+      consumedSnap && typeof consumedSnap.exists === "function" && consumedSnap.exists()
+        ? consumedSnap.val()
+        : null;
+    const prepaidConsumeOk =
+      ptTxn.committed === true &&
+      consumedSnap &&
+      typeof consumedSnap.exists === "function" &&
+      consumedSnap.exists() &&
+      consumedRow &&
+      typeof consumedRow === "object" &&
+      String(consumedRow.consumed_ride_id ?? "").trim() === rideId &&
+      String(consumedRow.ride_id ?? "").trim() === rideId;
+
+    if (!prepaidConsumeOk) {
       console.log("RIDER_CREATE_FAIL", riderId, "prepaid_consume_tx_abort");
       return { success: false, reason: "prepaid_already_used" };
     }
@@ -4444,8 +4466,15 @@ async function driverEnroute(data, context, db) {
   const monetization = await resolveDriverMonetization(db, driverId);
   const settlementFee = monetization.isSubscription ? 0 : platformFeeNgn();
   const rideRef = db.ref(`ride_requests/${rideId}`);
+  const preSnap = await rideRef.get();
+  const preVal = preSnap.exists() ? preSnap.val() : null;
   let reason = "unknown";
+  let committed = false;
+  let postRide = preVal;
   const tx = await rideRef.transaction((cur) => {
+    if (cur === null) {
+      return cur;
+    }
     if (!cur || typeof cur !== "object") {
       reason = "ride_missing";
       return;
@@ -4476,11 +4505,46 @@ async function driverEnroute(data, context, db) {
       updated_at: now,
     };
   });
-  if (!tx.committed) {
+  if (tx.committed) {
+    committed = true;
+    postRide = tx.snapshot.val();
+  } else if (reason === "ride_missing" && preSnap.exists()) {
+    const cur = preVal && typeof preVal === "object" ? preVal : null;
+    if (!cur) {
+      reason = "ride_missing";
+    } else if (canonicalAssignedDriverId(cur) !== driverId) {
+      reason = "not_assigned_driver";
+    } else {
+      const ts = String(cur.trip_state ?? "").trim().toLowerCase();
+      if (ts === TRIP_STATE.driver_arriving) {
+        committed = true;
+        postRide = cur;
+      } else if (
+        ts !== TRIP_STATE.driver_assigned &&
+        ts !== TRIP_STATE.accepted &&
+        ts !== "driver_accepted"
+      ) {
+        reason = "invalid_state";
+      } else {
+        const now = nowMs();
+        const patch = {
+          trip_state: TRIP_STATE.driver_arriving,
+          status: legacyUiStatusForTripState(TRIP_STATE.driver_arriving),
+          request_status: "accepted",
+          arriving_at: cur.arriving_at ?? now,
+          updated_at: now,
+        };
+        await rideRef.update(patch);
+        committed = true;
+        postRide = { ...cur, ...patch };
+      }
+    }
+  }
+  if (!committed) {
     return { success: false, reason };
   }
   await writeAudit(db, { type: "ride_enroute", ride_id: rideId, actor_uid: driverId });
-  const riderId = normUid(tx.snapshot.val()?.rider_id);
+  const riderId = normUid(postRide?.rider_id);
   if (riderId) {
     await sendPushToUser(db, riderId, {
       notification: {
@@ -4635,7 +4699,11 @@ async function startTrip(data, context, db) {
   if (!preResolve.exists()) {
     return { success: false, reason: "ride_missing" };
   }
+  const preRide =
+    preResolve.val() && typeof preResolve.val() === "object" ? preResolve.val() : null;
   let reason = "unknown";
+  let committed = false;
+  let postRide = preRide;
   const routeLogTimeoutMs = 3 * 60 * 1000;
   traceLog({
     event: "START_TRIP_TRANSACTION_BEGIN",
@@ -4646,6 +4714,9 @@ async function startTrip(data, context, db) {
     source: "startTrip",
   });
   const tx = await rideRef.transaction((cur) => {
+    if (cur === null) {
+      return cur;
+    }
     if (!cur || typeof cur !== "object") {
       reason = "ride_missing";
       return;
@@ -4723,7 +4794,39 @@ async function startTrip(data, context, db) {
       updated_at: now,
     };
   });
-  if (!tx.committed) {
+  if (tx.committed) {
+    committed = true;
+    postRide = tx.snapshot.val();
+  } else if (reason === "ride_missing" && preResolve.exists() && preRide) {
+    if (rideAssignedDriverUid(preRide) !== driverId) {
+      reason = "not_assigned_driver";
+    } else {
+      const ts = normalizeCanonicalTripState(preRide.trip_state);
+      if (ts === TRIP_STATE.on_trip) {
+        committed = true;
+        postRide = preRide;
+      } else if (ts !== TRIP_STATE.arrived && ts !== TRIP_STATE.assigned) {
+        reason = "invalid_state";
+      } else {
+        const now = nowMs();
+        const patch = {
+          trip_state: TRIP_STATE.on_trip,
+          status: "in_progress",
+          started_at: preRide.started_at ?? now,
+          trip_started_at: preRide.trip_started_at ?? now,
+          route_log_timeout_at: now + routeLogTimeoutMs,
+          has_started_route_checkpoints: false,
+          route_log_trip_started_checkpoint_at: null,
+          start_timeout_at: null,
+          updated_at: now,
+        };
+        await rideRef.update(patch);
+        committed = true;
+        postRide = { ...preRide, ...patch };
+      }
+    }
+  }
+  if (!committed) {
     traceLog({
       event: "START_TRIP_TRANSACTION_FAIL",
       rideId,
@@ -4750,7 +4853,7 @@ async function startTrip(data, context, db) {
     elapsedMs: Date.now() - startMs,
   });
   await writeAudit(db, { type: "ride_start", ride_id: rideId, actor_uid: driverId });
-  const riderId = normUid(tx.snapshot.val()?.rider_id);
+  const riderId = normUid(postRide?.rider_id);
   if (riderId) {
     await sendPushToUser(db, riderId, {
       notification: {
@@ -4828,7 +4931,12 @@ async function completeTrip(data, context, db) {
     }
   }
   let reason = "unknown";
+  let committed = false;
+  let postRide = preRide;
   const tx = await rideRef.transaction((cur) => {
+    if (cur === null) {
+      return cur;
+    }
     if (!cur || typeof cur !== "object") {
       reason = "ride_missing";
       return;
@@ -4868,10 +4976,52 @@ async function completeTrip(data, context, db) {
       updated_at: now,
     };
   });
-  if (!tx.committed) {
+  if (tx.committed) {
+    committed = true;
+    postRide = tx.snapshot.val();
+  } else if (reason === "ride_missing" && preRideSnap.exists() && preRide) {
+    if (normUid(preRide.driver_id) !== driverId) {
+      reason = "not_assigned_driver";
+    } else {
+      const ts = String(preRide.trip_state ?? "").trim().toLowerCase();
+      if (ts === TRIP_STATE.completed || ts === "trip_completed") {
+        committed = true;
+        postRide = preRide;
+      } else if (ts !== TRIP_STATE.in_progress && ts !== "trip_started") {
+        reason = "invalid_state";
+      } else if (!rideHasVerifiedOnlinePayment(preRide)) {
+        reason = "payment_not_verified";
+      } else {
+        const now = nowMs();
+        const settlementPatch = rideFinance.buildRideSettlementPatch(
+          financeBreakdown,
+          "driver_complete_trip",
+        );
+        const patch = {
+          trip_state: TRIP_STATE.completed,
+          status: legacyUiStatusForTripState(TRIP_STATE.completed),
+          completed_at: preRide.completed_at ?? now,
+          trip_completed: true,
+          trip_fare_ngn: financeBreakdown.trip_fare_ngn,
+          booking_fee_ngn: financeBreakdown.booking_fee_ngn,
+          platform_fee_ngn: financeBreakdown.booking_fee_ngn,
+          commission_ngn: financeBreakdown.commission_ngn,
+          driver_net_ngn: financeBreakdown.driver_net_ngn,
+          selectedModel: monetization.selectedModel,
+          effectiveModel: monetization.effectiveModel,
+          ...settlementPatch,
+          updated_at: now,
+        };
+        await rideRef.update(patch);
+        committed = true;
+        postRide = { ...preRide, ...patch };
+      }
+    }
+  }
+  if (!committed) {
     return { success: false, reason };
   }
-  const ride = tx.snapshot.val();
+  const ride = postRide;
   const riderId = normUid(ride?.rider_id);
   await clearActiveTripPointers(db, rideId, riderId, driverId);
   try {

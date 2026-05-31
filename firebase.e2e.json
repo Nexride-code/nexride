@@ -1,0 +1,46 @@
+{
+  "database": {
+    "rules": "nexride_driver/database.rules.json"
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.dispatch_fleet.indexes.json"
+  },
+  "functions": [
+    {
+      "source": "nexride_driver/functions",
+      "codebase": "nexride_dispatch",
+      "disallowLegacyRuntimeConfig": true,
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local",
+        ".env"
+      ]
+    }
+  ],
+  "emulators": {
+    "auth": {
+      "host": "127.0.0.1",
+      "port": 9098
+    },
+    "database": {
+      "host": "127.0.0.1",
+      "port": 9001
+    },
+    "firestore": {
+      "host": "127.0.0.1",
+      "port": 8081
+    },
+    "functions": {
+      "host": "127.0.0.1",
+      "port": 5002
+    },
+    "ui": {
+      "enabled": false
+    },
+    "singleProjectMode": false
+  }
+}
