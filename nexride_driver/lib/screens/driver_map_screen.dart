@@ -431,6 +431,7 @@ class _DriverMapScreenState extends State<DriverMapScreen>
   int _callJoinAttemptCount = 0;
   final Set<String> _callCleanupDoneRideIds = <String>{};
   bool _callLocalCleanupInProgress = false;
+  DateTime? _lastCallCleanupAt;
 
   LatLng _driverLocation = const LatLng(
     DriverServiceAreaConfig.defaultMapLatitude,
@@ -5799,6 +5800,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (_currentCallSession != null || rideIdForCleanup.isNotEmpty) {
       await _performLocalCallCleanup(
         rideId: rideIdForCleanup,
+        cleanupSource: 'stop_incoming_call_monitoring',
+        endReason: 'incoming_call_monitoring_stopped',
         logCleanup: false,
       );
     } else {
@@ -5920,7 +5923,21 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return;
     }
 
-    await _handleCallSnapshotUpdate(normalizedRideId, session);
+    RideCallSession? resolvedSession = session;
+    if (resolvedSession == null &&
+        (_callJoinedChannel || _callService.isVoiceConnected)) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      try {
+        resolvedSession = await _callService.fetchCall(normalizedRideId);
+      } catch (_) {
+        resolvedSession = _currentCallSession;
+      }
+    }
+
+    await _handleCallSnapshotUpdate(
+      normalizedRideId,
+      resolvedSession ?? _currentCallSession,
+    );
 
     if (resumePerRideListener && _canMonitorRideCalls) {
       _startCallListener(normalizedRideId);
@@ -5948,8 +5965,42 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           _callDurationTimer != null ||
           _callRingTimeoutTimer != null;
       if (hadCallActivity) {
+        RideCallSession? confirmed = previousSession;
+        try {
+          confirmed = await _callService.fetchCall(rideId);
+        } catch (error) {
+          _logRideCall(
+            'CALL_NULL_SNAPSHOT_REFETCH_FAIL rideId=$rideId error=$error',
+          );
+        }
+
+        if (confirmed != null &&
+            !confirmed.isTerminal &&
+            _callMatchesCurrentRide(confirmed)) {
+          _logRideCall(
+            'CALL_NULL_SNAPSHOT_IGNORED rideId=$rideId status=${confirmed.status}',
+          );
+          _currentCallSession = confirmed;
+          return;
+        }
+
+        if ((_callJoinedChannel || _callService.isVoiceConnected) &&
+            (confirmed == null || !confirmed.isTerminal)) {
+          _logRideCall(
+            'CALL_NULL_SNAPSHOT_DEFER_CLEANUP rideId=$rideId reason=local_voice_active',
+          );
+          return;
+        }
+
         await _stopCallRingtone();
-        await _performLocalCallCleanup(rideId: rideId, logCleanup: false);
+        await _performLocalCallCleanup(
+          rideId: rideId,
+          cleanupSource: 'call_snapshot_null',
+          endReason: confirmed == null
+              ? 'rtdb_null_or_unparseable'
+              : 'rtdb_terminal_after_refetch',
+          logCleanup: false,
+        );
       }
       return;
     }
@@ -6039,7 +6090,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (nextSession.isTerminal) {
       _callJoinAttemptCount = 0;
       if (previousStatus != nextSession.status) {
-        await _performLocalCallCleanup(rideId: rideId);
+        await _performLocalCallCleanup(
+          rideId: rideId,
+          cleanupSource: 'call_snapshot_terminal',
+          endReason: 'rtdb_status_${nextSession.status.name}',
+        );
       }
       return;
     }
@@ -6057,6 +6112,11 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     try {
+      await _callService.prefetchAgoraToken(
+        channelId: rideId,
+        uid: uid,
+        forceRefresh: true,
+      );
       await _callService.ensureJoinedVoiceChannel(
         channelId: rideId,
         uid: uid,
@@ -6090,9 +6150,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           ? error.message
           : 'Unable to connect the call right now.';
       if (_callJoinAttemptCount >= 3) {
-        await _callService.endAcceptedCall(
-          rideId: rideId,
-          endedBy: 'system',
+        _logRideCall(
+          'join retries exhausted rideId=$rideId local_only=true',
         );
       }
       _showSnackBarSafely(
@@ -6197,6 +6256,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
   Future<void> _performLocalCallCleanup({
     required String rideId,
+    required String cleanupSource,
+    required String endReason,
     bool logCleanup = true,
   }) async {
     if (_callLocalCleanupInProgress) {
@@ -6206,6 +6267,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     try {
       await _performLocalCallCleanupBody(
         rideId: rideId,
+        cleanupSource: cleanupSource,
+        endReason: endReason,
         logCleanup: logCleanup,
       );
     } finally {
@@ -6215,6 +6278,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
   Future<void> _performLocalCallCleanupBody({
     required String rideId,
+    required String cleanupSource,
+    required String endReason,
     bool logCleanup = true,
   }) async {
     if (_callCleanupDoneRideIds.contains(rideId)) {
@@ -6229,7 +6294,27 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     if (!hadVisibleCallState) {
       return;
     }
+
+    RideCallSession? rtdbSession;
+    try {
+      rtdbSession = await _callService.fetchCall(rideId);
+    } catch (error) {
+      _logRideCall('CALL_CLEANUP_REFETCH_FAIL rideId=$rideId error=$error');
+    }
+    final remoteState = _callService.isVoiceConnected
+        ? 'agora_connected'
+        : (_callJoinedChannel ? 'local_joined' : 'local_disconnected');
+    callCleanupDiagnostics(
+      cleanupSource: cleanupSource,
+      endReason: endReason,
+      rideId: rideId,
+      role: 'driver',
+      rtdbState: rtdbSession?.status.name ?? 'null',
+      remoteState: remoteState,
+    );
+
     _callCleanupDoneRideIds.add(rideId);
+    _lastCallCleanupAt = DateTime.now();
 
     _cancelCallRingTimeout();
     _stopCallDurationTicker();
@@ -6247,7 +6332,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     _callJoinedChannel = false;
-    _logRideCall('CALL_UI_CLOSE rideId=$rideId reason=local_cleanup');
+    _logRideCall(
+      'CALL_UI_CLOSE rideId=$rideId reason=local_cleanup source=$cleanupSource',
+    );
     _removeCallOverlayEntry();
 
     if (hadVisibleCallState) {
@@ -6259,7 +6346,9 @@ class _DriverMapScreenState extends State<DriverMapScreen>
     }
 
     if (logCleanup && hadVisibleCallState) {
-      _logRideCall('local cleanup completed rideId=$rideId');
+      _logRideCall(
+        'local cleanup completed rideId=$rideId source=$cleanupSource reason=$endReason',
+      );
     }
   }
 
@@ -6575,12 +6664,17 @@ class _DriverMapScreenState extends State<DriverMapScreen>
 
   Future<void> _endCallForRideLifecycle({
     required String rideId,
+    required String lifecycleReason,
   }) async {
     await _callService.endCallForRideLifecycle(
       rideId: rideId,
       endedBy: 'system',
     );
-    await _performLocalCallCleanup(rideId: rideId);
+    await _performLocalCallCleanup(
+      rideId: rideId,
+      cleanupSource: 'ride_lifecycle_end_call',
+      endReason: lifecycleReason,
+    );
   }
 
   void _refreshCallOverlayEntry() {
@@ -7109,7 +7203,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       ),
       clearActiveRide: true,
     );
-    await _endCallForRideLifecycle(rideId: rideId);
+    await _endCallForRideLifecycle(
+      rideId: rideId,
+      lifecycleReason: 'system_cancel_$reason',
+    );
     _logRideStateChangeOnce(
       rideId: rideId,
       riderId: _valueAsText(committedRide['rider_id']),
@@ -9001,10 +9098,15 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       if (normalizedReason.contains('cancel') ||
           normalizedReason.contains('complete') ||
           normalizedReason.contains('expired')) {
-        await _endCallForRideLifecycle(rideId: rideId);
+        await _endCallForRideLifecycle(
+          rideId: rideId,
+          lifecycleReason: 'active_ride_clear_$normalizedReason',
+        );
       } else if (!resetTripState) {
         await _performLocalCallCleanup(
           rideId: rideId,
+          cleanupSource: 'clear_active_ride_state',
+          endReason: reason,
           logCleanup: false,
         );
       }
@@ -15580,6 +15682,46 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       return;
     }
 
+    if (_lastCallCleanupAt != null) {
+      final sinceCleanupMs =
+          DateTime.now().difference(_lastCallCleanupAt!).inMilliseconds;
+      _log(
+        'CANCEL_REQUEST_AFTER_CALL_CLEANUP rideId=$currentRideId '
+        'deltaMs=$sinceCleanupMs',
+      );
+      if (sinceCleanupMs <= 8000 && mounted) {
+        final proceed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              title: const Text('Cancel trip?'),
+              content: const Text(
+                'Ending a voice call does not cancel the trip. '
+                'Do you want to cancel this trip for the rider?',
+              ),
+              actions: <Widget>[
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('KEEP TRIP'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('CANCEL TRIP'),
+                ),
+              ],
+            );
+          },
+        );
+        if (proceed != true) {
+          _log(
+            '[CANCEL] actor=driver rideId=$currentRideId '
+            'dismissed_after_call_cleanup deltaMs=$sinceCleanupMs',
+          );
+          return;
+        }
+      }
+    }
+
     final cancelReason = await _pickDriverTripCancelReason();
     if (cancelReason == null || cancelReason.trim().isEmpty) {
       _log('[CANCEL] actor=driver rideId=$currentRideId dismissed');
@@ -15865,7 +16007,10 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       driverUpdates: completedDriverPresence,
       clearActiveRide: true,
     );
-    await _endCallForRideLifecycle(rideId: currentRideId);
+    await _endCallForRideLifecycle(
+      rideId: currentRideId,
+      lifecycleReason: 'trip_completed',
+    );
 
     await _clearDriverActiveRideNode(
       rideId: currentRideId,
@@ -15951,6 +16096,8 @@ class _DriverMapScreenState extends State<DriverMapScreen>
       }
       await _performLocalCallCleanup(
         rideId: previousRideId,
+        cleanupSource: 'reset_trip_state_presence',
+        endReason: 'trip_state_reset',
         logCleanup: false,
       );
     }

@@ -227,15 +227,34 @@ class ShareTripRtdbService {
     };
 
     await Future.wait<void>(<Future<void>>[
-      _sharedTripsRef.child(shareMeta.token).set(sharedTripPayload),
-      _sharedTripLookupRef.child(payload.rideId).set(shareLookupPayload),
+      _sharedTripsRef.child(shareMeta.token).set(sharedTripPayload).catchError(
+        (Object error) {
+          _log('shared_trips write failed rideId=${payload.rideId} error=$error');
+          throw error;
+        },
+      ),
+      _sharedTripLookupRef.child(payload.rideId).set(shareLookupPayload).catchError(
+        (Object error) {
+          _log(
+            'shared_trip_lookup write failed rideId=${payload.rideId} error=$error',
+          );
+          throw error;
+        },
+      ),
       _rideRequestsRef.child(payload.rideId).child('share').update({
         'enabled': true,
         'token': shareMeta.token,
         'created_at': shareMeta.createdAt,
         'expires_at': shareMeta.expiresAt,
         'updated_at': nowMs,
-      }),
+      }).catchError(
+        (Object error) {
+          _log(
+            'ride_requests share update failed rideId=${payload.rideId} error=$error',
+          );
+          throw error;
+        },
+      ),
     ]);
 
     if (liveLocation != null &&

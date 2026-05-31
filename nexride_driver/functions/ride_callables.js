@@ -256,6 +256,116 @@ function rideAssignedDriverUid(cur) {
 }
 
 /**
+ * Resolve canonical ride_requests/{rideId} for driver lifecycle callables.
+ * Retries pointer/mirror paths when the requested id is stale or tx-preempted.
+ * @param {import("firebase-admin").database.Database} db
+ * @param {string} requestedRideId
+ * @param {string} driverId
+ */
+async function resolveDriverLifecycleRide(db, requestedRideId, driverId) {
+  let rideId = normRideIdFromCallableData({ rideId: requestedRideId });
+  const lookup = {
+    requestedRideId: normRideIdFromCallableData({ rideId: requestedRideId }),
+    resolvedRideId: rideId,
+    driverId,
+    paths: {},
+  };
+  if (!rideId) {
+    console.log("START_TRIP_RIDE_LOOKUP", JSON.stringify(lookup));
+    return { rideId: "", rideRef: null, snap: null, ride: null };
+  }
+  let rideRef = db.ref(`ride_requests/${rideId}`);
+  let snap = await rideRef.get();
+  lookup.paths[`ride_requests/${rideId}`] = {
+    exists: snap.exists(),
+    status: String(snap.val()?.status ?? ""),
+    trip_state: String(snap.val()?.trip_state ?? ""),
+  };
+  if (snap.exists()) {
+    console.log("START_TRIP_RIDE_LOOKUP", JSON.stringify(lookup));
+    return { rideId, rideRef, snap, ride: snap.val() };
+  }
+
+  const activeSnap = await db.ref(`active_trips/${rideId}`).get();
+  lookup.paths[`active_trips/${rideId}`] = {
+    exists: activeSnap.exists(),
+    status: String(activeSnap.val()?.status ?? ""),
+    trip_state: String(activeSnap.val()?.trip_state ?? ""),
+    driver_id: rideAssignedDriverUid(activeSnap.val() || {}),
+  };
+  if (activeSnap.exists()) {
+    const active = activeSnap.val();
+    const assigned =
+      rideAssignedDriverUid(active) || normUid(active?.driver_id ?? active?.driverId);
+    if (assigned && assigned === driverId) {
+      snap = await rideRef.get();
+      lookup.paths[`ride_requests/${rideId}_retry`] = { exists: snap.exists() };
+      if (snap.exists()) {
+        console.log("START_TRIP_RIDE_LOOKUP", JSON.stringify(lookup));
+        return { rideId, rideRef, snap, ride: snap.val() };
+      }
+    }
+  }
+
+  const legacyRidesSnap = await db.ref(`rides/${rideId}`).get();
+  lookup.paths[`rides/${rideId}`] = {
+    exists: legacyRidesSnap.exists(),
+    status: String(legacyRidesSnap.val()?.status ?? ""),
+    trip_state: String(legacyRidesSnap.val()?.trip_state ?? ""),
+  };
+
+  const driverActiveSnap = await db.ref(`driver_active_ride/${driverId}`).get();
+  lookup.paths[`driver_active_ride/${driverId}`] = {
+    exists: driverActiveSnap.exists(),
+    ride_id: normRideIdFromCallableData(driverActiveSnap.val() || {}),
+  };
+  const pointerRideId = normRideIdFromCallableData(driverActiveSnap.val() || {});
+  if (pointerRideId && pointerRideId !== rideId) {
+    rideId = pointerRideId;
+    rideRef = db.ref(`ride_requests/${rideId}`);
+    snap = await rideRef.get();
+    lookup.paths[`ride_requests/${rideId}_from_pointer`] = {
+      exists: snap.exists(),
+      status: String(snap.val()?.status ?? ""),
+      trip_state: String(snap.val()?.trip_state ?? ""),
+    };
+    if (snap.exists()) {
+      lookup.resolvedRideId = rideId;
+      console.log("START_TRIP_RIDE_LOOKUP", JSON.stringify(lookup));
+      return { rideId, rideRef, snap, ride: snap.val() };
+    }
+  }
+
+  const driverActiveRideIdSnap = await db.ref(`drivers/${driverId}/active_ride_id`).get();
+  const driverActiveRideId = normRideIdFromCallableData({
+    rideId: driverActiveRideIdSnap.val(),
+  });
+  lookup.paths[`drivers/${driverId}/active_ride_id`] = {
+    exists: driverActiveRideIdSnap.exists(),
+    ride_id: driverActiveRideId,
+  };
+  if (driverActiveRideId && driverActiveRideId !== rideId) {
+    rideId = driverActiveRideId;
+    rideRef = db.ref(`ride_requests/${rideId}`);
+    snap = await rideRef.get();
+    lookup.paths[`ride_requests/${rideId}_from_driver_profile`] = {
+      exists: snap.exists(),
+      status: String(snap.val()?.status ?? ""),
+      trip_state: String(snap.val()?.trip_state ?? ""),
+    };
+    if (snap.exists()) {
+      lookup.resolvedRideId = rideId;
+      console.log("START_TRIP_RIDE_LOOKUP", JSON.stringify(lookup));
+      return { rideId, rideRef, snap, ride: snap.val() };
+    }
+  }
+
+  lookup.resolvedRideId = rideId;
+  console.log("START_TRIP_RIDE_LOOKUP", JSON.stringify(lookup));
+  return { rideId, rideRef, snap, ride: null };
+}
+
+/**
  * @param {Record<string, unknown>|null|undefined} cur
  * @param {string} driverId
  * @returns {{ ok: boolean, reason: string, patch?: Record<string, unknown>, idempotent?: boolean }}
@@ -4669,12 +4779,15 @@ async function driverArrived(data, context, db) {
 }
 
 async function startTrip(data, context, db) {
-  const rideId = normRideIdFromCallableData(data);
+  const requestedRideId = normRideIdFromCallableData(data);
   const driverId = normUid(context.auth?.uid);
   const startMs = Date.now();
-  if (!rideId || !context.auth) {
+  if (!requestedRideId || !context.auth) {
     return { success: false, reason: "unauthorized" };
   }
+  const resolved = await resolveDriverLifecycleRide(db, requestedRideId, driverId);
+  const rideId = resolved.rideId;
+  const rideRef = resolved.rideRef ?? db.ref(`ride_requests/${rideId}`);
   traceLog({
     event: "START_TRIP",
     rideId,
@@ -4682,9 +4795,9 @@ async function startTrip(data, context, db) {
     role: "driver",
     path: `ride_requests/${rideId}`,
     source: "startTrip",
+    extra: { requestedRideId },
   });
-  const rideRef = db.ref(`ride_requests/${rideId}`);
-  const preResolve = await rideRef.get();
+  const preResolve = resolved.snap ?? (await rideRef.get());
   traceLog({
     event: preResolve.exists() ? "START_TRIP_RESOLVE_RIDE" : "START_TRIP_RESOLVE_RIDE_MISSING",
     rideId,
@@ -4695,6 +4808,7 @@ async function startTrip(data, context, db) {
       ? normalizeCanonicalTripState(preResolve.val()?.trip_state)
       : "",
     source: "startTrip",
+    extra: { requestedRideId },
   });
   if (!preResolve.exists()) {
     return { success: false, reason: "ride_missing" };
@@ -4715,7 +4829,8 @@ async function startTrip(data, context, db) {
   });
   const tx = await rideRef.transaction((cur) => {
     if (cur === null) {
-      return cur;
+      reason = "ride_missing";
+      return;
     }
     if (!cur || typeof cur !== "object") {
       reason = "ride_missing";
@@ -4797,7 +4912,7 @@ async function startTrip(data, context, db) {
   if (tx.committed) {
     committed = true;
     postRide = tx.snapshot.val();
-  } else if (reason === "ride_missing" && preResolve.exists() && preRide) {
+  } else if (preResolve.exists() && preRide) {
     if (rideAssignedDriverUid(preRide) !== driverId) {
       reason = "not_assigned_driver";
     } else {

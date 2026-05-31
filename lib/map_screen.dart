@@ -4961,7 +4961,41 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           _callDurationTimer != null ||
           _callRingTimeoutTimer != null;
       if (hadCallActivity) {
-        await _performLocalCallCleanup(rideId: rideId, logCleanup: false);
+        RideCallSession? confirmed = previousSession;
+        try {
+          confirmed = await _callService.fetchCall(rideId);
+        } catch (error) {
+          _logRideCall(
+            'CALL_NULL_SNAPSHOT_REFETCH_FAIL rideId=$rideId error=$error',
+          );
+        }
+
+        if (confirmed != null &&
+            !confirmed.isTerminal &&
+            _callMatchesCurrentRide(confirmed)) {
+          _logRideCall(
+            'CALL_NULL_SNAPSHOT_IGNORED rideId=$rideId status=${confirmed.status}',
+          );
+          _currentCallSession = confirmed;
+          return;
+        }
+
+        if ((_callJoinedChannel || _callService.isVoiceConnected) &&
+            (confirmed == null || !confirmed.isTerminal)) {
+          _logRideCall(
+            'CALL_NULL_SNAPSHOT_DEFER_CLEANUP rideId=$rideId reason=local_voice_active',
+          );
+          return;
+        }
+
+        await _performLocalCallCleanup(
+          rideId: rideId,
+          cleanupSource: 'call_snapshot_null',
+          endReason: confirmed == null
+              ? 'rtdb_null_or_unparseable'
+              : 'rtdb_terminal_after_refetch',
+          logCleanup: false,
+        );
       }
       return;
     }
@@ -5053,7 +5087,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (nextSession.isTerminal) {
       _callJoinAttemptCount = 0;
       if (previousStatus != nextSession.status) {
-        await _performLocalCallCleanup(rideId: rideId);
+        await _performLocalCallCleanup(
+          rideId: rideId,
+          cleanupSource: 'call_snapshot_terminal',
+          endReason: 'rtdb_status_${nextSession.status.name}',
+        );
       }
       return;
     }
@@ -5064,6 +5102,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required String uid,
   }) async {
     try {
+      await _callService.prefetchAgoraToken(
+        channelId: rideId,
+        uid: uid,
+        forceRefresh: true,
+      );
       await _callService.ensureJoinedVoiceChannel(
         channelId: rideId,
         uid: uid,
@@ -5093,7 +5136,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       _callJoinedChannel = false;
       if (_callJoinAttemptCount >= 3) {
-        await _callService.endAcceptedCall(rideId: rideId, endedBy: 'system');
         _resetRideCallUi(reason: 'join_accepted_call_failed');
       }
       if (mounted) {
@@ -5198,6 +5240,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   Future<void> _performLocalCallCleanup({
     required String rideId,
+    required String cleanupSource,
+    required String endReason,
     bool logCleanup = true,
   }) async {
     if (_callLocalCleanupInProgress) {
@@ -5207,6 +5251,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     try {
       await _performLocalCallCleanupBody(
         rideId: rideId,
+        cleanupSource: cleanupSource,
+        endReason: endReason,
         logCleanup: logCleanup,
       );
     } finally {
@@ -5216,6 +5262,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   Future<void> _performLocalCallCleanupBody({
     required String rideId,
+    required String cleanupSource,
+    required String endReason,
     bool logCleanup = true,
   }) async {
     if (_callCleanupDoneRideIds.contains(rideId)) {
@@ -5230,6 +5278,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (!hadVisibleCallState) {
       return;
     }
+
+    RideCallSession? rtdbSession;
+    try {
+      rtdbSession = await _callService.fetchCall(rideId);
+    } catch (error) {
+      _logRideCall('CALL_CLEANUP_REFETCH_FAIL rideId=$rideId error=$error');
+    }
+    final remoteState = _callService.isVoiceConnected
+        ? 'agora_connected'
+        : (_callJoinedChannel ? 'local_joined' : 'local_disconnected');
+    callCleanupDiagnostics(
+      cleanupSource: cleanupSource,
+      endReason: endReason,
+      rideId: rideId,
+      role: 'rider',
+      rtdbState: rtdbSession?.status.name ?? 'null',
+      remoteState: remoteState,
+    );
+
     _callCleanupDoneRideIds.add(rideId);
 
     _cancelCallRingTimeout();
@@ -5248,7 +5315,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     _callJoinedChannel = false;
-    _logRideCall('CALL_UI_CLOSE rideId=$rideId reason=local_cleanup');
+    _logRideCall(
+      'CALL_UI_CLOSE rideId=$rideId reason=local_cleanup source=$cleanupSource',
+    );
     _removeCallOverlayEntry();
 
     if (hadVisibleCallState) {
@@ -5260,7 +5329,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     if (logCleanup && hadVisibleCallState) {
-      _logRideCall('local cleanup completed rideId=$rideId');
+      _logRideCall(
+        'local cleanup completed rideId=$rideId source=$cleanupSource reason=$endReason',
+      );
     }
   }
 
@@ -5524,12 +5595,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _endCallForRideLifecycle({required String rideId}) async {
+  Future<void> _endCallForRideLifecycle({
+    required String rideId,
+    required String lifecycleReason,
+  }) async {
     await _callService.endCallForRideLifecycle(
       rideId: rideId,
       endedBy: 'system',
     );
-    await _performLocalCallCleanup(rideId: rideId);
+    await _performLocalCallCleanup(
+      rideId: rideId,
+      cleanupSource: 'ride_lifecycle_end_call',
+      endReason: lifecycleReason,
+    );
   }
 
   void _refreshCallOverlayEntry() {
@@ -9944,8 +10022,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
         if (status == 'completed') {
           _logRideFlow('ride completed rideId=$rideId');
-          await _endCallForRideLifecycle(rideId: rideId);
-          await _saveRiderTrip(rideId, data);
+          await _endCallForRideLifecycle(
+            rideId: rideId,
+            lifecycleReason: 'ride_completed',
+          );
           await _clearStaleActiveTripArtifacts(
             rideId: rideId,
             reason: 'ride_completed',
@@ -10007,8 +10087,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             '[MATCH_DEBUG][RIDE_CANCELLED] rideId=$rideId '
             'cancel_reason=${_valueAsText(data['cancel_reason'])}',
           );
-          await _endCallForRideLifecycle(rideId: rideId);
-          if (_valueAsText(data['cancel_reason']) == 'driver_cancelled') {
+          await _endCallForRideLifecycle(
+            rideId: rideId,
+            lifecycleReason: 'ride_cancelled_${_valueAsText(data['cancel_reason'])}',
+          );
             _logRideFlow('[RIDER_DRIVER_CANCELLED] rideId=$rideId');
           }
           _logRideFlow('[RIDER_TERMINAL_STATE] rideId=$rideId status=cancelled');
@@ -10405,7 +10487,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _callSubscription?.cancel();
     _callSubscription = null;
     _callListenerRideId = null;
-    await _performLocalCallCleanup(rideId: rideId, logCleanup: false);
+    await _performLocalCallCleanup(
+      rideId: rideId,
+      cleanupSource: 'reset_ride_state',
+      endReason: 'ride_state_reset',
+      logCleanup: false,
+    );
     _loggedRiderChatMessageIds.clear();
     _hasHydratedRiderChatMessages = false;
     _riderChatListenerRideId = null;
@@ -11314,6 +11401,38 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _logRideFlow(
           '[SHARE_TRIP_LINK_FAIL] rideId=$rideId error=$error',
         );
+        try {
+          final tokenResp =
+              await _rideCloud.createTripShareToken(rideId: rideId);
+          if (riderRideCallableSucceeded(tokenResp)) {
+            final token = tokenResp['track_token']?.toString().trim() ?? '';
+            if (token.isNotEmpty) {
+              shareLink = ShareTripLink(
+                token: token,
+                url: '${ShareTripRtdbService.shareBaseUrl}/'
+                    '${Uri.encodeComponent(rideId)}'
+                    '?token=${Uri.encodeQueryComponent(token)}',
+                expiresAt: DateTime.now()
+                    .add(ShareTripRtdbService.shareLifetime)
+                    .millisecondsSinceEpoch,
+              );
+              _logRideFlow(
+                '[SHARE_TRIP_LINK_OK] rideId=$rideId source=createTripShareToken',
+              );
+            }
+          } else {
+            _logRideFlow(
+              '[SHARE_TRIP_LINK_FAIL] rideId=$rideId '
+              'reason=${riderRideCallableReason(tokenResp)} '
+              'source=createTripShareToken',
+            );
+          }
+        } catch (callableError) {
+          _logRideFlow(
+            '[SHARE_TRIP_LINK_FAIL] rideId=$rideId error=$callableError '
+            'source=createTripShareToken',
+          );
+        }
       }
 
       final shareStops = payload.stops;

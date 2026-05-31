@@ -298,7 +298,16 @@ async function createTripShareToken(data, context, db) {
     return { success: false, reason: "ride_missing" };
   }
   const rider = normUid(ride.rider_id ?? ride.riderId);
-  const driver = normUid(ride.driver_id ?? ride.driverId ?? ride.matched_driver_id);
+  const driver = normUid(
+    ride.assigned_driver_uid ??
+      ride.assignedDriverUid ??
+      ride.matched_driver_id ??
+      ride.matchedDriverId ??
+      ride.accepted_driver_id ??
+      ride.acceptedDriverId ??
+      ride.driver_id ??
+      ride.driverId,
+  );
   if (uid !== rider && uid !== driver) {
     return { success: false, reason: "forbidden" };
   }

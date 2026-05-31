@@ -421,14 +421,14 @@
 
     "shared_trip_lookup": {
       "$rideId": {
-        ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid))",
-        ".write": "auth != null && (root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid)"
+        ".read": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/driverId').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matched_driver_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/matchedDriverId').val() === auth.uid))",
+        ".write": "auth != null && ((root.child('ride_requests/' + $rideId + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + $rideId + '/riderId').val() === auth.uid))"
       }
     },
     "shared_trips": {
       "$token": {
         ".read": "auth != null && root.child('shared_trip_lookup/' + data.child('ride_id').val() + '/token').val() === $token",
-        ".write": "auth != null && root.child('ride_requests/' + newData.child('ride_id').val() + '/rider_id').val() === auth.uid"
+        ".write": "auth != null && ((root.child('ride_requests/' + newData.child('ride_id').val() + '/rider_id').val() === auth.uid) || (root.child('ride_requests/' + newData.child('ride_id').val() + '/riderId').val() === auth.uid))"
       }
     },
 

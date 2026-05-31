@@ -298,7 +298,7 @@ async function getRideCallRtcToken(data, context, db) {
     }
   }
 
-  const rider = normUid(ride.rider_id ?? ride.customer_id);
+  const rider = normUid(ride.rider_id ?? ride.riderId ?? ride.customer_id);
   const rawDriverId = String(ride.driver_id ?? "").trim();
   let driver = normUid(ride.driver_id);
   const waiting = ["waiting", "pending", "", "null"];

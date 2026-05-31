@@ -434,6 +434,20 @@ class RiderRideCloudFunctionsService {
 
   Future<Map<String, dynamic>> riderListMyOrders() =>
       _call('riderListMyOrders', <String, dynamic>{});
+
+  Future<Map<String, dynamic>> createTripShareToken({
+    required String rideId,
+  }) =>
+      _call('createTripShareToken', <String, dynamic>{
+        'rideId': rideId,
+      });
+
+  Future<Map<String, dynamic>> getRideTrackSummary({
+    required String token,
+  }) =>
+      _call('getRideTrackSummary', <String, dynamic>{
+        'token': token,
+      });
 }
 
 bool riderRideCallableSucceeded(Map<String, dynamic>? response) =>

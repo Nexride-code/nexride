@@ -51,3 +51,35 @@ void callTraceLog(
 
   debugPrint(parts.join(' '));
 }
+
+/// Temporary production diagnostics — log before every local call teardown.
+void callCleanupDiagnostics({
+  required String cleanupSource,
+  required String endReason,
+  required String rideId,
+  required String role,
+  String? rtdbState,
+  String? remoteState,
+}) {
+  final normalizedRideId = rideId.trim();
+  final normalizedRole = role.trim();
+  if (normalizedRideId.isEmpty || normalizedRole.isEmpty) {
+    return;
+  }
+  debugPrint(
+    'CALL_CLEANUP_SOURCE rideId=$normalizedRideId role=$normalizedRole '
+    'source=$cleanupSource',
+  );
+  debugPrint(
+    'CALL_END_REASON rideId=$normalizedRideId role=$normalizedRole '
+    'reason=$endReason',
+  );
+  debugPrint(
+    'CALL_RTDB_STATE rideId=$normalizedRideId role=$normalizedRole '
+    'state=${rtdbState ?? 'unknown'}',
+  );
+  debugPrint(
+    'CALL_REMOTE_STATE rideId=$normalizedRideId role=$normalizedRole '
+    'state=${remoteState ?? 'unknown'}',
+  );
+}

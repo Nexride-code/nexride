@@ -1956,8 +1956,12 @@ String _resolveCallerId(Map<String, dynamic> map) {
     return explicit;
   }
 
-  final riderId = map['rider_id']?.toString().trim() ?? '';
-  final driverId = map['driver_id']?.toString().trim() ?? '';
+  final riderId = map['rider_id']?.toString().trim() ??
+      map['riderId']?.toString().trim() ??
+      '';
+  final driverId = map['driver_id']?.toString().trim() ??
+      map['driverId']?.toString().trim() ??
+      '';
   final startedBy = map['started_by']?.toString().trim().toLowerCase() ?? '';
 
   if (startedBy == 'driver') {
@@ -1976,8 +1980,12 @@ String _resolveReceiverId(Map<String, dynamic> map) {
     return explicit;
   }
 
-  final riderId = map['rider_id']?.toString().trim() ?? '';
-  final driverId = map['driver_id']?.toString().trim() ?? '';
+  final riderId = map['rider_id']?.toString().trim() ??
+      map['riderId']?.toString().trim() ??
+      '';
+  final driverId = map['driver_id']?.toString().trim() ??
+      map['driverId']?.toString().trim() ??
+      '';
   final startedBy = map['started_by']?.toString().trim().toLowerCase() ?? '';
 
   if (startedBy == 'driver') {
