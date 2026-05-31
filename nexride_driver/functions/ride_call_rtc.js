@@ -28,7 +28,20 @@ function normRideIdFromCallableData(data) {
   return normalizeFirebasePushIdKey(normUid(v));
 }
 
-function deterministicRtcUid(uid) {
+const RIDE_CALL_CHANNEL_PREFIX = "nexride";
+const RIDE_CALL_TOKEN_EXPIRE_SEC = 3600;
+
+function channelNameForRide(rideId) {
+  const normalizedRideId = normRideIdFromCallableData({ rideId });
+  if (!normalizedRideId) {
+    return "";
+  }
+  return `${RIDE_CALL_CHANNEL_PREFIX}_${normalizedRideId}`
+    .replace(/[^a-zA-Z0-9_]/g, "_")
+    .slice(0, 64);
+}
+
+function rtcUidForFirebaseUid(uid) {
   const s = String(uid || "");
   let h = 1;
   for (let i = 0; i < s.length; i += 1) {
@@ -36,6 +49,48 @@ function deterministicRtcUid(uid) {
   }
   const n = Math.abs(h % 4294967290) || 10001;
   return n >>> 0;
+}
+
+function buildRideCallRtcToken({ appId, certificate, rideId, caller }) {
+  const { RtcTokenBuilder, RtcRole } = require("agora-token");
+  const channelName = channelNameForRide(rideId);
+  const rtcUid = rtcUidForFirebaseUid(caller);
+  const tokenExpireSec = Math.max(
+    RIDE_CALL_TOKEN_EXPIRE_SEC,
+    Number(process.env.AGORA_TOKEN_EXPIRE_SEC) || RIDE_CALL_TOKEN_EXPIRE_SEC,
+  );
+  const expireTs = Math.floor(Date.now() / 1000) + tokenExpireSec;
+  const role = RtcRole.PUBLISHER;
+
+  console.log(
+    "CALL_TOKEN_BUILD",
+    `rideId=${rideId}`,
+    `channel=${channelName}`,
+    `rtcUid=${rtcUid}`,
+    `role=publisher`,
+    `expireTs=${expireTs}`,
+    `appIdLength=${appId.length}`,
+    `certLength=${certificate.length}`,
+  );
+
+  const token = RtcTokenBuilder.buildTokenWithUid(
+    appId,
+    certificate,
+    channelName,
+    rtcUid,
+    role,
+    tokenExpireSec,
+    tokenExpireSec,
+  );
+
+  return {
+    token,
+    channelName,
+    rtcUid,
+    expireAt: expireTs * 1000,
+    tokenExpireSec,
+    role: "publisher",
+  };
 }
 
 function resolveAgoraCredentials() {
@@ -315,29 +370,21 @@ async function getRideCallRtcToken(data, context, db) {
   }
 
   try {
-    const { RtcTokenBuilder, RtcRole } = require("agora-token");
-    const channelName = `nexride_${rideId}`.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 64);
-    const uidForAgora = deterministicRtcUid(caller);
-    const tokenExpireSec = 3600;
-    const token = RtcTokenBuilder.buildTokenWithUid(
+    const built = buildRideCallRtcToken({
       appId,
       certificate,
-      channelName,
-      uidForAgora,
-      RtcRole.PUBLISHER,
-      tokenExpireSec,
-      tokenExpireSec,
-    );
-    const expireMs = Date.now() + tokenExpireSec * 1000;
+      rideId,
+      caller,
+    });
     const peerId = caller === rider ? driver : rider;
     return {
       success: true,
       reason: "ok",
-      token,
+      token: built.token,
       appId,
-      channelName,
-      rtcUid: uidForAgora,
-      expireAt: expireMs,
+      channelName: built.channelName,
+      rtcUid: built.rtcUid,
+      expireAt: built.expireAt,
       callerRole: caller === rider ? "rider" : "driver",
       peerId,
       credentialSource: creds.source,
@@ -355,7 +402,6 @@ async function getRideCallRtcToken(data, context, db) {
 async function generateAgoraToken(data, context, db) {
   const rideId = normRideIdFromCallableData(data);
   const uid = normUid(data?.uid ?? context?.auth?.uid);
-  const requestedChannel = normUid(data?.channelName);
 
   const tokenResponse = await getRideCallRtcToken(
     {
@@ -371,19 +417,24 @@ async function generateAgoraToken(data, context, db) {
     return tokenResponse ?? { success: false, reason: "token_unavailable" };
   }
 
-  const creds = resolveAgoraCredentials();
-  const channelName =
-    requestedChannel ||
-    normUid(tokenResponse.channelName) ||
-    `nexride_${rideId}`.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 64);
+  const channelName = String(tokenResponse.channelName ?? "").trim();
+  const rtcUid = Number(tokenResponse.rtcUid);
+  if (!channelName || !Number.isFinite(rtcUid) || rtcUid <= 0) {
+    console.log(
+      "CALL_TOKEN_DENIED",
+      rideId,
+      "token_response_missing_join_identity",
+    );
+    return { success: false, reason: "token_build_failed" };
+  }
 
   return {
     success: true,
     reason: tokenResponse.reason || "ok",
     token: tokenResponse.token,
-    appId: creds.appId,
+    appId: tokenResponse.appId,
     channelName,
-    rtcUid: tokenResponse.rtcUid,
+    rtcUid,
     expireAt: tokenResponse.expireAt,
     callerRole: tokenResponse.callerRole,
     peerId: tokenResponse.peerId,
@@ -391,4 +442,11 @@ async function generateAgoraToken(data, context, db) {
   };
 }
 
-module.exports = { getRideCallRtcToken, generateAgoraToken, clearStaleRideCall };
+module.exports = {
+  getRideCallRtcToken,
+  generateAgoraToken,
+  clearStaleRideCall,
+  channelNameForRide,
+  rtcUidForFirebaseUid,
+  buildRideCallRtcToken,
+};
