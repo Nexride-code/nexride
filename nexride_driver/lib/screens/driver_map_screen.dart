@@ -156,6 +156,7 @@ enum _DriverHubAction {
   verification,
   wallet,
   support,
+  logout,
 }
 
 enum _PostTripReviewAction {
@@ -11111,6 +11112,13 @@ class _DriverMapScreenState extends State<DriverMapScreen>
                       Navigator.of(sheetContext).pop(_DriverHubAction.support);
                     },
                   ),
+                  DriverDashboardAction(
+                    label: 'Logout',
+                    icon: Icons.logout_rounded,
+                    onTap: () {
+                      Navigator.of(sheetContext).pop(_DriverHubAction.logout);
+                    },
+                  ),
                 ],
               ),
             ),
@@ -11166,7 +11174,19 @@ class _DriverMapScreenState extends State<DriverMapScreen>
           ),
         );
         break;
+      case _DriverHubAction.logout:
+        await _logoutFromDriverHub();
+        break;
     }
+  }
+
+  Future<void> _logoutFromDriverHub() async {
+    _log('driver hub logout requested');
+    _explicitDriverSessionCleared = true;
+    if (mounted) {
+      ScaffoldMessenger.maybeOf(context)?.hideCurrentMaterialBanner();
+    }
+    await FirebaseAuth.instance.signOut();
   }
 
   String? _supportBadgeLabel(UserSupportInboxSummary? summary) {

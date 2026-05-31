@@ -196,6 +196,25 @@ class RiderRideCloudFunctionsService {
         'patch': patch,
       });
 
+  Future<Map<String, dynamic>> applyRideWaitFeeInterval({
+    required String rideId,
+  }) =>
+      _call('applyRideWaitFeeInterval', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+      });
+
+  Future<Map<String, dynamic>> submitTripRating({
+    required String rideId,
+    required double rating,
+  }) =>
+      _call('submitTripRating', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'rating': rating,
+        'role': 'rider',
+      });
+
   /// Agora RTC token (same backend as driver app).
   Future<Map<String, dynamic>> getRideCallRtcToken({
     required String rideId,
@@ -210,7 +229,8 @@ class RiderRideCloudFunctionsService {
       'requestId': rideId,
       'tripId': rideId,
       'uid': uid,
-      'channelName': channelName ?? 'nexride_$rideId',
+      if (channelName != null && channelName.trim().isNotEmpty)
+        'channelName': channelName.trim(),
       'force': force,
       'force_clear_stale': forceClearStale,
     };

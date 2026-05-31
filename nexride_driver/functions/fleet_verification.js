@@ -22,8 +22,12 @@ const FLEET_DOCUMENT_LABELS = {
   owner_id: "Owner government ID",
   nin_document: "NIN slip or card",
   owner_selfie: "Owner selfie",
-  address_proof: "Address proof",
+  address_proof:
+    "Address proof (utility bill, bank statement, rent/tenancy, or official letter)",
 };
+
+const FLEET_ADDRESS_PROOF_UPLOAD_HINT =
+  "Upload a utility bill, bank statement, rent/tenancy document, or official address proof.";
 
 const CAC_REQUIRED_TYPES = ["cac_document", "owner_id", "owner_selfie", "address_proof"];
 const NIN_REQUIRED_TYPES = ["nin_document", "owner_selfie", "address_proof"];
@@ -452,6 +456,7 @@ module.exports = {
   FLEET_VERIFICATION_TYPES,
   FLEET_DOCUMENT_TYPES,
   FLEET_DOCUMENT_LABELS,
+  FLEET_ADDRESS_PROOF_UPLOAD_HINT,
   CAC_REQUIRED_TYPES,
   NIN_REQUIRED_TYPES,
   normalizeFleetVerificationType,

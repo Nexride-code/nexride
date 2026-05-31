@@ -878,6 +878,13 @@ async function driverConfirmBankTransferPayment(data, context, db) {
     driver_marked_paid_at: Date.now(),
     driver_marked_paid_by: uid,
   });
+  logger.info(
+    "PAYMENT_CONFIRMED_DRIVER",
+    `driverId=${uid}`,
+    `rideId=${rideId || ""}`,
+    `reference=${reference}`,
+  );
+  let riderId = "";
   if (rideId) {
     const rideRef = db.ref(`ride_requests/${rideId}`);
     let reason = "unknown";
@@ -891,12 +898,15 @@ async function driverConfirmBankTransferPayment(data, context, db) {
         reason = "not_assigned_driver";
         return;
       }
+      riderId = normUid(cur.rider_id);
       const now = Date.now();
       return {
         ...cur,
         payment_confirmed: true,
         payment_status: "confirmed",
         driver_marked_paid: true,
+        driver_confirmed_rider_payment: true,
+        driver_confirmed_rider_payment_at: now,
         updated_at: now,
       };
     });
@@ -908,6 +918,24 @@ async function driverConfirmBankTransferPayment(data, context, db) {
       await syncLiveJobMirror(db, rideId);
     } catch (_) {
       /* mirror best-effort */
+    }
+    if (riderId) {
+      try {
+        const { sendPushToUser } = require("./push_notifications");
+        await sendPushToUser(db, riderId, {
+          title: "Payment confirmed",
+          body: "Driver confirmed your payment.",
+          data: { type: "driver_payment_confirmed", rideId },
+        });
+        logger.info(
+          "PAYMENT_CONFIRMED_RIDER_NOTIFY",
+          `riderId=${riderId}`,
+          `rideId=${rideId}`,
+          `reference=${reference}`,
+        );
+      } catch (_) {
+        /* best-effort */
+      }
     }
   }
   return { success: true, reference, rideId: rideId || null };

@@ -263,6 +263,15 @@ async function verifyPaymentInternal(reference, callerUid = "") {
 
 const rideCallOpts = { region: REGION };
 
+/** Low-resource profile for createRideRequest (matching fan-out only). */
+const createRideCallOpts = {
+  region: REGION,
+  memory: "256MiB",
+  timeoutSeconds: 60,
+  minInstances: 0,
+  maxInstances: 5,
+};
+
 /** Low-resource profile for acceptRide-only deploys (min Cloud Run CPU reservation). */
 const acceptRideCallOpts = {
   region: REGION,
@@ -272,7 +281,7 @@ const acceptRideCallOpts = {
   maxInstances: 3,
 };
 
-exports.createRideRequest = onCall(rideCallOpts, async (request) =>
+exports.createRideRequest = onCall(createRideCallOpts, async (request) =>
   ride.createRideRequest(request.data, callableContext(request), db),
 );
 
@@ -404,7 +413,6 @@ exports.adminReviewFleetVerificationDocument = onCall(rideCallOpts, async (reque
     db,
   ),
 );
-
 exports.adminListMerchants = onCall(rideCallOpts, async (request) =>
   merchantCallables.adminListMerchants(request.data, callableContext(request), db),
 );
@@ -776,7 +784,6 @@ exports.adminListPaymentIntents = onCall(rideCallOpts, async (request) =>
   adminCallables.adminListPaymentIntents(request.data, callableContext(request), db),
 );
 
-
 exports.adminListPaymentTransactionsPage = onCall(rideCallOpts, async (request) =>
   adminCallables.adminListPaymentTransactionsPage(
     request.data,
@@ -1013,6 +1020,42 @@ exports.driverEnroute = onCall(rideCallOpts, async (request) =>
 
 exports.driverArrived = onCall(rideCallOpts, async (request) =>
   ride.driverArrived(request.data, callableContext(request), db),
+);
+
+const waitFeeCallables = require("./wait_fee_callables");
+const rideRatingCallables = require("./ride_rating_callables");
+const adminFinanceAdjustments = require("./admin_finance_adjustments");
+
+exports.applyRideWaitFeeInterval = onCall(rideCallOpts, async (request) =>
+  waitFeeCallables.applyRideWaitFeeInterval(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+exports.submitTripRating = onCall(rideCallOpts, async (request) =>
+  rideRatingCallables.submitTripRating(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+exports.adminApplyRiderTripCredit = onCall(rideCallOpts, async (request) =>
+  adminFinanceAdjustments.adminApplyRiderTripCredit(
+    request.data,
+    callableContext(request),
+    db,
+  ),
+);
+
+exports.adminApplyDriverWalletCredit = onCall(rideCallOpts, async (request) =>
+  adminFinanceAdjustments.adminApplyDriverWalletCredit(
+    request.data,
+    callableContext(request),
+    db,
+  ),
 );
 
 exports.startTrip = onCall(rideCallOpts, async (request) =>
@@ -1626,83 +1669,37 @@ exports.recordTripCompletion = onCall(
     }
 
     const monetization = await resolveDriverMonetization(db, driverId);
-    const commissionPolicy = await resolveCommissionPolicy(db, driverId);
-    const feeNgn = commissionPolicy.exempt ? 0 : platformFeeNgn();
-    console.log(
-      "COMMISSION_EXEMPT",
-      `driverId=${driverId}`,
-      `exempt=${commissionPolicy.exempt}`,
-      `reason=${commissionPolicy.reason}`,
-    );
-    const totalDeliveryFee = Number(
-      rideVal.total_delivery_fee_paid || rideVal.total_delivery_fee || verification.amount || 0
-    );
-    if (!Number.isFinite(totalDeliveryFee) || totalDeliveryFee <= 0) {
-      return { success: false, reason: "invalid_trip_amount" };
-    }
-    const driverEarning = totalDeliveryFee - feeNgn;
-    const completionIdem = `trip_completion_${rideId}`;
-
-    const riderDebit = await createWalletTransactionInternal(db, {
-      userId: riderId,
-      amount: totalDeliveryFee,
-      type: "rider_payment_debit",
-      idempotencyKey: `${completionIdem}_rider_debit`,
+    const rideFinance = require("./ride_finance_settlement");
+    const fin = await rideFinance.settleCompletedRideOnce(db, {
+      rideId,
+      ride: rideVal,
+      driverId,
+      riderId,
+      source: "record_trip_completion",
     });
-    if (!riderDebit.success) {
-      return { success: false, reason: riderDebit.reason || "rider_debit_failed" };
-    }
-
-    if (feeNgn > 0) {
-      const platformFeeTx = await createWalletTransactionInternal(db, {
-        userId: "nexride_platform",
-        amount: feeNgn,
-        type: "platform_fee_credit",
-        idempotencyKey: `${completionIdem}_platform_fee`,
-      });
-      if (!platformFeeTx.success) {
-        return { success: false, reason: platformFeeTx.reason || "platform_fee_failed" };
-      }
-    }
-
-    const driverCredit = await createWalletTransactionInternal(db, {
-      userId: driverId,
-      amount: driverEarning,
-      type: "driver_earning_credit",
-      idempotencyKey: `${completionIdem}_driver_credit`,
-    });
-    if (!driverCredit.success) {
-      return { success: false, reason: driverCredit.reason || "driver_credit_failed" };
+    if (!fin.success && fin.reason !== "already_settled") {
+      return { success: false, reason: fin.reason || "settlement_failed", detail: fin.detail };
     }
 
     await rideRef.update({
       payment_verified: true,
       payment_verified_at: Date.now(),
       payment_status: "verified",
-      wallet_credit_status: "credited",
-      platform_fee_ngn: feeNgn,
-      rider_earning_credited: driverEarning,
       monetization_model_applied: monetization.isSubscription ? "subscription" : "commission",
       updated_at: Date.now(),
     });
     await trackPublic.syncRideTrackPublic(db, rideId);
 
-    await db.ref(`driver_earnings/${driverId}/${rideId}`).update({
-      rideId,
-      amount: driverEarning,
-      platformFee: feeNgn,
-      grossAmount: totalDeliveryFee,
-      monetization_model_applied: monetization.isSubscription ? "subscription" : "commission",
-      status: "credited",
-      created_at: Date.now(),
-      updated_at: Date.now(),
-    });
-
+    const settlement = fin.settlement || {};
     return {
       success: true,
-      reason: "trip_completion_recorded",
-      driverEarning,
-      platformFee: feeNgn,
+      reason: fin.reason === "already_settled" ? "trip_completion_already_settled" : "trip_completion_recorded",
+      idempotent: fin.idempotent === true,
+      driverEarning: settlement.driver_net_ngn ?? 0,
+      driverNetNgn: settlement.driver_net_ngn ?? 0,
+      commissionNgn: settlement.commission_ngn ?? 0,
+      bookingFeeNgn: settlement.booking_fee_ngn ?? 0,
+      tripFareNgn: settlement.trip_fare_ngn ?? 0,
     };
   },
 );

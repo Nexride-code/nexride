@@ -27,9 +27,6 @@
       }
     }
   },
-  "firestore": {
-    "rules": "firestore.rules"
-  },
   "hosting": {
     "public": "public",
     "predeploy": [
@@ -382,6 +379,10 @@
   },
   "database": {
     "rules": "nexride_driver/database.rules.json"
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.dispatch_fleet.indexes.json"
   },
   "storage": {
     "rules": "storage.rules"

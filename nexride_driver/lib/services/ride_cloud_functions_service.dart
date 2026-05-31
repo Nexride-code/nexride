@@ -120,7 +120,8 @@ class RideCloudFunctionsService {
       'requestId': rideId,
       'tripId': rideId,
       'uid': uid,
-      'channelName': channelName ?? 'nexride_$rideId',
+      if (channelName != null && channelName.trim().isNotEmpty)
+        'channelName': channelName.trim(),
       'force': force,
       'force_clear_stale': forceClearStale,
     };
@@ -362,6 +363,26 @@ class RideCloudFunctionsService {
 
   Future<Map<String, dynamic>> getNexrideOfficialBankAccount() =>
       _call('getNexrideOfficialBankAccount', <String, dynamic>{});
+
+  Future<Map<String, dynamic>> applyRideWaitFeeInterval({
+    required String rideId,
+  }) =>
+      _call('applyRideWaitFeeInterval', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+      });
+
+  Future<Map<String, dynamic>> submitTripRating({
+    required String rideId,
+    required double rating,
+    required String role,
+  }) =>
+      _call('submitTripRating', <String, dynamic>{
+        'rideId': rideId,
+        'ride_id': rideId,
+        'rating': rating,
+        'role': role,
+      });
 
   Future<Map<String, dynamic>> driverConfirmBankTransferPayment({
     required String rideId,

@@ -1,5 +1,6 @@
 import 'package:firebase_database/firebase_database.dart' as rtdb;
 
+import 'ride_cloud_functions_service.dart';
 import 'support_ticket_bridge_service.dart';
 
 class DriverRiderContext {
@@ -142,6 +143,16 @@ class RiderAccountabilityService {
     required double rating,
     String? note,
   }) async {
+    try {
+      await RideCloudFunctionsService().submitTripRating(
+        rideId: rideId,
+        rating: rating,
+        role: 'driver',
+      );
+    } catch (_) {
+      /* accountability RTDB path remains best-effort */
+    }
+
     final ratingRef = _rootRef.child('rider_ratings/$riderId').push();
     await ratingRef.set(<String, dynamic>{
       'ratingId': ratingRef.key,

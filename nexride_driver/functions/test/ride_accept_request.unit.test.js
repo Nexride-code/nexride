@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const {
   paymentAllowsDispatch,
+  paymentAllowsAcceptRide,
   normalizedPaymentMethod,
   effectiveAcceptExpiryMs,
   acceptWindowOpenAt,
@@ -37,11 +38,22 @@ test("flutterwave_va provider + pending_transfer allows dispatch/accept", () => 
   );
 });
 
-test("flutterwave + pending_transfer allows dispatch when VA issued but method not retagged", () => {
+test("card + pending does not allow dispatch before authorization", () => {
   assert.equal(
     paymentAllowsDispatch({
-      payment_method: "flutterwave",
-      payment_status: "pending_transfer",
+      payment_method: "card",
+      payment_status: "pending",
+    }),
+    false,
+  );
+});
+
+test("card + card_authorized allows dispatch", () => {
+  assert.equal(
+    paymentAllowsDispatch({
+      payment_method: "card",
+      payment_status: "card_authorized",
+      payment_transaction_id: "998877",
     }),
     true,
   );
@@ -54,6 +66,57 @@ test("bank_transfer + pending alone does not allow dispatch before VA", () => {
       payment_status: "pending",
     }),
     false,
+  );
+});
+
+test("bank_transfer + pending allows accept while payment is under review", () => {
+  assert.equal(
+    paymentAllowsAcceptRide({
+      payment_method: "bank_transfer",
+      payment_status: "pending",
+    }),
+    true,
+  );
+});
+
+test("bank_transfer + pending_manual_confirmation allows accept", () => {
+  assert.equal(
+    paymentAllowsAcceptRide({
+      payment_method: "bank_transfer",
+      payment_status: "pending_manual_confirmation",
+    }),
+    true,
+  );
+});
+
+test("bank_transfer + payment_review allows accept", () => {
+  assert.equal(
+    paymentAllowsAcceptRide({
+      payment_method: "bank_transfer",
+      payment_status: "payment_review",
+    }),
+    true,
+  );
+});
+
+test("bank_transfer + bank_transfer_pending allows accept", () => {
+  assert.equal(
+    paymentAllowsAcceptRide({
+      payment_method: "bank_transfer",
+      payment_status: "bank_transfer_pending",
+    }),
+    true,
+  );
+});
+
+test("automated_va flag + pending allows accept", () => {
+  assert.equal(
+    paymentAllowsAcceptRide({
+      payment_method: "bank_transfer",
+      payment_status: "pending",
+      automated_va: true,
+    }),
+    true,
   );
 });
 
