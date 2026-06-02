@@ -34,6 +34,51 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
     fetchTrips();
   }
 
+  Future<List<Map<String, dynamic>>> _loadHistoryPath(String path) async {
+    final ref = rtdb.FirebaseDatabase.instance.ref(path);
+    final snapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
+      source: 'trip_history.fetch',
+      path: path,
+      action: () => ref.get(),
+    );
+    if (snapshot == null || !snapshot.exists) {
+      return <Map<String, dynamic>>[];
+    }
+    final data = Map<Object?, Object?>.from(snapshot.value as Map);
+    final loaded = <Map<String, dynamic>>[];
+    data.forEach((rawKey, rawValue) {
+      if (rawValue is! Map) {
+        return;
+      }
+      final trip = rawValue.map<String, dynamic>(
+        (dynamic key, dynamic value) => MapEntry(key.toString(), value),
+      );
+      loaded.add(_normalizeHistoryItem(trip, rawKey?.toString() ?? ''));
+    });
+    return loaded;
+  }
+
+  Map<String, dynamic> _normalizeHistoryItem(
+    Map<String, dynamic> trip,
+    String fallbackId,
+  ) {
+    final pickup = trip['pickup'];
+    final destination = trip['destination'];
+    final itemId = trip['rideId']?.toString() ??
+        trip['orderId']?.toString() ??
+        trip['trip_id']?.toString() ??
+        fallbackId;
+    return <String, dynamic>{
+      ...trip,
+      'trip_id': itemId,
+      'pickup_address': trip['pickup_address'] ??
+          (pickup is Map ? pickup['address']?.toString() : null),
+      'destination_address': trip['destination_address'] ??
+          (destination is Map ? destination['address']?.toString() : null) ??
+          trip['final_destination_address'],
+    };
+  }
+
   Future<void> fetchTrips() async {
     if (mounted) {
       setState(() {
@@ -42,55 +87,36 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
       });
     }
 
-    final ref = rtdb.FirebaseDatabase.instance.ref(
-      'rider_trips/${widget.userId}',
-    );
-
     try {
-      final snapshot = await runOptionalStartupRead<rtdb.DataSnapshot>(
-        source: 'trip_history.fetch',
-        path: 'rider_trips/${widget.userId}',
-        action: () => ref.get(),
-      );
+      final results = await Future.wait<List<Map<String, dynamic>>>(<Future<List<Map<String, dynamic>>>>[
+        _loadHistoryPath('user_trip_history/${widget.userId}'),
+        _loadHistoryPath('user_order_history/${widget.userId}'),
+        _loadHistoryPath('rider_trips/${widget.userId}'),
+      ]);
 
-      if (snapshot != null && snapshot.exists) {
-        final data = Map<Object?, Object?>.from(snapshot.value as Map);
-        final loaded = <Map<String, dynamic>>[];
-
-        data.forEach((rawKey, rawValue) {
-          if (rawValue is! Map) {
-            return;
+      final merged = <String, Map<String, dynamic>>{};
+      for (final batch in results) {
+        for (final trip in batch) {
+          final id = trip['trip_id']?.toString() ?? '';
+          if (id.isEmpty) {
+            continue;
           }
-
-          final trip = rawValue.map<String, dynamic>(
-            (dynamic key, dynamic value) => MapEntry(key.toString(), value),
-          );
-          trip.putIfAbsent('trip_id', () => rawKey?.toString() ?? '');
-          loaded.add(trip);
-        });
-
-        loaded.sort((a, b) => _tripTimestamp(b).compareTo(_tripTimestamp(a)));
-
-        if (!mounted) {
-          return;
+          merged[id] = trip;
         }
-
-        setState(() {
-          trips = loaded;
-          loading = false;
-          _loadFailed = false;
-        });
-      } else {
-        if (!mounted) {
-          return;
-        }
-
-        setState(() {
-          trips = <Map<String, dynamic>>[];
-          loading = false;
-          _loadFailed = false;
-        });
       }
+
+      final loaded = merged.values.toList()
+        ..sort((a, b) => _tripTimestamp(b).compareTo(_tripTimestamp(a)));
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        trips = loaded;
+        loading = false;
+        _loadFailed = false;
+      });
     } catch (error, stackTrace) {
       debugPrint('[RideType] Trip history fetch failed: $error');
       debugPrintStack(
@@ -115,7 +141,16 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
   }
 
   int _tripTimestamp(Map<String, dynamic> trip) {
-    for (final key in <String>['completed_at', 'timestamp', 'created_at']) {
+    for (final key in <String>[
+      'completed_at',
+      'completedAt',
+      'cancelled_at',
+      'cancelledAt',
+      'timestamp',
+      'updated_at',
+      'created_at',
+      'createdAt',
+    ]) {
       final value = trip[key];
       if (value is num) {
         return value.toInt();
@@ -150,6 +185,15 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
         ? rawDistance.toDouble()
         : double.tryParse(rawDistance?.toString() ?? '') ?? 0;
     return '${distance.toStringAsFixed(distance.truncateToDouble() == distance ? 0 : 1)} km';
+  }
+
+  String _historyKindLabel(Map<String, dynamic> trip) {
+    if (trip['type']?.toString() == 'order') {
+      return 'Delivery / order';
+    }
+    return riderServiceTypeFromKey(
+      (trip['service_type'] ?? trip['serviceType'])?.toString(),
+    ).detailLabel;
   }
 
   Future<void> _openTripDetails(Map<String, dynamic> trip) async {
@@ -305,7 +349,7 @@ class _RiderTripHistoryScreenState extends State<RiderTripHistoryScreen> {
                                     borderRadius: BorderRadius.circular(999),
                                   ),
                                   child: Text(
-                                    serviceType.detailLabel,
+                                    _historyKindLabel(trip),
                                     style: const TextStyle(
                                       fontSize: 12,
                                       fontWeight: FontWeight.w700,

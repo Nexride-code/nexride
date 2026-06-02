@@ -63,6 +63,10 @@ class ShareTripRtdbService {
     debugPrint('[ShareTripRTDB] $message');
   }
 
+  void _logWriteFail(String path, String rideId, Object error) {
+    _log('SHARE_TRIP_RTDB_WRITE_FAIL path=$path rideId=$rideId error=$error');
+  }
+
   Future<ShareTripLink> ensureShare(ShareTripPayload payload) async {
     final shareMeta = await _resolveShareMeta(
       payload: payload,
@@ -136,13 +140,18 @@ class ShareTripRtdbService {
     final newExpiresAt = nowMs + shareLifetime.inMilliseconds;
     final newToken = _generateToken();
 
-    await _rideRequestsRef.child(payload.rideId).child('share').set({
-      'enabled': true,
-      'token': newToken,
-      'created_at': newCreatedAt,
-      'expires_at': newExpiresAt,
-      'updated_at': nowMs,
-    });
+    try {
+      await _rideRequestsRef.child(payload.rideId).child('share').set({
+        'enabled': true,
+        'token': newToken,
+        'created_at': newCreatedAt,
+        'expires_at': newExpiresAt,
+        'updated_at': nowMs,
+      });
+    } catch (error) {
+      _logWriteFail('ride_requests/${payload.rideId}/share', payload.rideId, error);
+      rethrow;
+    }
 
     _log('share created rideId=${payload.rideId}');
 
@@ -226,36 +235,34 @@ class ShareTripRtdbService {
       'updated_at': nowMs,
     };
 
-    await Future.wait<void>(<Future<void>>[
-      _sharedTripsRef.child(shareMeta.token).set(sharedTripPayload).catchError(
-        (Object error) {
-          _log('shared_trips write failed rideId=${payload.rideId} error=$error');
-          throw error;
-        },
-      ),
-      _sharedTripLookupRef.child(payload.rideId).set(shareLookupPayload).catchError(
-        (Object error) {
-          _log(
-            'shared_trip_lookup write failed rideId=${payload.rideId} error=$error',
-          );
-          throw error;
-        },
-      ),
-      _rideRequestsRef.child(payload.rideId).child('share').update({
+    try {
+      await _sharedTripsRef.child(shareMeta.token).set(sharedTripPayload);
+    } catch (error) {
+      _logWriteFail('shared_trips/${shareMeta.token}', payload.rideId, error);
+      rethrow;
+    }
+    try {
+      await _sharedTripLookupRef.child(payload.rideId).set(shareLookupPayload);
+    } catch (error) {
+      _logWriteFail('shared_trip_lookup/${payload.rideId}', payload.rideId, error);
+      rethrow;
+    }
+    try {
+      await _rideRequestsRef.child(payload.rideId).child('share').update({
         'enabled': true,
         'token': shareMeta.token,
         'created_at': shareMeta.createdAt,
         'expires_at': shareMeta.expiresAt,
         'updated_at': nowMs,
-      }).catchError(
-        (Object error) {
-          _log(
-            'ride_requests share update failed rideId=${payload.rideId} error=$error',
-          );
-          throw error;
-        },
-      ),
-    ]);
+      });
+    } catch (error) {
+      _logWriteFail(
+        'ride_requests/${payload.rideId}/share',
+        payload.rideId,
+        error,
+      );
+      rethrow;
+    }
 
     if (liveLocation != null &&
         liveLocation['lat'] != null &&

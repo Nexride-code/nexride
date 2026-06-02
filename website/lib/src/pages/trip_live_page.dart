@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:go_router/go_router.dart';
@@ -24,15 +24,33 @@ class TripLivePage extends StatefulWidget {
 }
 
 class _TripLivePageState extends State<TripLivePage> {
+  static const LatLng _defaultCenter = LatLng(6.5244, 3.3792);
+
   final MapController _map = MapController();
   StreamSubscription<DatabaseEvent>? _sub;
   String? _error;
-  bool _authBusy = true;
+  bool _awaitingFirstSnapshot = true;
   Map<String, dynamic>? _trip;
+  bool _loggedMarkersRendered = false;
+  bool _loggedRouteRendered = false;
+  String? _lastRouteLogKey;
+  String? _lastDriverMarkerKey;
+  bool _mapReady = false;
+  bool _loggedCameraFit = false;
+  bool _pendingCameraFit = false;
 
   @override
   void initState() {
     super.initState();
+    debugPrint(
+      'LIVE_TRIP_PAGE_INIT rideId=${widget.rideId} token=${widget.token.trim().isNotEmpty}',
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _scheduleMapResize(reason: 'first_frame');
+    });
     unawaited(_bootstrap());
   }
 
@@ -41,32 +59,21 @@ class _TripLivePageState extends State<TripLivePage> {
     final token = widget.token.trim();
     if (id.isEmpty || token.isEmpty) {
       setState(() {
-        _authBusy = false;
+        _awaitingFirstSnapshot = false;
         _error =
             'This tracking link is incomplete. Ask the rider to share again, or contact support@nexride.africa.';
       });
       return;
     }
 
-    try {
-      await FirebaseAuth.instance.signInAnonymously();
-    } catch (e) {
-      setState(() {
-        _authBusy = false;
-        _error =
-            'Could not start a secure viewer session. Enable Anonymous sign-in in Firebase Auth, then retry. ($e)';
-      });
-      return;
-    }
-
-    if (!mounted) return;
-    setState(() => _authBusy = false);
-
-    final ref = FirebaseDatabase.instance.ref('shared_trips/$token');
+    final ref = FirebaseDatabase.instance.ref('ride_track_public/$token');
     _sub = ref.onValue.listen((event) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
       if (!event.snapshot.exists) {
         setState(() {
+          _awaitingFirstSnapshot = false;
           _trip = null;
           _error = 'Trip not found or link expired.';
         });
@@ -75,80 +82,255 @@ class _TripLivePageState extends State<TripLivePage> {
       final v = event.snapshot.value;
       if (v is! Map) {
         setState(() {
+          _awaitingFirstSnapshot = false;
           _trip = null;
           _error = 'Trip not found or link expired.';
         });
         return;
       }
-      final m = Map<String, dynamic>.from(
+      final raw = Map<String, dynamic>.from(
         v.map((k, val) => MapEntry(k.toString(), val)),
       );
-      final rid = m['ride_id']?.toString().trim() ?? '';
+      final rid = raw['ride_id']?.toString().trim() ?? '';
       if (rid.isNotEmpty && rid != id) {
         setState(() {
+          _awaitingFirstSnapshot = false;
           _error = 'This link does not match the trip ID in the URL.';
           _trip = null;
         });
         return;
       }
+
+      debugPrint('LIVE_TRIP_PUBLIC_READ_OK rideId=$id token=$token');
+      final normalized = _normalizePublicTrip(raw);
+      final pickup = _asMap(normalized['pickup']);
+      final dest = _asMap(normalized['destination']);
+      final live = _asMap(normalized['live_location']);
+      final routePreview = _polylinePoints(normalized);
+      debugPrint(
+        'LIVE_TRIP_DATA_RECEIVED rideId=$id '
+        'hasPickup=${_latLngFromMap(pickup) != null} '
+        'hasDestination=${_latLngFromMap(dest) != null} '
+        'routePoints=${routePreview.points.length} '
+        'hasDriver=${_latLngFromMap(live) != null}',
+      );
+      final driverKey = live == null
+          ? null
+          : '${live['lat']},${live['lng']}';
+      if (driverKey != null && driverKey != _lastDriverMarkerKey) {
+        _lastDriverMarkerKey = driverKey;
+        debugPrint('LIVE_TRIP_DRIVER_MARKER_UPDATED rideId=$id key=$driverKey');
+      }
+
       setState(() {
-        _trip = m;
+        _awaitingFirstSnapshot = false;
+        _trip = normalized;
         _error = null;
       });
-      WidgetsBinding.instance.addPostFrameCallback((_) => _fitMap());
+
+      _logRenderState(id, normalized);
+      _requestCameraFit(rideId: id, reason: 'public_data');
     }, onError: (Object e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
+      debugPrint('LIVE_TRIP_PUBLIC_PERMISSION_DENIED rideId=$id error=$e');
       setState(() {
-        _error = 'Lost connection or permission denied. ($e)';
+        _awaitingFirstSnapshot = false;
+        _error = 'Could not load trip updates. ($e)';
       });
     });
   }
 
-  void _fitMap() {
-    final pts = _allPoints();
-    if (pts.length < 2) return;
-    try {
-      final b = LatLngBounds.fromPoints(pts);
-      _map.fitCamera(
-        CameraFit.bounds(bounds: b, padding: const EdgeInsets.all(48)),
-      );
-    } catch (_) {}
+  bool _hasRenderableTripData(Map<String, dynamic> trip) {
+    final pickup = _asMap(trip['pickup']);
+    final dest = _asMap(trip['destination']);
+    final live = _asMap(trip['live_location']);
+    return _latLngFromMap(pickup) != null ||
+        _latLngFromMap(dest) != null ||
+        _latLngFromMap(live) != null ||
+        _polylinePoints(trip).points.length >= 2;
   }
 
-  List<LatLng> _allPoints() {
+  Map<String, dynamic> _normalizePublicTrip(Map<String, dynamic> raw) {
+    final pickupObj = _asMap(raw['pickup']);
+    final destObj = _asMap(raw['destination']);
+    final liveObj = _asMap(raw['live_location']);
+
+    final pickupLat = _d(raw['pickup_lat']) ?? _d(pickupObj?['lat']);
+    final pickupLng = _d(raw['pickup_lng']) ?? _d(pickupObj?['lng']);
+    final destLat = _d(raw['destination_lat']) ?? _d(destObj?['lat']);
+    final destLng = _d(raw['destination_lng']) ?? _d(destObj?['lng']);
+    final driverLat =
+        _d(raw['driver_lat']) ?? _d(liveObj?['lat']);
+    final driverLng =
+        _d(raw['driver_lng']) ?? _d(liveObj?['lng']);
+
+    Map<String, dynamic>? route = _asMap(raw['route']);
+    if (route == null && raw['route_path'] is List) {
+      route = <String, dynamic>{'path': raw['route_path']};
+    }
+
+    return <String, dynamic>{
+      ...raw,
+      'status': raw['trip_status'] ?? raw['trip_phase'] ?? raw['status'],
+      'pickup': <String, dynamic>{
+        'lat': pickupLat,
+        'lng': pickupLng,
+        'address': raw['pickup_area'] ?? pickupObj?['address'] ?? 'Pickup',
+      },
+      'destination': <String, dynamic>{
+        'lat': destLat,
+        'lng': destLng,
+        'address': raw['dropoff_area'] ?? destObj?['address'] ?? 'Drop-off',
+      },
+      'live_location': driverLat != null && driverLng != null
+          ? <String, dynamic>{
+              'lat': driverLat,
+              'lng': driverLng,
+              'heading': raw['driver_heading'] ?? liveObj?['heading'],
+            }
+          : null,
+      'route': route,
+      'driver': <String, dynamic>{
+        'name': raw['driver_first_name'] ?? raw['driver_name'] ?? 'Driver',
+        'car': raw['vehicle_label'] ?? '',
+      },
+      'eta_min': raw['eta_min'],
+    };
+  }
+
+  void _logRenderState(String rideId, Map<String, dynamic> trip) {
+    final pickup = _asMap(trip['pickup']);
+    final dest = _asMap(trip['destination']);
+    final live = _asMap(trip['live_location']);
+    final hasMarker = _latLngFromMap(pickup) != null ||
+        _latLngFromMap(dest) != null ||
+        _latLngFromMap(live) != null;
+    if (!_loggedMarkersRendered && hasMarker) {
+      _loggedMarkersRendered = true;
+      debugPrint('LIVE_TRIP_MARKERS_RENDERED rideId=$rideId');
+    }
+    final route = _polylinePoints(trip);
+    final routeKey = '${route.points.length}:${route.source}';
+    if (route.points.length >= 2 && routeKey != _lastRouteLogKey) {
+      _lastRouteLogKey = routeKey;
+      if (!_loggedRouteRendered) {
+        _loggedRouteRendered = true;
+      }
+      debugPrint(
+        'LIVE_TRIP_ROUTE_RENDERED rideId=$rideId '
+        'points=${route.points.length} source=${route.source}',
+      );
+      _requestCameraFit(rideId: rideId, reason: 'route_rendered');
+    }
+  }
+
+  void _requestCameraFit({required String rideId, required String reason}) {
+    if (!_mapReady) {
+      _pendingCameraFit = true;
+      return;
+    }
+    _scheduleMapResize(reason: reason, rideId: rideId);
+  }
+
+  void _scheduleMapResize({required String reason, String? rideId}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _triggerMapResize(reason: reason, rideId: rideId);
+    });
+    Future<void>.delayed(const Duration(milliseconds: 120), () {
+      if (!mounted) {
+        return;
+      }
+      _triggerMapResize(reason: '${reason}_delayed', rideId: rideId);
+    });
+  }
+
+  void _triggerMapResize({required String reason, String? rideId}) {
+    debugPrint(
+      'LIVE_TRIP_MAP_RESIZE_TRIGGERED rideId=${rideId ?? widget.rideId} reason=$reason mapReady=$_mapReady',
+    );
+    _fitMap(rideId: rideId);
+  }
+
+  void _fitMap({String? rideId}) {
+    if (!_mapReady) {
+      _pendingCameraFit = true;
+      return;
+    }
+    final pts = _cameraFitPoints();
+    if (pts.isEmpty) {
+      return;
+    }
+    try {
+      if (pts.length == 1) {
+        _map.move(pts.first, 14);
+      } else {
+        final b = LatLngBounds.fromPoints(pts);
+        _map.fitCamera(
+          CameraFit.bounds(bounds: b, padding: const EdgeInsets.all(48)),
+        );
+      }
+      if (!_loggedCameraFit) {
+        _loggedCameraFit = true;
+        debugPrint(
+          'LIVE_TRIP_CAMERA_FIT_OK rideId=${rideId ?? widget.rideId} points=${pts.length}',
+        );
+      }
+    } catch (error) {
+      debugPrint(
+        'LIVE_TRIP_CAMERA_FIT_FAIL rideId=${rideId ?? widget.rideId} error=$error',
+      );
+    }
+  }
+
+  /// Camera fit prefers pickup + destination + driver; route points omitted to avoid over-zoom.
+  List<LatLng> _cameraFitPoints() {
     final out = <LatLng>[];
     void addLatLng(double? la, double? ln) {
-      if (la != null && ln != null) out.add(LatLng(la, ln));
+      if (la != null && ln != null) {
+        out.add(LatLng(la, ln));
+      }
     }
 
     final pickup = _asMap(_trip?['pickup']);
-    addLatLng(_d(pickup?['lat']), _d(pickup?['lng']));
     final dest = _asMap(_trip?['destination']);
-    addLatLng(_d(dest?['lat']), _d(dest?['lng']));
     final live = _asMap(_trip?['live_location']);
+    addLatLng(_d(pickup?['lat']), _d(pickup?['lng']));
+    addLatLng(_d(dest?['lat']), _d(dest?['lng']));
     addLatLng(_d(live?['lat']), _d(live?['lng']));
-
-    final route = _trip?['route'];
-    if (route is Map) {
-      final path = route['path'];
-      if (path is List) {
-        for (final p in path) {
-          if (p is Map) {
-            addLatLng(_d(p['lat']), _d(p['lng']));
-          }
-        }
-      }
-    }
     return out;
   }
 
+  void _onMapReady() {
+    if (_mapReady) {
+      return;
+    }
+    _mapReady = true;
+    debugPrint('LIVE_TRIP_MAP_READY rideId=${widget.rideId}');
+    if (_pendingCameraFit || _trip != null) {
+      _pendingCameraFit = false;
+      _scheduleMapResize(reason: 'map_ready');
+    }
+  }
+
   Map<String, dynamic>? _asMap(dynamic v) {
-    if (v is! Map) return null;
+    if (v is! Map) {
+      return null;
+    }
     return v.map((k, val) => MapEntry(k.toString(), val));
   }
 
   double? _d(dynamic v) {
-    if (v is num) return v.toDouble();
+    if (v is num) {
+      return v.toDouble();
+    }
+    if (v is String) {
+      return double.tryParse(v.trim());
+    }
     return null;
   }
 
@@ -158,29 +340,30 @@ class _TripLivePageState extends State<TripLivePage> {
     super.dispose();
   }
 
+  Widget _buildMapSkeleton() {
+    return Container(
+      color: const Color(0xFFE8EAED),
+      alignment: Alignment.center,
+      child: const Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 28,
+            height: 28,
+            child: CircularProgressIndicator(strokeWidth: 2.6),
+          ),
+          SizedBox(height: 12),
+          Text('Loading live map…'),
+        ],
+      ),
+    );
+  }
+
+  bool get _showMapLoadingOverlay =>
+      _trip == null && (_awaitingFirstSnapshot || !_mapReady);
+
   @override
   Widget build(BuildContext context) {
-    if (_authBusy) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
-    }
-
-    if (_trip == null && _error == null) {
-      return const Scaffold(
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(),
-              SizedBox(height: 16),
-              Text('Connecting to live trip…'),
-            ],
-          ),
-        ),
-      );
-    }
-
     if (_error != null && _trip == null) {
       return Scaffold(
         appBar: AppBar(title: const Text('Trip tracking')),
@@ -208,7 +391,7 @@ class _TripLivePageState extends State<TripLivePage> {
       );
     }
 
-    final trip = _trip ?? {};
+    final trip = _trip ?? const <String, dynamic>{};
     final status = trip['status']?.toString() ?? '—';
     final expiresAt = _asInt(trip['expires_at']) ?? 0;
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -219,9 +402,10 @@ class _TripLivePageState extends State<TripLivePage> {
     final dest = _asMap(trip['destination']);
     final live = _asMap(trip['live_location']);
     final driver = _asMap(trip['driver']);
-    final pts = _allPoints();
-    final center = pts.isNotEmpty ? pts.first : const LatLng(6.5244, 3.3792);
-
+    final fitPts = _cameraFitPoints();
+    final center = fitPts.isNotEmpty ? fitPts.first : _defaultCenter;
+    final routeResult = _polylinePoints(trip);
+    final routePoints = routeResult.points;
     final eta = _estimateEtaMinutes(live, dest, terminal);
 
     return Scaffold(
@@ -236,6 +420,8 @@ class _TripLivePageState extends State<TripLivePage> {
       ),
       body: Column(
         children: [
+          if (_awaitingFirstSnapshot && _trip == null)
+            const LinearProgressIndicator(minHeight: 2),
           Material(
             elevation: 0,
             color: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -246,7 +432,11 @@ class _TripLivePageState extends State<TripLivePage> {
                 children: [
                   Row(
                     children: [
-                      Chip(label: Text(status)),
+                      Chip(
+                        label: Text(
+                          _trip == null ? 'Connecting…' : status,
+                        ),
+                      ),
                       const SizedBox(width: 8),
                       if (eta != null)
                         Chip(
@@ -270,19 +460,17 @@ class _TripLivePageState extends State<TripLivePage> {
                     _placeLine('Drop-off', dest),
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
-                  if (driver != null)
+                  if (driver != null && _trip != null)
                     Text(
                       'Driver: ${_text(driver['name'])} · ${_text(driver['car'])} ${_text(driver['plate'])}',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
-                  if (_error != null)
+                  if (_awaitingFirstSnapshot && _trip == null)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: Text(
-                        _error!,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
+                        'Connecting to live trip…',
+                        style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ),
                   const SizedBox(height: 8),
@@ -312,69 +500,88 @@ class _TripLivePageState extends State<TripLivePage> {
             ),
           ),
           Expanded(
-            child: FlutterMap(
-              mapController: _map,
-              options: MapOptions(
-                initialCenter: center,
-                initialZoom: 13,
-                interactionOptions: const InteractionOptions(
-                  flags: InteractiveFlag.all,
-                ),
-              ),
+            child: Stack(
+              fit: StackFit.expand,
               children: [
-                TileLayer(
-                  urlTemplate:
-                      'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-                  subdomains: const ['a', 'b', 'c', 'd'],
-                  userAgentPackageName: 'africa.nexride.site',
-                ),
-                if (_polylinePoints(trip).length >= 2)
-                  PolylineLayer(
-                    polylines: [
-                      Polyline(
-                        points: _polylinePoints(trip),
-                        strokeWidth: 4,
-                        color: Theme.of(context).colorScheme.primary,
+                FlutterMap(
+                      mapController: _map,
+                      options: MapOptions(
+                        initialCenter: center,
+                        initialZoom: fitPts.isEmpty ? 12 : (fitPts.length == 1 ? 14 : 13),
+                        onMapReady: _onMapReady,
+                        interactionOptions: const InteractionOptions(
+                          flags: InteractiveFlag.all,
+                        ),
                       ),
-                    ],
-                  ),
-                MarkerLayer(
-                  markers: [
-                    if (_latLngFromMap(pickup) != null)
-                      Marker(
-                        point: _latLngFromMap(pickup)!,
-                        width: 36,
-                        height: 36,
-                        child: const Icon(Icons.trip_origin, color: Colors.blue),
-                      ),
-                    if (_latLngFromMap(dest) != null)
-                      Marker(
-                        point: _latLngFromMap(dest)!,
-                        width: 36,
-                        height: 36,
-                        child: const Icon(Icons.place, color: Colors.red),
-                      ),
-                    if (_latLngFromMap(live) != null)
-                      Marker(
-                        point: _latLngFromMap(live)!,
-                        width: 40,
-                        height: 40,
-                        child: const Icon(Icons.local_taxi, color: Colors.black87),
-                      ),
-                  ],
-                ),
-                RichAttributionWidget(
-                  attributions: [
-                    TextSourceAttribution(
-                      '© OpenStreetMap · CARTO',
-                      onTap: () => launchUrl(
-                        Uri.parse('https://www.openstreetmap.org/copyright'),
-                      ),
+                      children: [
+                        TileLayer(
+                          urlTemplate:
+                              'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+                          subdomains: const ['a', 'b', 'c', 'd'],
+                          userAgentPackageName: 'africa.nexride.site',
+                        ),
+                        if (routePoints.length >= 2)
+                          PolylineLayer(
+                            polylines: [
+                              Polyline(
+                                points: routePoints,
+                                strokeWidth: 4,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                            ],
+                          ),
+                        MarkerLayer(
+                          markers: [
+                            if (_latLngFromMap(pickup) != null)
+                              Marker(
+                                point: _latLngFromMap(pickup)!,
+                                width: 36,
+                                height: 36,
+                                child: const Icon(
+                                  Icons.trip_origin,
+                                  color: Colors.blue,
+                                ),
+                              ),
+                            if (_latLngFromMap(dest) != null)
+                              Marker(
+                                point: _latLngFromMap(dest)!,
+                                width: 36,
+                                height: 36,
+                                child: const Icon(
+                                  Icons.place,
+                                  color: Colors.red,
+                                ),
+                              ),
+                            if (_latLngFromMap(live) != null)
+                              Marker(
+                                point: _latLngFromMap(live)!,
+                                width: 40,
+                                height: 40,
+                                child: const Icon(
+                                  Icons.local_taxi,
+                                  color: Colors.black87,
+                                ),
+                              ),
+                          ],
+                        ),
+                        RichAttributionWidget(
+                          attributions: [
+                            TextSourceAttribution(
+                              '© OpenStreetMap · CARTO',
+                              onTap: () => launchUrl(
+                                Uri.parse(
+                                  'https://www.openstreetmap.org/copyright',
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
+                    if (_showMapLoadingOverlay)
+                      Positioned.fill(child: _buildMapSkeleton()),
                   ],
                 ),
-              ],
-            ),
           ),
           const SafeArea(
             top: false,
@@ -392,27 +599,58 @@ class _TripLivePageState extends State<TripLivePage> {
     );
   }
 
-  List<LatLng> _polylinePoints(Map<String, dynamic> trip) {
-    final route = trip['route'];
-    if (route is! Map) return const [];
-    final path = route['path'];
-    if (path is! List) return const [];
-    final out = <LatLng>[];
-    for (final p in path) {
-      if (p is Map) {
-        final la = _d(p['lat']);
-        final ln = _d(p['lng']);
-        if (la != null && ln != null) out.add(LatLng(la, ln));
+  ({List<LatLng> points, String source}) _polylinePoints(Map<String, dynamic> trip) {
+    final route = _asMap(trip['route']);
+    if (route != null) {
+      final path = route['path'];
+      if (path is List) {
+        final out = <LatLng>[];
+        for (final p in path) {
+          if (p is Map) {
+            final la = _d(p['lat'] ?? p['latitude']);
+            final ln = _d(p['lng'] ?? p['longitude']);
+            if (la != null && ln != null) {
+              out.add(LatLng(la, ln));
+            }
+          }
+        }
+        if (out.length >= 2) {
+          return (points: out, source: 'route_path');
+        }
       }
     }
-    return out;
+    if (trip['route_path'] is List) {
+      final out = <LatLng>[];
+      for (final p in trip['route_path'] as List) {
+        if (p is Map) {
+          final la = _d(p['lat'] ?? p['latitude']);
+          final ln = _d(p['lng'] ?? p['longitude']);
+          if (la != null && ln != null) {
+            out.add(LatLng(la, ln));
+          }
+        }
+      }
+      if (out.length >= 2) {
+        return (points: out, source: 'route_path');
+      }
+    }
+    final pickup = _latLngFromMap(_asMap(trip['pickup']));
+    final dest = _latLngFromMap(_asMap(trip['destination']));
+    if (pickup != null && dest != null) {
+      return (points: <LatLng>[pickup, dest], source: 'fallback');
+    }
+    return (points: const <LatLng>[], source: 'none');
   }
 
   LatLng? _latLngFromMap(Map<String, dynamic>? m) {
-    if (m == null) return null;
+    if (m == null) {
+      return null;
+    }
     final la = _d(m['lat']);
     final ln = _d(m['lng']);
-    if (la == null || ln == null) return null;
+    if (la == null || ln == null) {
+      return null;
+    }
     return LatLng(la, ln);
   }
 
@@ -421,15 +659,21 @@ class _TripLivePageState extends State<TripLivePage> {
     Map<String, dynamic>? dest,
     bool terminal,
   ) {
-    if (terminal) return null;
+    if (terminal) {
+      return null;
+    }
     final d = _latLngFromMap(dest);
     final l = _latLngFromMap(live);
-    if (d == null || l == null) return null;
+    if (d == null || l == null) {
+      return null;
+    }
     final meters = const Distance().as(LengthUnit.Meter, l, d);
     const speedKmh = 28.0;
     final hours = (meters / 1000) / speedKmh;
     final mins = (hours * 60).round();
-    if (mins <= 0 || mins > 240) return null;
+    if (mins <= 0 || mins > 240) {
+      return null;
+    }
     return mins;
   }
 
@@ -442,13 +686,19 @@ class _TripLivePageState extends State<TripLivePage> {
   }
 
   int? _asInt(dynamic v) {
-    if (v is int) return v;
-    if (v is num) return v.toInt();
+    if (v is int) {
+      return v;
+    }
+    if (v is num) {
+      return v.toInt();
+    }
     return null;
   }
 
   String _placeLine(String label, Map<String, dynamic>? m) {
-    if (m == null) return '$label: —';
+    if (m == null) {
+      return '$label: —';
+    }
     final addr = _firstNonEmpty([
       _text(m['address']),
       _text(m['label']),
@@ -463,7 +713,9 @@ class _TripLivePageState extends State<TripLivePage> {
 
   String _firstNonEmpty(List<String> values) {
     for (final s in values) {
-      if (s.isNotEmpty) return s;
+      if (s.isNotEmpty) {
+        return s;
+      }
     }
     return '';
   }
@@ -471,8 +723,10 @@ class _TripLivePageState extends State<TripLivePage> {
   Future<void> _openInRiderApp() async {
     final id = Uri.decodeComponent(widget.rideId.trim());
     final t = widget.token.trim();
-    final app = Uri.parse('nexride://trip?rideId=${Uri.encodeComponent(id)}'
-        '&token=${Uri.encodeComponent(t)}');
+    final app = Uri.parse(
+      'nexride://trip?rideId=${Uri.encodeComponent(id)}'
+      '&token=${Uri.encodeComponent(t)}',
+    );
     if (await canLaunchUrl(app)) {
       await launchUrl(app, mode: LaunchMode.externalApplication);
     }

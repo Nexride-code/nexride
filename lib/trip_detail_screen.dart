@@ -18,6 +18,8 @@ class TripDetailScreen extends StatelessWidget {
 
   static const Color _gold = Color(0xFFB57A2A);
 
+  bool get _isOrder => tripData['type']?.toString() == 'order';
+
   RiderServiceType get _serviceType => riderServiceTypeFromKey(
     (tripData['service_type'] ?? tripData['serviceType'])?.toString(),
   );
@@ -131,7 +133,7 @@ class TripDetailScreen extends StatelessWidget {
         backgroundColor: _gold,
         foregroundColor: Colors.black,
         centerTitle: true,
-        title: const Text('Trip details'),
+        title: Text(_isOrder ? 'Order details' : 'Trip details'),
       ),
       body: SafeArea(
         child: ListView(
@@ -187,7 +189,7 @@ class TripDetailScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'Trip ID: $tripId',
+                    '${_isOrder ? 'Order' : 'Trip'} ID: $tripId',
                     style: const TextStyle(color: Colors.white54, fontSize: 12),
                   ),
                 ],
@@ -252,9 +254,11 @@ class TripDetailScreen extends StatelessWidget {
                 ),
                 onPressed: () => _openReportFlow(context),
                 icon: const Icon(Icons.support_agent),
-                label: const Text(
-                  'Report this trip',
-                  style: TextStyle(fontWeight: FontWeight.w700),
+                label: Text(
+                  _isOrder
+                      ? 'Contact support about this order'
+                      : 'Contact support about this trip',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
               ),
             ),

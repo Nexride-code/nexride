@@ -41,6 +41,8 @@ import 'bank_transfer_receipt_screen.dart';
 import 'widgets/rider_flutterwave_va_payment_sheet.dart';
 import 'service_type.dart';
 import 'share_trip_rtdb.dart';
+import 'safe_share_origin.dart';
+import 'sos/sos_report_screen.dart';
 import 'support/rider_backend_pricing.dart';
 import 'support/rider_fare_support.dart';
 import 'support/ride_chat_support.dart';
@@ -136,7 +138,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       RiderActiveTripSessionService.instance;
   static const Duration _staleSearchingRestoreTimeout = Duration(minutes: 3);
   String _lastRequestUiStateLog = '';
-  final ShareTripRtdbService _shareTripRtdbService = ShareTripRtdbService();
+  final Map<String, ShareTripLink> _cachedShareLinkByRideId =
+      <String, ShareTripLink>{};
+  final GlobalKey _shareTripButtonKey = GlobalKey();
   final PaymentMethodsService _paymentMethodsService =
       const PaymentMethodsService();
   final RiderTrustBootstrapService _bootstrapService =
@@ -263,11 +267,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   StreamSubscription<rtdb.DatabaseEvent>? _callSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _incomingCallSubscription;
   String? _incomingCallListenerUid;
+  final Set<String> _riderPaymentConfirmedPopupShownRideIds = <String>{};
+  final Set<String> _ratingHandledRideIds = <String>{};
   OverlayEntry? _callOverlayEntry;
   RideCallSession? _currentCallSession;
   String? _callListenerRideId;
   DateTime? _callAcceptedAt;
+  DateTime? _activeCallStartedAt;
   Duration _callDuration = Duration.zero;
+  bool _isEndingCall = false;
   AppLifecycleState _appLifecycleState = AppLifecycleState.resumed;
   bool _callMuted = false;
   bool _callSpeakerOn = true;
@@ -275,6 +283,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool _isStartingVoiceCall = false;
   int _callJoinAttemptCount = 0;
   final Set<String> _callCleanupDoneRideIds = <String>{};
+  final Set<String> _callLocallyEndedRideIds = <String>{};
+  final Map<String, int> _callNullGraceUntilByRideId = <String, int>{};
+  String? _callJoinInFlightRideId;
+  String? _callUiActiveRideId;
   bool _callLocalCleanupInProgress = false;
   bool _isRiderTripSheetExpanded = false;
   bool _deviceLocationAvailable = false;
@@ -1368,6 +1380,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     required String source,
   }) async {
+    if (_rideSnapshotIndicatesCompleted(rideData)) {
+      _logRideFlow(
+        'COMPLETE_TRIP_STATUS_RECEIVED rideId=$rideId source=$source '
+        'trip_state=${_valueAsText(rideData['trip_state'])} '
+        'status=${_valueAsText(rideData['status'])}',
+      );
+      return _RiderRideStatusDecision(
+        status: 'completed',
+        driverData: _extractDriverData(rideData),
+      );
+    }
+
     final terminalCanonical =
         TripStateMachine.canonicalStateFromSnapshot(rideData);
     if (TripStateMachine.isTerminal(terminalCanonical)) {
@@ -1553,6 +1577,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   /// Lifecycle display status derived ONLY from canonical [trip_state].
   String _riderVisibleStatusFromRideData(Map<String, dynamic> rideData) {
+    if (_rideSnapshotIndicatesCompleted(rideData)) {
+      return 'completed';
+    }
     final refined = TripStateMachine.refinedRiderTerminalCancelStatus(rideData);
     if (refined != null) {
       return refined;
@@ -1562,6 +1589,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return 'expired';
     }
     return TripStateMachine.legacyStatusForCanonical(canon);
+  }
+
+  bool _rideSnapshotIndicatesCompleted(Map<String, dynamic> rideData) {
+    final tripState = _valueAsText(rideData['trip_state']).toLowerCase();
+    final status = _valueAsText(rideData['status']).toLowerCase();
+    return tripState == 'completed' ||
+        tripState == 'trip_completed' ||
+        tripState == 'complete' ||
+        status == 'completed' ||
+        status == 'trip_completed' ||
+        status == 'complete' ||
+        rideData['trip_completed'] == true;
   }
 
   void _logRiderRideSnapshotReceived({
@@ -1691,6 +1730,39 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return (ps == 'verified' || ps == 'paid') && ptid.isNotEmpty;
   }
 
+  bool _isDriverBankTransferPaymentConfirmed(Map<String, dynamic> ride) {
+    if (ride['payment_confirmed_by_driver'] == true ||
+        ride['driver_confirmed_rider_payment'] == true) {
+      return true;
+    }
+    return _valueAsText(ride['payment_status']).toLowerCase() ==
+        'driver_confirmed';
+  }
+
+  void _maybeShowDriverPaymentConfirmedPopup({
+    required String rideId,
+    required Map<String, dynamic> rideData,
+  }) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty ||
+        _riderPaymentConfirmedPopupShownRideIds.contains(normalizedRideId)) {
+      return;
+    }
+    if (!_isDriverBankTransferPaymentConfirmed(rideData)) {
+      return;
+    }
+    _riderPaymentConfirmedPopupShownRideIds.add(normalizedRideId);
+    if (!mounted) {
+      return;
+    }
+    _logRideFlow(
+      'RIDER_PAYMENT_CONFIRMED_POPUP_SHOW rideId=$normalizedRideId',
+    );
+    _showSnackBar(
+      'Thanks, your bank transfer has been confirmed by your driver.',
+    );
+  }
+
   bool _isCardFamilyPaymentMethod(String paymentMethod) {
     final pm = paymentMethod.trim().toLowerCase().replaceAll(RegExp(r'[\s-]+'), '_');
     return pm == 'card' ||
@@ -1801,7 +1873,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (pm != 'bank_transfer' && pm != 'flutterwave_va') {
       return false;
     }
-    return !_ridePaymentVerified(snap);
+    return !_ridePaymentVerified(snap) &&
+        !_isDriverBankTransferPaymentConfirmed(snap);
   }
 
   Future<Map<String, String>> _acceptedRideBankTransferDetailsFuture({
@@ -2050,7 +2123,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               ),
               const SizedBox(height: 6),
               const Text(
-                'Make your transfer after your driver starts or arrives at pickup.',
+                'After payment, please show your driver proof of payment.',
                 style: TextStyle(
                   color: _panelMutedInk,
                   fontSize: 12,
@@ -2344,7 +2417,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     ));
     final d = ratingDriverId?.trim() ?? '';
     if (d.isNotEmpty && d != 'waiting' && mounted) {
-      unawaited(Future<void>.microtask(() => _showRatingDialog(d)));
+      final pendingRideId = rideId.trim();
+      if (pendingRideId.isNotEmpty) {
+        unawaited(
+          Future<void>.microtask(
+            () => _showRatingDialog(rideId: pendingRideId, driverId: d),
+          ),
+        );
+      }
     }
   }
 
@@ -2787,15 +2867,38 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           (_pendingRideRequestSubmissionId?.isNotEmpty ?? false));
 
   /// Cancel after the driver has committed (trip-level cancel on primary).
+  bool get _riderTripCancelBlocked {
+    final snap = _currentRideSnapshot;
+    if (snap == null || snap.isEmpty) {
+      return false;
+    }
+    final tripState =
+        _valueAsText(snap['trip_state']).trim().toLowerCase();
+    final status = _valueAsText(snap['status']).trim().toLowerCase();
+    const blocked = <String>{
+      'in_progress',
+      'on_trip',
+      'arrived',
+      'completed',
+      'cancelled',
+      'trip_started',
+      'trip_completed',
+      'trip_cancelled',
+    };
+    return blocked.contains(tripState) || blocked.contains(status);
+  }
+
   bool get _showCancelRideOnly =>
       !_isRiderRequestMatchingPhase &&
       _currentRideId != null &&
       _currentRideId!.trim().isNotEmpty &&
+      !_riderTripCancelBlocked &&
       <String>{
         'accepted',
         'arriving',
-        'arrived',
-        'on_trip',
+        'assigned',
+        'pending_driver_action',
+        'pending_driver_acceptance',
       }.contains(_effectiveRideStatus);
 
   /// Cancel while preparing/writing, or after request is live but not yet matched.
@@ -3631,6 +3734,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     } catch (error) {
       startupError('load_drivers', error);
     }
+    _callService.phaseNotifier.addListener(_handleCallVoicePhaseChanged);
     _startIncomingCallListener();
     unawaited(_resyncIncomingCallState().catchError((Object error, _) {
       startupError('resync_incoming_call', error);
@@ -3879,6 +3983,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _isStartingVoiceCall = value;
   }
 
+  void _resetCallButtonLoading({required String reason}) {
+    _setStartingVoiceCall(false);
+    _callJoinInFlightRideId = null;
+    _logRideCall('CALL_BUTTON_LOADING_RESET reason=$reason');
+  }
+
   void _resetRideCallUi({required String reason}) {
     final session = _currentCallSession;
     if (session != null &&
@@ -3887,10 +3997,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRideCall(
         'CALL_UI_RESET_BLOCKED_ACTIVE_SESSION reason=$reason rideId=${session.rideId} status=${session.status}',
       );
+      _resetCallButtonLoading(reason: '${reason}_active_session');
       return;
     }
     _logRideCall('CALL_UI_RESET reason=$reason');
-    _setStartingVoiceCall(false);
+    _resetCallButtonLoading(reason: reason);
   }
 
   void _ensureRiderActiveRidePointerListener() {
@@ -4281,6 +4392,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _callRingTimeoutTimer?.cancel();
     _callForegroundDebounceTimer?.cancel();
     _pendingCallForeground = null;
+    _callService.phaseNotifier.removeListener(_handleCallVoicePhaseChanged);
     _rideListener?.cancel();
     _riderAuthRolloutSubscription?.cancel();
     _riderActiveRidePointerSubscription?.cancel();
@@ -4894,6 +5006,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   void _startCallListener(String rideId) {
     if (_callListenerRideId == rideId && _callSubscription != null) {
+      _logRideCall('CALL_LISTENER_REUSED rideId=$rideId');
       return;
     }
 
@@ -4932,12 +5045,202 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _resyncCallState(String rideId) async {
-    final session = await _callService.fetchCall(rideId);
+    final normalizedRideId = rideId.trim();
+    if (_callCleanupDoneRideIds.contains(normalizedRideId)) {
+      final session = _currentCallSession;
+      if (session == null || session.isTerminal) {
+        _logRideCall(
+          'CALL_LOG_LOAD_SKIPPED_DUPLICATE rideId=$normalizedRideId',
+        );
+        return;
+      }
+    }
+    _logRideCall('CALL_LOG_LOAD_START rideId=$rideId');
+    RideCallSession? session;
+    try {
+      session = await _callService
+          .fetchCall(rideId)
+          .timeout(const Duration(seconds: 8));
+    } on TimeoutException {
+      _logRideCall('CALL_LOG_LOAD_ERROR rideId=$rideId reason=timeout');
+      session = _currentCallSession;
+    } catch (error) {
+      _logRideCall('CALL_LOG_LOAD_ERROR rideId=$rideId error=$error');
+      session = _currentCallSession;
+    }
     if (!mounted || _callListenerRideId != rideId) {
       return;
     }
+    if (session == null) {
+      _logRideCall('CALL_LOG_LOAD_EMPTY rideId=$rideId');
+    } else {
+      _logRideCall(
+        'CALL_LOG_LOAD_OK rideId=$rideId status=${session.status.name}',
+      );
+    }
 
     await _handleCallSnapshotUpdate(rideId, session);
+  }
+
+  String get _activeCallRideId {
+    return (_callListenerRideId ??
+            _activeRideInteractionId ??
+            _currentRideId ??
+            '')
+        .trim();
+  }
+
+  void _handleCallVoicePhaseChanged() {
+    if (!_callService.isVoiceConnected) {
+      return;
+    }
+    final rideId = _activeCallRideId;
+    if (rideId.isEmpty) {
+      return;
+    }
+    _ensureActiveCallUiVisible(
+      rideId: rideId,
+      source: 'CALL_REMOTE_JOINED',
+    );
+  }
+
+  RideCallSession? _synthesizeActiveCallSession(String rideId) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return null;
+    }
+    final riderUid = _currentRiderUid?.trim() ?? '';
+    final driverId = _currentDriverIdForRide.trim();
+    if (riderUid.isEmpty) {
+      return null;
+    }
+    final existing = _currentCallSession;
+    if (existing != null &&
+        existing.rideId == normalizedRideId &&
+        !existing.isTerminal) {
+      return existing;
+    }
+    return RideCallSession(
+      rideId: normalizedRideId,
+      callerId: driverId.isNotEmpty ? driverId : riderUid,
+      receiverId: riderUid,
+      status: RideCallStatus.joined,
+      channelId: normalizedRideId,
+      callerUid: driverId.isNotEmpty ? driverId : riderUid,
+      acceptedAt:
+          _callAcceptedAt?.millisecondsSinceEpoch ??
+          DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  void _extendCallNullGrace(String rideId, {Duration grace = const Duration(seconds: 12)}) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    final until =
+        DateTime.now().millisecondsSinceEpoch + grace.inMilliseconds;
+    final previous = _callNullGraceUntilByRideId[normalizedRideId] ?? 0;
+    if (until > previous) {
+      _callNullGraceUntilByRideId[normalizedRideId] = until;
+    }
+  }
+
+  bool _isCallNullGraceActive(String rideId) {
+    final until = _callNullGraceUntilByRideId[rideId.trim()];
+    if (until == null) {
+      return false;
+    }
+    return DateTime.now().millisecondsSinceEpoch < until;
+  }
+
+  void _ensureActiveCallUiVisible({
+    required String rideId,
+    required String source,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    if (_callLocallyEndedRideIds.contains(normalizedRideId)) {
+      final activeSession = _currentCallSession;
+      if ((activeSession == null || activeSession.isTerminal) &&
+          !_callJoinedChannel &&
+          !_callService.isVoiceConnected) {
+        return;
+      }
+      _callLocallyEndedRideIds.remove(normalizedRideId);
+    }
+    if (_callOverlayEntry != null && !_callOverlayEntry!.mounted) {
+      _logRideCall(
+        'CALL_UI_ACTIVE_STALE_OVERLAY_RESET rideId=$normalizedRideId source=$source',
+      );
+      _removeCallOverlayEntry();
+    }
+    if (_callUiActiveRideId == normalizedRideId &&
+        _callOverlayEntry != null &&
+        _callOverlayEntry!.mounted) {
+      final voiceLive = _callJoinedChannel || _callService.isVoiceConnected;
+      final session = _currentCallSession;
+      final callLive = voiceLive ||
+          (session != null &&
+              !session.isTerminal &&
+              (session.isRinging || session.isAccepted));
+      if (callLive) {
+        _logRideCall(
+          'CALL_UI_ACTIVE_ALREADY_VISIBLE rideId=$normalizedRideId source=$source',
+        );
+        if (source == 'CALL_JOIN_OK' || source == 'CALL_REMOTE_JOINED') {
+          _ensureCallDurationTimerStarted(
+            rideId: normalizedRideId,
+            source: source,
+          );
+        }
+        _callOverlayEntry!.markNeedsBuild();
+        return;
+      }
+    }
+    final voiceLive = _callJoinedChannel || _callService.isVoiceConnected;
+    final session = _currentCallSession;
+    if ((session == null || session.isTerminal) && voiceLive) {
+      _currentCallSession = _synthesizeActiveCallSession(normalizedRideId);
+    }
+    final visibleSession = _currentCallSession;
+    if (visibleSession == null || visibleSession.isTerminal) {
+      if (!voiceLive) {
+        return;
+      }
+    }
+    _callUiActiveRideId = normalizedRideId;
+    _logRideCall('CALL_UI_ACTIVE_SHOW rideId=$normalizedRideId source=$source');
+    if (source == 'CALL_JOIN_OK' || source == 'CALL_REMOTE_JOINED') {
+      _ensureCallDurationTimerStarted(
+        rideId: normalizedRideId,
+        source: source,
+      );
+    }
+    _refreshCallOverlayEntry();
+  }
+
+  void _ensureCallDurationTimerStarted({
+    required String rideId,
+    required String source,
+  }) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    if (_activeCallStartedAt == null) {
+      final sessionAnchor = _currentCallSession?.acceptedAtDateTime;
+      _activeCallStartedAt = sessionAnchor ?? DateTime.now();
+      _logRideCall(
+        'CALL_TIMER_START rideId=$normalizedRideId source=$source',
+      );
+    }
+    _startCallDurationTicker(_activeCallStartedAt);
   }
 
   Future<void> _handleCallSnapshotUpdate(
@@ -4953,7 +5256,67 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     _currentCallSession = nextSession;
 
+    if (nextSession != null && nextSession.isTerminal) {
+      if (_callCleanupDoneRideIds.contains(rideId.trim())) {
+        _logRideCall(
+          'CALL_TERMINAL_CLEANUP_SKIPPED_DUPLICATE rideId=$rideId '
+          'status=${nextSession.status.name}',
+        );
+        _resetCallButtonLoading(reason: 'terminal_snapshot_duplicate');
+        return;
+      }
+      _callNullGraceUntilByRideId.remove(rideId.trim());
+      _callLocallyEndedRideIds.remove(rideId.trim());
+      if (previousStatus != nextSession.status) {
+        if (nextSession.status == RideCallStatus.ended) {
+          _logRideCall(
+            'CALL_REMOTE_ENDED_RECEIVED rideId=$rideId '
+            'endedBy=${nextSession.endedBy ?? ''}',
+          );
+        }
+        _logRideCall(
+          'CALL_REMOTE_TERMINAL_RECEIVED rideId=$rideId '
+          'status=${nextSession.status.name} endedBy=${nextSession.endedBy ?? ''}',
+        );
+      }
+      _callJoinAttemptCount = 0;
+      await _performLocalCallCleanup(
+        rideId: rideId,
+        cleanupSource: 'call_snapshot_terminal',
+        endReason: 'rtdb_status_${nextSession.status.name}',
+      );
+      callTraceLog(
+        'CALL_END_REMOTE_CLEANUP_OK',
+        rideId: rideId,
+        role: 'rider',
+      );
+      return;
+    }
+
+    if (_callLocallyEndedRideIds.contains(rideId.trim())) {
+      if (nextSession == null || nextSession.isTerminal) {
+        return;
+      }
+      _resetCallGuardsForNewSession(
+        rideId,
+        source: 'snapshot_active_after_local_end',
+      );
+    }
+
     if (nextSession == null) {
+      final endedLocally =
+          _callLocallyEndedRideIds.contains(rideId.trim()) ||
+          _callCleanupDoneRideIds.contains(rideId);
+      if (endedLocally) {
+        await _performLocalCallCleanup(
+          rideId: rideId,
+          cleanupSource: 'call_snapshot_null_after_end',
+          endReason: 'local_or_remote_end',
+          logCleanup: false,
+        );
+        return;
+      }
+
       _callJoinAttemptCount = 0;
       final hadCallActivity = previousSession != null ||
           _callJoinedChannel ||
@@ -4970,6 +5333,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           );
         }
 
+        if (confirmed != null && confirmed.isTerminal) {
+          _logRideCall(
+            'CALL_REMOTE_TERMINAL_RECEIVED rideId=$rideId '
+            'status=${confirmed.status.name} endedBy=${confirmed.endedBy ?? ''}',
+          );
+          await _performLocalCallCleanup(
+            rideId: rideId,
+            cleanupSource: 'call_snapshot_terminal',
+            endReason: 'rtdb_status_${confirmed.status.name}',
+          );
+          callTraceLog(
+            'CALL_END_REMOTE_CLEANUP_OK',
+            rideId: rideId,
+            role: 'rider',
+          );
+          return;
+        }
+
         if (confirmed != null &&
             !confirmed.isTerminal &&
             _callMatchesCurrentRide(confirmed)) {
@@ -4977,13 +5358,36 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             'CALL_NULL_SNAPSHOT_IGNORED rideId=$rideId status=${confirmed.status}',
           );
           _currentCallSession = confirmed;
+          _ensureActiveCallUiVisible(
+            rideId: rideId,
+            source: 'CALL_NULL_SNAPSHOT_IGNORED',
+          );
+          return;
+        }
+
+        if (_isCallNullGraceActive(rideId) ||
+            _callJoinInFlightRideId == rideId.trim() ||
+            (previousSession != null && !previousSession.isTerminal)) {
+          _logRideCall(
+            'CALL_NULL_SNAPSHOT_IGNORED rideId=$rideId reason=setup_grace',
+          );
+          _currentCallSession =
+              confirmed ?? previousSession ?? _synthesizeActiveCallSession(rideId);
           return;
         }
 
         if ((_callJoinedChannel || _callService.isVoiceConnected) &&
-            (confirmed == null || !confirmed.isTerminal)) {
+            (confirmed == null || !confirmed.isTerminal) &&
+            !_callLocallyEndedRideIds.contains(rideId.trim()) &&
+            !_callCleanupDoneRideIds.contains(rideId)) {
           _logRideCall(
             'CALL_NULL_SNAPSHOT_DEFER_CLEANUP rideId=$rideId reason=local_voice_active',
+          );
+          _currentCallSession =
+              confirmed ?? previousSession ?? _synthesizeActiveCallSession(rideId);
+          _ensureActiveCallUiVisible(
+            rideId: rideId,
+            source: 'CALL_NULL_SNAPSHOT_DEFER',
           );
           return;
         }
@@ -5001,8 +5405,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     if (nextSession.isRinging) {
+      _extendCallNullGrace(rideId);
       _callJoinAttemptCount = 0;
       _callCleanupDoneRideIds.remove(rideId);
+      _callLocallyEndedRideIds.remove(rideId);
       _scheduleCallRingTimeout(nextSession);
       _stopCallDurationTicker();
       _callAcceptedAt = null;
@@ -5010,6 +5416,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
       if (_isIncomingCall(nextSession) &&
           previousStatus != RideCallStatus.ringing) {
+        _extendCallNullGrace(rideId);
         callTraceLog(
           'CALL_INCOMING_RECEIVED',
           rideId: rideId,
@@ -5032,6 +5439,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     if (nextSession.isAccepted) {
+      _extendCallNullGrace(rideId);
       _cancelCallRingTimeout();
       _startCallDurationTicker(nextSession.acceptedAtDateTime);
       await _alertSoundService.stopIncomingCallAlert();
@@ -5040,7 +5448,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _logRideCall('call accepted rideId=$rideId');
       }
 
-      if (!_callJoinedChannel && _callJoinAttemptCount < 3) {
+      if (!_callJoinedChannel &&
+          _callJoinInFlightRideId != rideId.trim() &&
+          _callJoinAttemptCount < 1) {
         final uid = _currentRiderUid;
         if (uid != null && uid.isNotEmpty) {
           await _joinAcceptedCall(rideId: rideId, uid: uid);
@@ -5051,7 +5461,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       if (_callService.isVoiceConnected) {
         _logRideCall('CALL_UI_ACTIVE_SHOW rideId=$rideId source=CALL_REMOTE_JOINED');
       }
-      _refreshCallOverlayEntry();
+      _ensureActiveCallUiVisible(
+        rideId: rideId,
+        source: 'accepted_session',
+      );
       return;
     }
 
@@ -5083,32 +5496,34 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'call ended rideId=$rideId by=${nextSession.endedBy ?? 'system'}',
       );
     }
-
-    if (nextSession.isTerminal) {
-      _callJoinAttemptCount = 0;
-      if (previousStatus != nextSession.status) {
-        await _performLocalCallCleanup(
-          rideId: rideId,
-          cleanupSource: 'call_snapshot_terminal',
-          endReason: 'rtdb_status_${nextSession.status.name}',
-        );
-      }
-      return;
-    }
   }
 
   Future<void> _joinAcceptedCall({
     required String rideId,
     required String uid,
   }) async {
+    final normalizedRideId = rideId.trim();
+    if (_callJoinInFlightRideId == normalizedRideId) {
+      _logRideCall('CALL_JOIN_SKIPPED_DUPLICATE rideId=$normalizedRideId');
+      return;
+    }
+    if (_callJoinedChannel && _callService.isVoiceConnected) {
+      _logRideCall(
+        'CALL_JOIN_SKIPPED_DUPLICATE rideId=$normalizedRideId reason=already_joined',
+      );
+      return;
+    }
+    _callJoinInFlightRideId = normalizedRideId;
+    _extendCallNullGrace(normalizedRideId);
     try {
+      _logRideCall('CALL_JOIN_START rideId=$normalizedRideId uid=$uid');
       await _callService.prefetchAgoraToken(
-        channelId: rideId,
+        channelId: normalizedRideId,
         uid: uid,
-        forceRefresh: true,
+        forceRefresh: false,
       );
       await _callService.ensureJoinedVoiceChannel(
-        channelId: rideId,
+        channelId: normalizedRideId,
         uid: uid,
         speakerOn: _callSpeakerOn,
         muted: _callMuted,
@@ -5118,7 +5533,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       _callJoinedChannel = true;
       await _callService.updateParticipantState(
-        rideId: rideId,
+        rideId: normalizedRideId,
         uid: uid,
         joined: true,
         muted: _callMuted,
@@ -5128,7 +5543,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         force: true,
       );
       _logRideCall('CALL_UI_ACTIVE_SHOW rideId=$rideId source=CALL_JOIN_OK');
-      _refreshCallOverlayEntry();
+      _ensureCallDurationTimerStarted(rideId: rideId, source: 'CALL_JOIN_OK');
+      _ensureActiveCallUiVisible(rideId: rideId, source: 'CALL_JOIN_OK');
     } catch (error) {
       _callJoinAttemptCount++;
       _logRideCall(
@@ -5143,6 +5559,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             ? error.message
             : 'Unable to connect the call right now.';
         _showSnackBar(message);
+      }
+    } finally {
+      if (_callJoinInFlightRideId == normalizedRideId) {
+        _callJoinInFlightRideId = null;
       }
     }
   }
@@ -5170,12 +5590,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   void _startCallDurationTicker(DateTime? acceptedAt) {
-    final startAt = acceptedAt ?? DateTime.now();
+    final startAt = _activeCallStartedAt ?? acceptedAt ?? DateTime.now();
+    if (_activeCallStartedAt == null) {
+      _activeCallStartedAt = startAt;
+    }
     _callAcceptedAt = startAt;
     _stopCallDurationTicker();
     _callDuration = DateTime.now().difference(startAt);
     _callDurationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      final anchor = _callAcceptedAt;
+      final anchor = _activeCallStartedAt ?? _callAcceptedAt;
       if (anchor == null) {
         return;
       }
@@ -5243,6 +5666,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required String cleanupSource,
     required String endReason,
     bool logCleanup = true,
+    bool force = false,
   }) async {
     if (_callLocalCleanupInProgress) {
       return;
@@ -5254,10 +5678,124 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         cleanupSource: cleanupSource,
         endReason: endReason,
         logCleanup: logCleanup,
+        force: force,
       );
     } finally {
       _callLocalCleanupInProgress = false;
     }
+  }
+
+  void _resetCallGuardsForNewSession(String rideId, {required String source}) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    final hadRestartBlocks = _callLocallyEndedRideIds.contains(normalizedRideId) ||
+        _callCleanupDoneRideIds.contains(normalizedRideId) ||
+        _callJoinInFlightRideId == normalizedRideId ||
+        (_currentCallSession?.rideId == normalizedRideId &&
+            (_currentCallSession?.isTerminal ?? false));
+    _callLocallyEndedRideIds.remove(normalizedRideId);
+    _callCleanupDoneRideIds.remove(normalizedRideId);
+    _callJoinInFlightRideId = null;
+    _callJoinAttemptCount = 0;
+    _callUiActiveRideId = null;
+    if (_currentCallSession?.rideId == normalizedRideId &&
+        (_currentCallSession?.isTerminal ?? false)) {
+      _currentCallSession = null;
+    }
+    if (hadRestartBlocks) {
+      _logRideCall(
+        'CALL_TERMINAL_STATE_RESET_FOR_RESTART rideId=$normalizedRideId source=$source',
+      );
+      callTraceLog(
+        'CALL_JOIN_GUARD_RESET_FOR_NEW_SESSION',
+        rideId: normalizedRideId,
+        role: 'rider',
+      );
+    }
+  }
+
+  void _stopCallListenerForRide(String rideId) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    if (_callListenerRideId != null && _callListenerRideId != normalizedRideId) {
+      return;
+    }
+    if (_callListenerRideId != null) {
+      RidePipelineGuard.releaseCallListener(
+        rideId: _callListenerRideId!,
+        owner: 'MapScreen',
+      );
+    }
+    _callSubscription?.cancel();
+    _callSubscription = null;
+    _callListenerRideId = null;
+  }
+
+  void _dismissOpenModalRoutes({int maxPops = 6}) {
+    if (!mounted) {
+      return;
+    }
+    var pops = 0;
+    while (mounted && pops < maxPops) {
+      final route = ModalRoute.of(context);
+      if (route == null || route.isFirst) {
+        break;
+      }
+      if (route is PopupRoute) {
+        Navigator.of(context).pop();
+        pops++;
+        continue;
+      }
+      break;
+    }
+  }
+
+  Future<void> _prepareUiCleanupBeforeTripReset(String rideId) async {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    _logRideFlow(
+      'COMPLETE_TRIP_PRE_UI_CLEANUP_START rideId=$normalizedRideId',
+    );
+    if (!mounted) {
+      return;
+    }
+    _dismissOpenModalRoutes();
+    _stopCallListenerForRide(normalizedRideId);
+    _removeCallOverlayEntry(
+      logReason: 'CALL_OVERLAY_REMOVED_BEFORE_TRIP_RESET',
+    );
+    await _performLocalCallCleanup(
+      rideId: normalizedRideId,
+      cleanupSource: 'complete_trip_pre_reset',
+      endReason: 'trip_completed',
+      logCleanup: false,
+      force: true,
+    );
+    if (!mounted) {
+      return;
+    }
+    _logRideFlow('COMPLETE_TRIP_PRE_UI_CLEANUP_OK rideId=$normalizedRideId');
+  }
+
+  void _tearDownCallUiImmediately(String rideId) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return;
+    }
+    _callLocallyEndedRideIds.add(normalizedRideId);
+    _cancelCallRingTimeout();
+    _stopCallDurationTicker();
+    _currentCallSession = null;
+    _callAcceptedAt = null;
+    _activeCallStartedAt = null;
+    _callDuration = Duration.zero;
+    _removeCallOverlayEntry();
   }
 
   Future<void> _performLocalCallCleanupBody({
@@ -5265,9 +5803,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required String cleanupSource,
     required String endReason,
     bool logCleanup = true,
+    bool force = false,
   }) async {
-    if (_callCleanupDoneRideIds.contains(rideId)) {
-      return;
+    if (!force && _callCleanupDoneRideIds.contains(rideId)) {
+      if (cleanupSource != 'end_tap' &&
+          cleanupSource != 'call_snapshot_terminal') {
+        return;
+      }
+      final stillVisible = _callOverlayEntry != null ||
+          _currentCallSession != null ||
+          _callJoinedChannel ||
+          _callService.isVoiceConnected;
+      if (!stillVisible) {
+        return;
+      }
+      _callCleanupDoneRideIds.remove(rideId);
     }
     final hadVisibleCallState =
         _currentCallSession != null ||
@@ -5280,10 +5830,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     RideCallSession? rtdbSession;
-    try {
-      rtdbSession = await _callService.fetchCall(rideId);
-    } catch (error) {
-      _logRideCall('CALL_CLEANUP_REFETCH_FAIL rideId=$rideId error=$error');
+    if (cleanupSource != 'end_tap') {
+      try {
+        rtdbSession = await _callService.fetchCall(rideId);
+      } catch (error) {
+        _logRideCall('CALL_CLEANUP_REFETCH_FAIL rideId=$rideId error=$error');
+      }
     }
     final remoteState = _callService.isVoiceConnected
         ? 'agora_connected'
@@ -5298,15 +5850,27 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
 
     _callCleanupDoneRideIds.add(rideId);
+    _callNullGraceUntilByRideId.remove(rideId.trim());
+    _callJoinInFlightRideId = null;
+    if (_callUiActiveRideId == rideId.trim()) {
+      _callUiActiveRideId = null;
+    }
 
-    _cancelCallRingTimeout();
-    _stopCallDurationTicker();
-    await _alertSoundService.stopIncomingCallAlert();
-    _callAcceptedAt = null;
-    _callDuration = Duration.zero;
+    if (cleanupSource == 'end_tap') {
+      _tearDownCallUiImmediately(rideId);
+    } else {
+      _cancelCallRingTimeout();
+      _stopCallDurationTicker();
+      _callAcceptedAt = null;
+      _activeCallStartedAt = null;
+      _callDuration = Duration.zero;
+      _currentCallSession = null;
+      _removeCallOverlayEntry();
+    }
+
     _callMuted = false;
     _callSpeakerOn = true;
-    _currentCallSession = null;
+    _isEndingCall = false;
 
     try {
       await _callService.leaveVoiceChannel();
@@ -5315,10 +5879,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     _callJoinedChannel = false;
+    unawaited(_alertSoundService.stopIncomingCallAlert());
     _logRideCall(
       'CALL_UI_CLOSE rideId=$rideId reason=local_cleanup source=$cleanupSource',
     );
-    _removeCallOverlayEntry();
 
     if (hadVisibleCallState) {
       callTraceLog(
@@ -5327,6 +5891,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         role: 'rider',
       );
     }
+
+    _resetCallButtonLoading(reason: 'local_cleanup_$cleanupSource');
 
     if (logCleanup && hadVisibleCallState) {
       _logRideCall(
@@ -5363,6 +5929,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _setStartingVoiceCall(true);
     try {
       callTraceLog('CALL_START_TAP', rideId: rideId, role: 'rider');
+      _resetCallGuardsForNewSession(rideId, source: 'start_voice_call');
+      _extendCallNullGrace(rideId);
       _logRideCall('RIDE_CALL_START rideId=$rideId initiator=rider');
       if (_currentCallSession != null && !_currentCallSession!.isTerminal) {
         _refreshCallOverlayEntry();
@@ -5422,16 +5990,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _handleCallSnapshotUpdate(rideId, result.session);
       }
     } finally {
+      _resetCallButtonLoading(reason: 'start_voice_call_finally');
       final session = _currentCallSession;
       final keepUiVisible = session != null &&
           !session.isTerminal &&
           (session.isRinging || session.isAccepted || _callService.isVoiceConnected);
       if (!keepUiVisible) {
         _resetRideCallUi(reason: 'start_voice_call_finally_no_active_session');
-      } else {
-        _logRideCall(
-          'CALL_UI_RESET_BLOCKED_ACTIVE_SESSION reason=start_voice_call_finally rideId=${session.rideId} status=${session.status}',
-        );
       }
     }
   }
@@ -5463,19 +6028,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
-    try {
-      _logRideCall('[CALL_TOKEN_FETCH_START] rideId=${session.rideId}');
-      await _callService.prefetchAgoraToken(
-        channelId: session.rideId,
-        uid: riderUid,
-      );
-      _logRideCall('[CALL_TOKEN_FETCH_OK] rideId=${session.rideId}');
-    } on RideCallException catch (error) {
-      _logRideCall('[CALL_TOKEN_FETCH_FAIL] rideId=${session.rideId} error=$error');
-      _showSnackBar(error.message);
-      return;
-    }
-
     final accepted = await _callService.acceptCall(
       rideId: session.rideId,
       receiverId: riderUid,
@@ -5485,8 +6037,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRideCall('CALL_UI_RESET reason=accept_call_not_available');
       return;
     }
-    _logRideCall('CALL_UI_ACTIVE_SHOW rideId=${session.rideId} source=accept_tap');
-    _refreshCallOverlayEntry();
+    await _joinAcceptedCall(rideId: session.rideId, uid: riderUid);
   }
 
   Future<void> _declineIncomingCall() async {
@@ -5520,17 +6071,59 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _endOngoingCall() async {
-    final session = _currentCallSession;
-    if (session == null || !session.isAccepted) {
+    if (_isEndingCall) {
+      final debouncedRideId = _activeCallRideId;
+      if (debouncedRideId.isNotEmpty) {
+        callTraceLog(
+          'CALL_END_DEBOUNCED',
+          rideId: debouncedRideId,
+          role: 'rider',
+        );
+      }
       return;
     }
 
-    callTraceLog('CALL_END_TAP', rideId: session.rideId, role: 'rider');
+    final session = _currentCallSession;
+    final rideId = (session?.rideId ?? _activeCallRideId).trim();
+    if (rideId.isEmpty) {
+      return;
+    }
+    final voiceLive = _callJoinedChannel || _callService.isVoiceConnected;
+    if (session == null || (!session.isAccepted && !voiceLive)) {
+      return;
+    }
 
-    await _callService.endAcceptedCall(
-      rideId: session.rideId,
-      endedBy: 'rider',
-    );
+    _isEndingCall = true;
+    callTraceLog('CALL_END_TAP', rideId: rideId, role: 'rider');
+    _tearDownCallUiImmediately(rideId);
+    _callOverlayEntry?.markNeedsBuild();
+
+    unawaited(() async {
+      try {
+        await _performLocalCallCleanup(
+          rideId: rideId,
+          cleanupSource: 'end_tap',
+          endReason: 'user_end_tap',
+        );
+      } catch (error) {
+        _logRideCall('CALL_END_LOCAL_CLEANUP_FAIL rideId=$rideId error=$error');
+        _isEndingCall = false;
+      }
+
+      try {
+        final committed = await _callService.endCallFromUserTap(
+          rideId: rideId,
+          endedBy: 'rider',
+        );
+        if (committed) {
+          callTraceLog('CALL_END_RTDB_OK', rideId: rideId, role: 'rider');
+        } else {
+          _logRideCall('CALL_END_RTDB_FAIL rideId=$rideId reason=not_committed');
+        }
+      } catch (error) {
+        _logRideCall('CALL_END_RTDB_FAIL rideId=$rideId error=$error');
+      }
+    }());
   }
 
   Future<void> _toggleCallMute() async {
@@ -5620,8 +6213,29 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
-    final session = _currentCallSession;
-    final shouldShow = session != null && !session.isTerminal;
+    final rideId = _activeCallRideId;
+    if (rideId.isNotEmpty && _callLocallyEndedRideIds.contains(rideId)) {
+      final activeSession = _currentCallSession;
+      if ((activeSession == null || activeSession.isTerminal) &&
+          !_callJoinedChannel &&
+          !_callService.isVoiceConnected) {
+        _removeCallOverlayEntry();
+        return;
+      }
+      _callLocallyEndedRideIds.remove(rideId.trim());
+    }
+    final voiceLive = _callJoinedChannel || _callService.isVoiceConnected;
+    var session = _currentCallSession;
+    if ((session == null || session.isTerminal) &&
+        voiceLive &&
+        rideId.isNotEmpty &&
+        !_callLocallyEndedRideIds.contains(rideId)) {
+      session = _synthesizeActiveCallSession(rideId);
+      _currentCallSession = session;
+    }
+    final shouldShow = session != null &&
+        !session.isTerminal &&
+        (session.isRinging || session.isAccepted || voiceLive);
     if (!shouldShow) {
       _removeCallOverlayEntry();
       return;
@@ -5647,9 +6261,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _callOverlayEntry!.markNeedsBuild();
   }
 
-  void _removeCallOverlayEntry() {
-    _callOverlayEntry?.remove();
+  void _removeCallOverlayEntry({String? logReason}) {
+    final entry = _callOverlayEntry;
     _callOverlayEntry = null;
+    if (entry == null) {
+      return;
+    }
+    try {
+      if (entry.mounted) {
+        entry.remove();
+        if (logReason != null && logReason.isNotEmpty) {
+          _logRideCall('$logReason rideId=${_activeCallRideId}');
+        }
+      }
+    } catch (error) {
+      _logRideCall(
+        'CALL_OVERLAY_REMOVE_FAIL rideId=${_activeCallRideId} error=$error',
+      );
+    }
   }
 
   Widget _buildRideCallOverlay() {
@@ -5781,31 +6410,38 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                       )
                     else
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
-                          _buildCallControlChip(
-                            label: _callMuted ? 'Unmute' : 'Mute',
-                            icon: _callMuted
-                                ? Icons.mic_off_rounded
-                                : Icons.mic_none_rounded,
-                            active: _callMuted,
-                            onTap: _toggleCallMute,
+                          Expanded(
+                            child: _buildCallControlChip(
+                              label: _callMuted ? 'Unmute' : 'Mute',
+                              icon: _callMuted
+                                  ? Icons.mic_off_rounded
+                                  : Icons.mic_none_rounded,
+                              active: _callMuted,
+                              onTap: _toggleCallMute,
+                            ),
                           ),
-                          _buildCallControlChip(
-                            label: _callSpeakerOn ? 'Speaker' : 'Earpiece',
-                            icon: _callSpeakerOn
-                                ? Icons.volume_up_rounded
-                                : Icons.hearing_rounded,
-                            active: _callSpeakerOn,
-                            onTap: _toggleSpeaker,
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: _buildCallControlChip(
+                              label: _callSpeakerOn ? 'Speaker' : 'Earpiece',
+                              icon: _callSpeakerOn
+                                  ? Icons.volume_up_rounded
+                                  : Icons.hearing_rounded,
+                              active: _callSpeakerOn,
+                              onTap: _toggleSpeaker,
+                            ),
                           ),
-                          _buildCallControlChip(
-                            label: 'End',
-                            icon: Icons.call_end_rounded,
-                            active: true,
-                            backgroundColor: const Color(0xFFE85D4C),
-                            foregroundColor: Colors.white,
-                            onTap: _endOngoingCall,
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: _buildCallControlChip(
+                              label: 'End',
+                              icon: Icons.call_end_rounded,
+                              active: true,
+                              backgroundColor: const Color(0xFFE85D4C),
+                              foregroundColor: Colors.white,
+                              onTap: _isEndingCall ? null : _endOngoingCall,
+                            ),
                           ),
                         ],
                       ),
@@ -6513,34 +7149,53 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildArrivalCountdownCard() {
+    final remainingLabel = _formatCountdown(_countdown);
+    final primaryLine = _waitingCharged || _countdown <= 0
+        ? 'Waiting fee may apply.'
+        : 'Driver waiting timer $remainingLabel';
     return _buildPanelCard(
       backgroundColor: const Color(0xFFFFF3E6),
       borderColor: _panelWarning.withValues(alpha: 0.2),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: _panelWarning.withValues(alpha: 0.14),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Icon(
-              Icons.access_time_filled_rounded,
-              color: _panelWarning,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              _waitingCharged
-                  ? 'Waiting charge applied to this pickup.'
-                  : 'Driver waiting timer ${_formatCountdown(_countdown)}',
-              style: const TextStyle(
-                color: _panelInk,
-                fontWeight: FontWeight.w700,
-                height: 1.35,
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: _panelWarning.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(
+                  Icons.access_time_filled_rounded,
+                  color: _panelWarning,
+                ),
               ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  primaryLine,
+                  style: const TextStyle(
+                    color: _panelInk,
+                    fontWeight: FontWeight.w700,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _waitingCharged
+                ? '₦250 waiting fee has been added to this pickup.'
+                : '₦250 waiting fee may be added after 5 minutes.',
+            style: TextStyle(
+              color: _panelInk.withValues(alpha: 0.78),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              height: 1.35,
             ),
           ),
         ],
@@ -6549,6 +7204,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildSecondaryRideActionButton({
+    Key? buttonKey,
     required String label,
     required IconData icon,
     required VoidCallback? onPressed,
@@ -6563,6 +7219,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final borderColor = filled ? _gold : _gold.withValues(alpha: 0.22);
 
     final button = AnimatedOpacity(
+      key: buttonKey,
       duration: const Duration(milliseconds: 180),
       opacity: enabled ? 1 : 0.58,
       child: Material(
@@ -6656,7 +7313,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required String label,
     required IconData icon,
     required bool active,
-    required Future<void> Function() onTap,
+    Future<void> Function()? onTap,
     Color? backgroundColor,
     Color? foregroundColor,
   }) {
@@ -6668,12 +7325,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     return InkWell(
       borderRadius: BorderRadius.circular(18),
-      onTap: () {
-        unawaited(onTap());
-      },
+      onTap: onTap == null
+          ? null
+          : () {
+              unawaited(onTap());
+            },
       child: Container(
-        width: 88,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 14),
         decoration: BoxDecoration(
           color: effectiveBackground,
           borderRadius: BorderRadius.circular(18),
@@ -7001,11 +7660,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
-    try {
-      await _shareTripRtdbService.syncExistingShare(payload);
-    } catch (error) {
-      _logRideFlow('share sync failed rideId=$rideId error=$error');
-    }
+    // Live share updates are server-side; client only caches callable link.
   }
 
   String _formatCountdown(int totalSeconds) {
@@ -9739,6 +10394,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         }
 
         final data = Map<String, dynamic>.from(raw);
+        _maybeShowDriverPaymentConfirmedPopup(
+          rideId: rideId,
+          rideData: data,
+        );
         _logRiderRideSnapshotReceived(
           rideId: rideId,
           rideData: data,
@@ -9806,20 +10465,22 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           return;
         }
 
-        if (await _releaseExpiredAssignedRideIfNeeded(
-          rideId: rideId,
-          rideData: data,
-          source: 'listener',
-        )) {
-          return;
-        }
+        if (!_rideSnapshotIndicatesCompleted(data)) {
+          if (await _releaseExpiredAssignedRideIfNeeded(
+            rideId: rideId,
+            rideData: data,
+            source: 'listener',
+          )) {
+            return;
+          }
 
-        if (await _autoCancelRideForLifecycleTimeoutIfNeeded(
-          rideId: rideId,
-          rideData: data,
-          source: 'listener',
-        )) {
-          return;
+          if (await _autoCancelRideForLifecycleTimeoutIfNeeded(
+            rideId: rideId,
+            rideData: data,
+            source: 'listener',
+          )) {
+            return;
+          }
         }
 
         final decision = await _resolveVisibleRideStatus(
@@ -9835,7 +10496,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           rideData: data,
           decision: decision,
         );
-        var status = _riderVisibleStatusFromRideData(visibleRideData);
+        var status = decision.status;
         if (TripStateMachine.canonicalStateFromSnapshot(data) ==
             TripLifecycleState.arrived) {
           _logArrivedResolve(
@@ -9994,7 +10655,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
         final nextCanonical =
             TripStateMachine.canonicalStateFromSnapshot(visibleRideData);
-        if (nextCanonical == TripLifecycleState.arrived &&
+        if (status == 'arrived' && _timer?.isActive != true) {
+          _startCountdown();
+        } else if (nextCanonical == TripLifecycleState.arrived &&
             previousCanonical != TripLifecycleState.arrived) {
           _startCountdown();
         } else if (previousCanonical == TripLifecycleState.arrived &&
@@ -10020,12 +10683,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           _stopSafetyMonitoring();
         }
 
-        if (status == 'completed') {
+        if (_rideSnapshotIndicatesCompleted(data) ||
+            _rideSnapshotIndicatesCompleted(visibleRideData) ||
+            status == 'completed') {
+          _logRideFlow('COMPLETE_TRIP_STATUS_RECEIVED rideId=$rideId status=$status');
+          _logRideFlow('RIDER_COMPLETE_TRIP_UI rideId=$rideId');
           _logRideFlow('ride completed rideId=$rideId');
           await _endCallForRideLifecycle(
             rideId: rideId,
             lifecycleReason: 'ride_completed',
           );
+          await _prepareUiCleanupBeforeTripReset(rideId);
           await _clearStaleActiveTripArtifacts(
             rideId: rideId,
             reason: 'ride_completed',
@@ -10069,12 +10737,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               ),
             );
           } else if (rateDriverId != null && mounted) {
-            Future<void>.microtask(() => _showRatingDialog(rateDriverId));
+            _logRideFlow('RIDER_RATE_DRIVER_PROMPT rideId=$rideId driverId=$rateDriverId');
+            Future<void>.microtask(
+              () => _showRatingDialog(
+                rideId: rideId,
+                driverId: rateDriverId,
+              ),
+            );
           }
-        } else if (status == 'cancelled' ||
-            status == 'driver_cancelled' ||
-            status == 'rider_cancelled' ||
-            status == 'expired') {
+        } else if (!_rideSnapshotIndicatesCompleted(data) &&
+            !_rideSnapshotIndicatesCompleted(visibleRideData) &&
+            status != 'completed' &&
+            (status == 'cancelled' ||
+                status == 'driver_cancelled' ||
+                status == 'rider_cancelled' ||
+                status == 'expired')) {
           if (!_isCancellingRide) {
             callTraceLog(
               'CANCEL_REMOTE_RECEIVED',
@@ -10091,6 +10768,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             rideId: rideId,
             lifecycleReason: 'ride_cancelled_${_valueAsText(data['cancel_reason'])}',
           );
+          if (_valueAsText(data['cancel_reason']) == 'driver_cancelled') {
             _logRideFlow('[RIDER_DRIVER_CANCELLED] rideId=$rideId');
           }
           _logRideFlow('[RIDER_TERMINAL_STATE] rideId=$rideId status=cancelled');
@@ -10473,6 +11151,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   Future<void> _resetRideState({required bool clearDestination}) async {
     _logRideFlow('resetRideState clearDestination=$clearDestination');
+    final resetRideId = _currentRideId ?? _callListenerRideId ?? '';
+    if (resetRideId.trim().isNotEmpty) {
+      _logRideFlow(
+        'COMPLETE_TRIP_UI_RESET_SAFE rideId=${resetRideId.trim()}',
+      );
+    }
     _resetRiderListenerApplyDedup();
     _clearBankTransferDetailsFutureCache();
     final rideId = _currentRideId ?? _callListenerRideId ?? '';
@@ -10640,10 +11324,34 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     });
   }
 
+  int? _arrivalWaitAnchorMs(Map<String, dynamic>? rideData) {
+    if (rideData == null || rideData.isEmpty) {
+      return null;
+    }
+    for (final key in <String>[
+      'wait_started_at',
+      'waitStartedAt',
+      'driver_arrived_at',
+      'driverArrivedAt',
+      'arrived_at',
+      'arrivedAt',
+    ]) {
+      final raw = rideData[key];
+      if (raw is bool) {
+        continue;
+      }
+      final parsed = _asInt(raw);
+      if (parsed != null && parsed > 0) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
   void _syncArrivalCountdownFromRide() {
     final rideData = _currentRideSnapshot;
-    final graceUntil = _asInt(rideData?['wait_fee_grace_until']) ?? 0;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final graceUntil = _asInt(rideData?['wait_fee_grace_until']) ?? 0;
     if (graceUntil > nowMs) {
       _countdown = ((graceUntil - nowMs) / 1000).ceil().clamp(
         0,
@@ -10651,6 +11359,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       return;
     }
+
+    final anchorMs = _arrivalWaitAnchorMs(rideData);
+    if (anchorMs != null && anchorMs > 0) {
+      final expiresAtMs = anchorMs + _countdownDuration.inMilliseconds;
+      _countdown = ((expiresAtMs - nowMs) / 1000).ceil().clamp(
+        0,
+        _countdownDuration.inSeconds,
+      );
+      if (_countdown <= 0) {
+        _waitingCharged =
+            rideData?['wait_fee_applied'] == true || _waitingCharged;
+      }
+      return;
+    }
+
     _countdown = 0;
   }
 
@@ -11356,7 +12079,76 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _shareTrip() async {
+  ShareTripLink _shareTripLinkFromToken({
+    required String rideId,
+    required String token,
+  }) {
+    return ShareTripLink(
+      token: token,
+      url: '${ShareTripRtdbService.shareBaseUrl}/'
+          '${Uri.encodeComponent(rideId)}'
+          '?token=${Uri.encodeQueryComponent(token)}',
+      expiresAt: DateTime.now()
+          .add(ShareTripRtdbService.shareLifetime)
+          .millisecondsSinceEpoch,
+    );
+  }
+
+  Future<ShareTripLink?> _resolveShareTripLink({
+    required String rideId,
+    Map<String, dynamic>? rideData,
+  }) async {
+    final cached = _cachedShareLinkByRideId[rideId];
+    if (cached != null) {
+      return cached;
+    }
+
+    final trackToken = _valueAsText(rideData?['track_token']);
+    if (trackToken.isNotEmpty) {
+      final link = _shareTripLinkFromToken(rideId: rideId, token: trackToken);
+      _cachedShareLinkByRideId[rideId] = link;
+      return link;
+    }
+
+    _logRideFlow('SHARE_TRIP_CALLABLE_START rideId=$rideId');
+    try {
+      final tokenResp = await _rideCloud.createTripShareToken(rideId: rideId);
+      if (!riderRideCallableSucceeded(tokenResp)) {
+        _logRideFlow(
+          'SHARE_TRIP_CALLABLE_FAIL rideId=$rideId '
+          'reason=${riderRideCallableReason(tokenResp)}',
+        );
+        return null;
+      }
+      final token = tokenResp['track_token']?.toString().trim() ?? '';
+      if (token.isEmpty) {
+        _logRideFlow(
+          'SHARE_TRIP_CALLABLE_FAIL rideId=$rideId reason=missing_track_token',
+        );
+        return null;
+      }
+      final link = _shareTripLinkFromToken(rideId: rideId, token: token);
+      _cachedShareLinkByRideId[rideId] = link;
+      _logRideFlow('SHARE_TRIP_CALLABLE_OK rideId=$rideId');
+      return link;
+    } catch (error) {
+      _logRideFlow('SHARE_TRIP_CALLABLE_FAIL rideId=$rideId error=$error');
+      return null;
+    }
+  }
+
+  Rect _shareTripShareOrigin({Rect? override}) {
+    if (!mounted) {
+      return const Rect.fromLTWH(0, 0, 1, 1);
+    }
+    return safeShareOrigin(
+      context,
+      buttonKey: _shareTripButtonKey,
+      override: override,
+    );
+  }
+
+  Future<void> _shareTrip({Rect? sharePositionOrigin}) async {
     final rideId = _currentRideId;
     if (rideId == null || rideId.isEmpty || _isSharingTrip) {
       return;
@@ -11391,49 +12183,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
       _currentRideSnapshot = latestRideData ?? _currentRideSnapshot;
 
-      ShareTripLink? shareLink;
-      try {
-        shareLink = await _shareTripRtdbService
-            .ensureShare(payload)
-            .timeout(const Duration(seconds: 10));
-        _logRideFlow('[SHARE_TRIP_LINK_OK] rideId=$rideId');
-      } catch (error) {
-        _logRideFlow(
-          '[SHARE_TRIP_LINK_FAIL] rideId=$rideId error=$error',
-        );
-        try {
-          final tokenResp =
-              await _rideCloud.createTripShareToken(rideId: rideId);
-          if (riderRideCallableSucceeded(tokenResp)) {
-            final token = tokenResp['track_token']?.toString().trim() ?? '';
-            if (token.isNotEmpty) {
-              shareLink = ShareTripLink(
-                token: token,
-                url: '${ShareTripRtdbService.shareBaseUrl}/'
-                    '${Uri.encodeComponent(rideId)}'
-                    '?token=${Uri.encodeQueryComponent(token)}',
-                expiresAt: DateTime.now()
-                    .add(ShareTripRtdbService.shareLifetime)
-                    .millisecondsSinceEpoch,
-              );
-              _logRideFlow(
-                '[SHARE_TRIP_LINK_OK] rideId=$rideId source=createTripShareToken',
-              );
-            }
-          } else {
-            _logRideFlow(
-              '[SHARE_TRIP_LINK_FAIL] rideId=$rideId '
-              'reason=${riderRideCallableReason(tokenResp)} '
-              'source=createTripShareToken',
-            );
-          }
-        } catch (callableError) {
-          _logRideFlow(
-            '[SHARE_TRIP_LINK_FAIL] rideId=$rideId error=$callableError '
-            'source=createTripShareToken',
-          );
-        }
-      }
+      final shareLink = await _resolveShareTripLink(
+        rideId: rideId,
+        rideData: latestRideData,
+      );
 
       final shareStops = payload.stops;
       final stopLines = shareStops
@@ -11474,10 +12227,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           ..writeln(stopLines);
       }
 
-      _logRideFlow('share trip triggered rideId=$rideId');
+      final origin = _shareTripShareOrigin(override: sharePositionOrigin);
+      _logRideFlow('SHARE_TRIP_SHEET_OPENED rideId=$rideId');
       await Share.share(
         shareText.toString().trim(),
         subject: 'NexRide live trip $rideId',
+        sharePositionOrigin: origin,
       );
     } catch (error) {
       _logRideFlow('[SHARE_TRIP_FAIL] rideId=$rideId error=$error');
@@ -11501,78 +12256,53 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     _logRideFlow('SOS tapped rideId=$rideId status=$_rideStatus');
 
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    final rideData = _currentRideSnapshot ?? <String, dynamic>{};
+    final pickup = _asStringDynamicMap(rideData['pickup']) ?? <String, dynamic>{};
+    final destination =
+        _asStringDynamicMap(rideData['destination']) ??
+        _asStringDynamicMap(rideData['dropoff']) ??
+        <String, dynamic>{};
+    final riderId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final driverId = _firstNonEmptyText(<dynamic>[
+      rideData['driver_id'],
+      rideData['driverId'],
+      rideData['matched_driver_id'],
+    ]);
+    double? readCoord(Map<String, dynamic> map, String key) {
+      final v = map[key];
+      if (v is num) {
+        return v.toDouble();
+      }
+      return double.tryParse('$v');
+    }
+
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => SosReportScreen(
+          rideId: rideId,
+          riderId: riderId,
+          driverId: driverId,
+          tripStatus: _rideStatus,
+          pickupLabel: _firstNonEmptyText(<dynamic>[
+            pickup['address'],
+            pickup['name'],
+          ], fallback: 'Pickup'),
+          destinationLabel: _firstNonEmptyText(<dynamic>[
+            destination['address'],
+            destination['name'],
+          ], fallback: 'Destination'),
+          pickupLat: readCoord(pickup, 'lat') ?? readCoord(pickup, 'latitude'),
+          pickupLng: readCoord(pickup, 'lng') ?? readCoord(pickup, 'longitude'),
+          destinationLat:
+              readCoord(destination, 'lat') ?? readCoord(destination, 'latitude'),
+          destinationLng:
+              readCoord(destination, 'lng') ?? readCoord(destination, 'longitude'),
+          currentLat: _riderLocation.latitude,
+          currentLng: _riderLocation.longitude,
+          shareButtonKey: _shareTripButtonKey,
+          onShareLiveTrip: (origin) => _shareTrip(sharePositionOrigin: origin),
+        ),
       ),
-      builder: (sheetContext) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const ListTile(
-                  title: Text(
-                    'Emergency actions',
-                    style: TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                  subtitle: Text('Choose the safest option for this trip.'),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.call, color: Colors.red),
-                  title: const Text('Call emergency contact'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    safeShowSnackBar(
-                      context,
-                      'No emergency contact is configured yet. Please call local emergency services immediately.',
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.share, color: _gold),
-                  title: const Text('Share live trip'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    unawaited(_shareTrip());
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.warning_amber, color: Colors.red),
-                  title: const Text('Emergency help / alert'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    safeShowSnackBar(
-                      context,
-                      'Emergency help is not connected yet. Please call local emergency services now.',
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.support_agent, color: _gold),
-                  title: const Text('Contact support team'),
-                  subtitle: Text(
-                    'Email $kNexRideSupportEmail — include your ride ID if you can.',
-                  ),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    final id = rideId;
-                    safeShowSnackBar(
-                      context,
-                      id.isEmpty
-                          ? 'Support: email $kNexRideSupportEmail with your account phone number, or use your trip receipt after the ride ends.'
-                          : 'Support: email $kNexRideSupportEmail and reference ride ID $id.',
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 
@@ -12450,38 +13180,110 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _submitRating(String driverId, double rating) async {
-    final rideId = _currentRideId;
-    if (rideId == null || rideId.isEmpty) {
+  void _markRatingRideHandled(String rideId, {required String source}) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
       return;
     }
-    try {
-      final cloud =
-          await _rideCloud.submitTripRating(rideId: rideId, rating: rating);
-      if (cloud['success'] != true && cloud['reason'] != 'already_submitted') {
-        _logRideFlow(
-          'RATING_SUBMIT_FAIL rideId=$rideId driverId=$driverId '
-          'reason=${cloud['reason']}',
-        );
-      }
-    } catch (error) {
+    if (!_ratingHandledRideIds.contains(normalizedRideId)) {
       _logRideFlow(
-        'RATING_SUBMIT_FAIL rideId=$rideId driverId=$driverId error=$error',
+        'RATING_RIDE_HANDLED rideId=$normalizedRideId source=$source',
       );
+    }
+    _ratingHandledRideIds.add(normalizedRideId);
+  }
+
+  void _closeRatingDialogSafely(BuildContext dialogContext) {
+    if (!dialogContext.mounted) {
+      return;
+    }
+    final navigator = Navigator.of(dialogContext, rootNavigator: true);
+    if (navigator.canPop()) {
+      _logRideFlow('RATING_SHEET_CLOSE_SAFE');
+      navigator.pop();
     }
   }
 
-  void _showRatingDialog(String driverId) {
+  Future<void> _submitDriverRatingAfterTrip({
+    required String rideId,
+    required String driverId,
+    required double rating,
+  }) async {
+    final normalizedRideId = rideId.trim();
+    final normalizedDriverId = driverId.trim();
+    if (normalizedRideId.isEmpty || normalizedDriverId.isEmpty) {
+      return;
+    }
+    _logRideFlow(
+      'RIDER_RATE_DRIVER_SUBMIT_START rideId=$normalizedRideId driverId=$normalizedDriverId',
+    );
+    try {
+      final riderUid = _currentRiderUid?.trim() ?? '';
+      final cloud = await _rideCloud.submitTripRating(
+        rideId: normalizedRideId,
+        rating: rating,
+        driverId: normalizedDriverId,
+        targetId: normalizedDriverId,
+        riderId: riderUid.isNotEmpty ? riderUid : null,
+      );
+      final ok = cloud['success'] == true ||
+          cloud['reason']?.toString() == 'already_submitted';
+      if (!ok) {
+        _logRideFlow(
+          'RIDER_RATE_DRIVER_SUBMIT_FAIL rideId=$normalizedRideId '
+          'driverId=$normalizedDriverId reason=${cloud['reason']}',
+        );
+        if (mounted) {
+          _showSnackBar('Unable to save driver rating right now.');
+        }
+        return;
+      }
+      _logRideFlow(
+        'RIDER_RATE_DRIVER_SUBMIT_OK rideId=$normalizedRideId driverId=$normalizedDriverId',
+      );
+      if (mounted) {
+        _showSnackBar('Driver rating saved.');
+      }
+    } catch (error) {
+      _logRideFlow(
+        'RIDER_RATE_DRIVER_SUBMIT_FAIL rideId=$normalizedRideId '
+        'driverId=$normalizedDriverId error=$error',
+      );
+      if (mounted) {
+        _showSnackBar('Unable to save driver rating right now.');
+      }
+    } finally {
+      _markRatingRideHandled(normalizedRideId, source: 'rider_submit_attempt');
+    }
+  }
+
+  void _showRatingDialog({
+    required String rideId,
+    required String driverId,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty ||
+        _ratingHandledRideIds.contains(normalizedRideId)) {
+      return;
+    }
+    _markRatingRideHandled(normalizedRideId, source: 'rider_prompt_show');
+    _logRideFlow(
+      'RATING_UI_CONTEXT_SAFE rideId=$rideId driverId=$driverId mounted=$mounted',
+    );
     var rating = 5.0;
 
     showDialog<void>(
       context: context,
+      useRootNavigator: true,
       barrierDismissible: false,
-      builder: (_) {
+      builder: (dialogContext) {
         return AlertDialog(
           title: const Text('Rate Driver'),
           content: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (contentContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -12516,11 +13318,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           ),
           actions: [
             TextButton(
-              onPressed: () async {
-                await _submitRating(driverId, rating);
-                if (mounted) {
-                  Navigator.of(context).pop();
-                }
+              onPressed: () {
+                final submittedRating = rating;
+                _closeRatingDialogSafely(dialogContext);
+                unawaited(
+                  _submitDriverRatingAfterTrip(
+                    rideId: rideId,
+                    driverId: driverId,
+                    rating: submittedRating,
+                  ),
+                );
               },
               child: const Text('Submit'),
             ),
@@ -12757,12 +13564,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             if (!collapsed && _canShareTrip) ...[
               const SizedBox(height: 10),
               _buildSecondaryRideActionButton(
+                buttonKey: _shareTripButtonKey,
                 label: 'Share trip',
                 icon: Icons.share_outlined,
                 filled: true,
                 busy: _isSharingTrip,
                 onPressed: () {
-                  unawaited(_shareTrip());
+                  final origin = _shareTripShareOrigin();
+                  unawaited(_shareTrip(sharePositionOrigin: origin));
                 },
               ),
             ],

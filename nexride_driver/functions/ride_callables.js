@@ -120,6 +120,8 @@ function normalizeCanonicalTripState(raw) {
     in_progress: TRIP_STATE.on_trip,
     trip_started: TRIP_STATE.on_trip,
     completed: TRIP_STATE.completed,
+    trip_completed: TRIP_STATE.completed,
+    complete: TRIP_STATE.completed,
     cancelled: TRIP_STATE.cancelled,
     expired: TRIP_STATE.expired,
   };
@@ -1666,18 +1668,47 @@ function paymentAllowsFanout(ride) {
 /** True when ride has settled online payment credentials (trip completion / wallet credit). */
 function rideHasVerifiedOnlinePayment(ride) {
   if (!ride || typeof ride !== "object") return false;
+  if (ride.payment_verified === true) return true;
+  if (ride.payment_confirmed === true) return true;
+  if (ride.payment_confirmed_by_driver === true) return true;
+  if (ride.driver_confirmed_rider_payment === true) return true;
+  if (ride.driver_marked_paid === true) return true;
   const ps = String(ride.payment_status ?? ride.paymentStatus ?? "")
     .trim()
     .toLowerCase();
+  const driverConfirmedStatuses = new Set([
+    "confirmed",
+    "driver_confirmed",
+    "paid",
+    "verified",
+    "card_captured",
+    "pending_transfer",
+  ]);
+  if (driverConfirmedStatuses.has(ps)) {
+    const method = normalizedPaymentMethod(ride);
+    if (
+      method === "bank_transfer" ||
+      method === "flutterwave_va" ||
+      method === "bank" ||
+      ride.driver_marked_paid === true ||
+      ride.driver_confirmed_rider_payment === true ||
+      ride.payment_verified === true ||
+      ride.payment_confirmed_by_driver === true ||
+      ps === "pending_transfer"
+    ) {
+      return true;
+    }
+  }
   const ptid = String(ride.payment_transaction_id ?? ride.flw_tx_id ?? "").trim();
   if ((ps === "verified" || ps === "paid" || ps === "card_captured") && Boolean(ptid)) {
     return true;
   }
   if (cardPayment.isCardPaymentMethod(ride.payment_method ?? ride.paymentMethod)) {
-    return cardPayment.CARD_AUTHORIZED_STATUSES.has(ps) && Boolean(ptid);
+    if (cardPayment.CARD_AUTHORIZED_STATUSES.has(ps) && Boolean(ptid)) {
+      return true;
+    }
+    return cardPayment.CARD_AUTHORIZED_STATUSES.has(ps) && ride.driver_confirmed_rider_payment === true;
   }
-  // Driver attestation for card-on-file, bank transfer, or delayed capture.
-  if (ride.driver_confirmed_rider_payment === true) return true;
   return false;
 }
 
@@ -5035,6 +5066,17 @@ async function completeTrip(data, context, db) {
   const financeBreakdown = rideFinance.computeRideFinanceBreakdown(preRide || {}, {
     commissionExempt: commissionPolicy.exempt,
   });
+  if (preRide) {
+    console.log(
+      "COMPLETE_TRIP_PAYMENT_CHECK",
+      `rideId=${rideId}`,
+      `payment_status=${String(preRide.payment_status ?? preRide.paymentStatus ?? "")}`,
+      `payment_verified=${preRide.payment_verified === true}`,
+      `payment_confirmed=${preRide.payment_confirmed === true}`,
+      `payment_confirmed_by_driver=${preRide.payment_confirmed_by_driver === true}`,
+      `driver_confirmed=${preRide.driver_confirmed_rider_payment === true}`,
+    );
+  }
   if (preRide && cardPayment.isCardPaymentMethod(preRide.payment_method ?? preRide.paymentMethod)) {
     const capture = await cardPayment.captureRideCardOnCompletion({
       db,
@@ -5042,6 +5084,11 @@ async function completeTrip(data, context, db) {
       ride: preRide,
     });
     if (!capture.ok) {
+      console.log(
+        "COMPLETE_TRIP_FAIL",
+        `rideId=${rideId}`,
+        `reason=${capture.reason || "card_capture_failed"}`,
+      );
       return { success: false, reason: capture.reason || "card_capture_failed" };
     }
   }
@@ -5056,12 +5103,16 @@ async function completeTrip(data, context, db) {
       reason = "ride_missing";
       return;
     }
-    if (normUid(cur.driver_id) !== driverId) {
+    if (rideAssignedDriverUid(cur) !== driverId) {
       reason = "not_assigned_driver";
       return;
     }
     const ts = String(cur.trip_state ?? "").trim().toLowerCase();
-    if (ts === TRIP_STATE.completed || ts === "trip_completed") {
+    if (
+      ts === TRIP_STATE.completed ||
+      ts === "trip_completed" ||
+      ts === "complete"
+    ) {
       return cur;
     }
     if (ts !== TRIP_STATE.in_progress && ts !== "trip_started") {
@@ -5070,6 +5121,14 @@ async function completeTrip(data, context, db) {
     }
     if (!rideHasVerifiedOnlinePayment(cur)) {
       reason = "payment_not_verified";
+      console.log(
+        "COMPLETE_TRIP_FAIL",
+        `rideId=${rideId}`,
+        "reason=payment_not_verified",
+        `payment_status=${String(cur.payment_status ?? "")}`,
+        `payment_verified=${cur.payment_verified === true}`,
+        `driver_confirmed=${cur.driver_confirmed_rider_payment === true}`,
+      );
       return;
     }
     const now = nowMs();
@@ -5094,8 +5153,12 @@ async function completeTrip(data, context, db) {
   if (tx.committed) {
     committed = true;
     postRide = tx.snapshot.val();
+    console.log(
+      "COMPLETE_TRIP_STATUS_RECEIVED",
+      `rideId=${rideId} trip_state=${postRide?.trip_state ?? ""} status=${postRide?.status ?? ""}`,
+    );
   } else if (reason === "ride_missing" && preRideSnap.exists() && preRide) {
-    if (normUid(preRide.driver_id) !== driverId) {
+    if (rideAssignedDriverUid(preRide) !== driverId) {
       reason = "not_assigned_driver";
     } else {
       const ts = String(preRide.trip_state ?? "").trim().toLowerCase();
@@ -5134,10 +5197,28 @@ async function completeTrip(data, context, db) {
     }
   }
   if (!committed) {
+    console.log("COMPLETE_TRIP_FAIL", `rideId=${rideId}`, `reason=${reason}`);
     return { success: false, reason };
   }
+  console.log("COMPLETE_TRIP_SUCCESS", `rideId=${rideId}`, `driverId=${driverId}`);
   const ride = postRide;
+  try {
+    const { persistRideTerminalHistory } = require("./trip_history_persistence");
+    await persistRideTerminalHistory(db, rideId, ride);
+  } catch (histErr) {
+    console.log(
+      "TRIP_HISTORY_PERSIST_FAIL",
+      `rideId=${rideId}`,
+      histErr?.message ?? histErr,
+    );
+  }
   const riderId = normUid(ride?.rider_id);
+  console.log(
+    "COMPLETE_TRIP_VERIFY_STATE",
+    `rideId=${rideId}`,
+    `status=${String(ride?.status ?? "")}`,
+    `trip_state=${String(ride?.trip_state ?? "")}`,
+  );
   await clearActiveTripPointers(db, rideId, riderId, driverId);
   try {
     const { releaseAssignmentLocks } = require("./dispatch_engine/dispatch_assignment_lock_engine");
@@ -5261,6 +5342,28 @@ function isCancelRideTerminalState(cur) {
   );
 }
 
+/** Rider cancel blocked once trip has started or reached terminal states. */
+function isRiderCancelTripStarted(cur) {
+  const tsState = String(cur?.trip_state ?? "").trim().toLowerCase();
+  const status = String(cur?.status ?? "").trim().toLowerCase();
+  const blockedStates = new Set([
+    TRIP_STATE.arrived,
+    TRIP_STATE.on_trip,
+    TRIP_STATE.in_progress,
+    TRIP_STATE.completed,
+    TRIP_STATE.cancelled,
+    "trip_started",
+    "in_progress",
+    "on_trip",
+    "arrived",
+    "completed",
+    "cancelled",
+    "trip_completed",
+    "trip_cancelled",
+  ]);
+  return blockedStates.has(tsState) || blockedStates.has(status);
+}
+
 /** Driver cancel auth: canonical assignee plus legacy driver_id when not a placeholder. */
 function isCancelRideDriverActor(cur, uid) {
   const assigned = canonicalAssignedDriverId(cur);
@@ -5303,6 +5406,9 @@ function evaluateCancelRideTransition(cur, uid, isAdmin, cancelReason) {
   if (!isRider && !isDriver && !isAdminActor) {
     return { ok: false, reason: "forbidden" };
   }
+  if (isRider && isRiderCancelTripStarted(cur)) {
+    return { ok: false, reason: "trip_already_started" };
+  }
   if (isCancelRideTerminalState(cur)) {
     return { ok: false, reason: "already_terminal" };
   }
@@ -5329,6 +5435,16 @@ function evaluateCancelRideTransition(cur, uid, isAdmin, cancelReason) {
 }
 
 async function applyCancelRidePostCommit(db, rideId, v, uid, cancelReason) {
+  try {
+    const { persistRideTerminalHistory } = require("./trip_history_persistence");
+    await persistRideTerminalHistory(db, rideId, v);
+  } catch (histErr) {
+    console.log(
+      "TRIP_HISTORY_PERSIST_FAIL",
+      `rideId=${rideId}`,
+      histErr?.message ?? histErr,
+    );
+  }
   const rider = normUid(v?.rider_id ?? v?.riderId);
   const drv =
     canonicalAssignedDriverId(v) ||
@@ -5515,6 +5631,19 @@ async function expireRideRequest(data, context, db) {
   });
   if (!tx.committed) {
     return { success: false, reason };
+  }
+  const expiredRide = rideDocFromSnapshot(tx.snapshot);
+  if (expiredRide) {
+    try {
+      const { persistRideTerminalHistory } = require("./trip_history_persistence");
+      await persistRideTerminalHistory(db, rideId, expiredRide);
+    } catch (histErr) {
+      console.log(
+        "TRIP_HISTORY_PERSIST_FAIL",
+        `rideId=${rideId}`,
+        histErr?.message ?? histErr,
+      );
+    }
   }
   await clearFanoutAndOffers(db, rideId);
   if (uid) {
@@ -6110,6 +6239,25 @@ async function driverUpdateLiveLocation(data, context, db) {
   });
 
   await db.ref().update(paths);
+
+  try {
+    const activeRideId = String(
+      d.latest_trip_ride_id ??
+        d.active_ride_id ??
+        d.activeRideId ??
+        d.current_ride_id ??
+        "",
+    ).trim();
+    if (activeRideId) {
+      await syncRideTrackPublic(db, activeRideId);
+    }
+  } catch (trackErr) {
+    console.log(
+      "SHARE_PUBLIC_SYNC_FAIL",
+      `driverId=${driverId}`,
+      String(trackErr?.message || trackErr),
+    );
+  }
 
   try {
     const {

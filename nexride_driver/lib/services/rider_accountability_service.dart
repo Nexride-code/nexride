@@ -1,4 +1,5 @@
 import 'package:firebase_database/firebase_database.dart' as rtdb;
+import 'package:flutter/foundation.dart';
 
 import 'ride_cloud_functions_service.dart';
 import 'support_ticket_bridge_service.dart';
@@ -143,67 +144,56 @@ class RiderAccountabilityService {
     required double rating,
     String? note,
   }) async {
-    try {
-      await RideCloudFunctionsService().submitTripRating(
-        rideId: rideId,
-        rating: rating,
-        role: 'driver',
-      );
-    } catch (_) {
-      /* accountability RTDB path remains best-effort */
+    final normalizedRideId = rideId.trim();
+    final normalizedRiderId = riderId.trim();
+    final normalizedDriverId = driverId.trim();
+    if (normalizedRideId.isEmpty ||
+        normalizedRiderId.isEmpty ||
+        normalizedDriverId.isEmpty) {
+      throw StateError('missing_rating_context');
     }
 
-    final ratingRef = _rootRef.child('rider_ratings/$riderId').push();
-    await ratingRef.set(<String, dynamic>{
-      'ratingId': ratingRef.key,
-      'rideId': rideId,
-      'riderId': riderId,
-      'driverId': driverId,
-      'serviceType': serviceType,
-      'rating': rating,
-      'message': (note ?? '').trim(),
-      'createdAt': rtdb.ServerValue.timestamp,
-      'updatedAt': rtdb.ServerValue.timestamp,
-    });
+    debugPrint(
+      'DRIVER_RATE_RIDER_BEFORE_CALLABLE rideId=$normalizedRideId '
+      'callable=submitTripRating region=us-central1',
+    );
 
-    final reputationRef = _rootRef.child('rider_reputation/$riderId');
-    final transactionResult =
-        await reputationRef.runTransaction((Object? currentData) {
-      final current = _map(currentData);
-      final currentRating = _toDouble(current['averageRating']) ?? 5.0;
-      final ratingCount = _toInt(current['ratingCount']) ?? 0;
-      final nextRating =
-          ((currentRating * ratingCount) + rating) / (ratingCount + 1);
-      return rtdb.Transaction.success(<String, dynamic>{
-        ...current,
-        'riderId': riderId,
-        'verificationType': _firstNonEmpty(<dynamic>[
-          current['verificationType'],
-        ], fallback: 'reputation'),
-        'provider': _firstNonEmpty(<dynamic>[
-          current['provider'],
-        ], fallback: 'nexride_reputation_engine'),
-        'providerReference': _firstNonEmpty(<dynamic>[
-          current['providerReference'],
-        ], fallback: riderId),
-        'status': 'active',
-        'result': 'stable',
-        'averageRating': double.parse(nextRating.toStringAsFixed(2)),
-        'ratingCount': ratingCount + 1,
-        'lastRatingAt': rtdb.ServerValue.timestamp,
-        'updatedAt': rtdb.ServerValue.timestamp,
-        'createdAt': current['createdAt'] ?? rtdb.ServerValue.timestamp,
-      });
-    });
-    final updatedReputation = _map(transactionResult.snapshot.value);
+    Map<String, dynamic> cloud = const <String, dynamic>{};
+    try {
+      cloud = await RideCloudFunctionsService().submitTripRating(
+        rideId: normalizedRideId,
+        rating: rating,
+        role: 'driver',
+        riderId: normalizedRiderId,
+        driverId: normalizedDriverId,
+        targetId: normalizedRiderId,
+        note: note,
+      );
+    } catch (error) {
+      debugPrint(
+        'DRIVER_RATE_RIDER_AFTER_CALLABLE rideId=$normalizedRideId ok=false error=$error',
+      );
+      throw StateError('rating_callable_failed');
+    }
 
-    await _rootRef
-        .child('users/$riderId/trustSummary')
-        .update(<String, dynamic>{
-      'rating': updatedReputation['averageRating'] ?? rating,
-      'ratingCount': updatedReputation['ratingCount'] ?? 1,
-      'updatedAt': rtdb.ServerValue.timestamp,
-    });
+    debugPrint(
+      'DRIVER_RATE_RIDER_AFTER_CALLABLE rideId=$normalizedRideId '
+      'success=${cloud['success']} reason=${cloud['reason']}',
+    );
+
+    final cloudOk = cloud['success'] == true;
+    final alreadySubmitted = cloud['reason']?.toString() == 'already_submitted';
+    if (!cloudOk && !alreadySubmitted) {
+      debugPrint(
+        'DRIVER_RATE_RIDER_SUBMIT_FAIL rideId=$normalizedRideId reason=${cloud['reason']}',
+      );
+      throw StateError(cloud['reason']?.toString() ?? 'rating_submit_failed');
+    }
+
+    debugPrint(
+      'DRIVER_RATE_RIDER_SUBMIT_OK rideId=$normalizedRideId '
+      'idempotent=$alreadySubmitted archived=${cloud['archived_ride'] == true}',
+    );
   }
 
   Future<void> submitRiderReport({

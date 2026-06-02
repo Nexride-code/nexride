@@ -151,7 +151,29 @@ function tripPhaseAndStatus(ride) {
   return { trip_phase: "searching", trip_status: "Finding a driver" };
 }
 
-function buildPublicDoc(ride, driverProfile, userProfile) {
+function routePathFromRide(ride) {
+  if (!ride || typeof ride !== "object") return [];
+  const route = ride.route && typeof ride.route === "object" ? ride.route : null;
+  const path = route?.path;
+  if (Array.isArray(path) && path.length >= 2) {
+    return path
+      .map((p) => {
+        if (!p || typeof p !== "object") return null;
+        const lat = Number(p.lat ?? p.latitude ?? NaN);
+        const lng = Number(p.lng ?? p.longitude ?? NaN);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        return { lat, lng };
+      })
+      .filter(Boolean);
+  }
+  const polyline = String(ride.route_polyline ?? ride.polyline ?? "").trim();
+  if (polyline) {
+    return [{ encoded: polyline.slice(0, 12000) }];
+  }
+  return [];
+}
+
+function buildPublicDoc(ride, driverProfile, userProfile, rideIdOverride) {
   const { trip_phase, trip_status } = tripPhaseAndStatus(ride);
   const etaRaw = Number(ride.eta_min ?? ride.duration_min ?? 0);
   const eta_min = Number.isFinite(etaRaw) && etaRaw > 0 ? Math.round(etaRaw) : 0;
@@ -166,29 +188,61 @@ function buildPublicDoc(ride, driverProfile, userProfile) {
   const live = ride.live_location && typeof ride.live_location === "object" ? ride.live_location : {};
   const driverLat = Number(live.lat ?? ride.driver_lat ?? 0);
   const driverLng = Number(live.lng ?? ride.driver_lng ?? 0);
+  const driverHeading = Number(live.heading ?? ride.driver_heading ?? ride.heading ?? NaN);
   const pickupLat = Number(pickup.lat ?? pickup.latitude ?? 0);
   const pickupLng = Number(pickup.lng ?? pickup.longitude ?? 0);
   const destinationLat = Number(destination.lat ?? destination.latitude ?? 0);
   const destinationLng = Number(destination.lng ?? destination.longitude ?? 0);
   const fare = Number(ride.fare ?? 0) || 0;
 
+  const routePath = routePathFromRide(ride);
+  const tripState = String(ride.trip_state ?? ride.tripState ?? "").trim().toLowerCase();
   return {
     trip_status,
     trip_phase,
+    trip_state: tripState || trip_phase,
     pickup_area: pickupAreaFromRide(ride),
     dropoff_area: dropoffAreaFromRide(ride),
     eta_min,
     vehicle_label: hasDriver ? vehicleLabelFromDriver(driverProfile) : "",
     driver_first_name: hasDriver ? firstNameFromDriverAndUser(driverProfile, userProfile) : null,
     phase: trip_phase,
-    ride_id: String(ride.ride_id ?? "").trim() || null,
+    ride_id:
+      String(rideIdOverride ?? ride.ride_id ?? ride.rideId ?? "").trim() || null,
     driver_name: hasDriver ? firstNameFromDriverAndUser(driverProfile, userProfile) : null,
     driver_lat: Number.isFinite(driverLat) ? driverLat : null,
     driver_lng: Number.isFinite(driverLng) ? driverLng : null,
+    driver_heading: Number.isFinite(driverHeading) ? driverHeading : null,
     pickup_lat: Number.isFinite(pickupLat) ? pickupLat : null,
     pickup_lng: Number.isFinite(pickupLng) ? pickupLng : null,
     destination_lat: Number.isFinite(destinationLat) ? destinationLat : null,
     destination_lng: Number.isFinite(destinationLng) ? destinationLng : null,
+    pickup: {
+      lat: Number.isFinite(pickupLat) ? pickupLat : null,
+      lng: Number.isFinite(pickupLng) ? pickupLng : null,
+      address: pickupAreaFromRide(ride),
+    },
+    destination: {
+      lat: Number.isFinite(destinationLat) ? destinationLat : null,
+      lng: Number.isFinite(destinationLng) ? destinationLng : null,
+      address: dropoffAreaFromRide(ride),
+    },
+    live_location:
+      Number.isFinite(driverLat) && Number.isFinite(driverLng)
+        ? {
+            lat: driverLat,
+            lng: driverLng,
+            heading: Number.isFinite(driverHeading) ? driverHeading : null,
+          }
+        : null,
+    route: routePath.length ? { path: routePath } : null,
+    route_path: routePath.length ? routePath : null,
+    driver: hasDriver
+      ? {
+          name: firstNameFromDriverAndUser(driverProfile, userProfile),
+          car: vehicleLabelFromDriver(driverProfile),
+        }
+      : null,
     fare,
     updated_at: nowMs(),
   };
@@ -230,8 +284,38 @@ async function syncRideTrackPublic(db, rideId) {
     userProfile = uSnap.val();
   }
 
-  const publicDoc = buildPublicDoc(ride, driverProfile, userProfile);
-  await db.ref(`ride_track_public/${token}`).set(publicDoc);
+  const publicDoc = buildPublicDoc(ride, driverProfile, userProfile, rid);
+  const publicRef = db.ref(`ride_track_public/${token}`);
+  const existingSnap = await publicRef.get();
+  const existing =
+    existingSnap.exists() && typeof existingSnap.val() === "object"
+      ? existingSnap.val()
+      : null;
+  if (existing) {
+    const ageMs = nowMs() - Number(existing.updated_at ?? 0);
+    const latSame =
+      Number(existing.driver_lat ?? 0) === Number(publicDoc.driver_lat ?? 0);
+    const lngSame =
+      Number(existing.driver_lng ?? 0) === Number(publicDoc.driver_lng ?? 0);
+    const phaseSame =
+      String(existing.trip_phase ?? "") === String(publicDoc.trip_phase ?? "");
+    if (ageMs >= 0 && ageMs < 4000 && latSame && lngSame && phaseSame) {
+      console.log(
+        "SHARE_PUBLIC_LOCATION_SKIP_THROTTLED",
+        `rideId=${rid}`,
+        `path=ride_track_public/${token}`,
+        `ageMs=${ageMs}`,
+      );
+      return;
+    }
+  }
+  await publicRef.set(publicDoc);
+  console.log(
+    "SHARE_PUBLIC_NODE_WRITE_OK",
+    `rideId=${rid}`,
+    `path=ride_track_public/${token}`,
+    `phase=${String(publicDoc.phase ?? publicDoc.trip_phase ?? "unknown")}`,
+  );
   console.log(
     "SYNC_TRACK_PUBLIC",
     `rideId=${rid}`,
@@ -323,12 +407,18 @@ async function createTripShareToken(data, context, db) {
     });
   }
   await syncRideTrackPublic(db, rideId);
+  const shareUrl = `https://nexride.africa/trip/${encodeURIComponent(rideId)}?token=${encodeURIComponent(token)}`;
+  console.log(
+    "SHARE_PUBLIC_RULE_PATH",
+    `path=ride_track_public/${token}`,
+    `rideId=${rideId}`,
+  );
   return {
     success: true,
     ride_id: rideId,
     track_token: token,
-    track_path: `/track/${token}`,
-    share_url: `https://nexride-8d5bc.web.app/ride?token=${encodeURIComponent(token)}`,
+    track_path: `/trip/${rideId}`,
+    share_url: shareUrl,
   };
 }
 

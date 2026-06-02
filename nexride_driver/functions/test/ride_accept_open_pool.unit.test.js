@@ -79,8 +79,8 @@ test("reproduction: open waiting ride + pending_transfer evaluates to commit", (
     log: false,
   });
   assert.equal(decision.action, "commit");
-  assert.equal(decision.patch.trip_state, "driver_assigned");
-  assert.equal(decision.patch.status, "accepted");
+  assert.equal(decision.patch.trip_state, "assigned");
+  assert.equal(decision.patch.status, "assigned");
   assert.equal(decision.patch.driver_id, driverId);
 });
 
@@ -97,8 +97,8 @@ test("guarded direct write commits when RTDB transaction sees null current", asy
   assert.equal(direct.path, "direct_update");
 
   const after = getRide();
-  assert.equal(after.status, "accepted");
-  assert.equal(after.trip_state, "driver_assigned");
+  assert.equal(after.status, "assigned");
+  assert.equal(after.trip_state, "assigned");
   assert.equal(after.driver_id, driverId);
   assert.equal(after.matched_driver_id, driverId);
   assert.equal(canonicalAssignedDriverId(after), driverId);

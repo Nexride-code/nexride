@@ -1,6 +1,8 @@
+import 'package:firebase_database/firebase_database.dart' as rtdb;
 import 'package:flutter/material.dart';
 
 import '../services/driver_finance_service.dart';
+import 'driver_trip_detail_screen.dart';
 
 class TripHistoryScreen extends StatefulWidget {
   const TripHistoryScreen({super.key, required this.driverId});
@@ -12,9 +14,7 @@ class TripHistoryScreen extends StatefulWidget {
 }
 
 class _TripHistoryScreenState extends State<TripHistoryScreen> {
-  final DriverFinanceService _financeService = DriverFinanceService();
-
-  DriverFinanceSnapshot? _snapshot;
+  List<Map<String, dynamic>> _items = const <Map<String, dynamic>>[];
   bool _isLoading = true;
   String? _errorMessage;
 
@@ -22,6 +22,45 @@ class _TripHistoryScreenState extends State<TripHistoryScreen> {
   void initState() {
     super.initState();
     _loadTripHistory();
+  }
+
+  Future<List<Map<String, dynamic>>> _loadPath(String path) async {
+    final snapshot = await rtdb.FirebaseDatabase.instance.ref(path).get();
+    if (!snapshot.exists) {
+      return const <Map<String, dynamic>>[];
+    }
+    final raw = Map<Object?, Object?>.from(snapshot.value as Map);
+    final out = <Map<String, dynamic>>[];
+    raw.forEach((key, value) {
+      if (value is! Map) {
+        return;
+      }
+      final item = value.map<String, dynamic>(
+        (dynamic k, dynamic v) => MapEntry(k.toString(), v),
+      );
+      out.add(_normalizeItem(item, key?.toString() ?? ''));
+    });
+    return out;
+  }
+
+  Map<String, dynamic> _normalizeItem(
+    Map<String, dynamic> item,
+    String fallbackId,
+  ) {
+    final pickup = item['pickup'];
+    final destination = item['destination'];
+    final id = item['rideId']?.toString() ??
+        item['orderId']?.toString() ??
+        item['trip_id']?.toString() ??
+        fallbackId;
+    return <String, dynamic>{
+      ...item,
+      'trip_id': id,
+      'pickup_address': item['pickup_address'] ??
+          (pickup is Map ? pickup['address']?.toString() : null),
+      'destination_address': item['destination_address'] ??
+          (destination is Map ? destination['address']?.toString() : null),
+    };
   }
 
   Future<void> _loadTripHistory({bool showLoader = true}) async {
@@ -37,14 +76,28 @@ class _TripHistoryScreenState extends State<TripHistoryScreen> {
     }
 
     try {
-      final snapshot = await _financeService.fetchDriverFinanceSnapshot(
-        driverId: widget.driverId,
-      );
+      final batches = await Future.wait<List<Map<String, dynamic>>>(<Future<List<Map<String, dynamic>>>>[
+        _loadPath('driver_trip_history/${widget.driverId}'),
+        _loadPath('driver_order_history/${widget.driverId}'),
+        _loadPath('driver_trips/${widget.driverId}'),
+      ]);
+      final merged = <String, Map<String, dynamic>>{};
+      for (final batch in batches) {
+        for (final item in batch) {
+          final id = item['trip_id']?.toString() ?? '';
+          if (id.isEmpty) {
+            continue;
+          }
+          merged[id] = item;
+        }
+      }
+      final items = merged.values.toList()
+        ..sort((a, b) => _timestamp(b).compareTo(_timestamp(a)));
       if (!mounted) {
         return;
       }
       setState(() {
-        _snapshot = snapshot;
+        _items = items;
         _isLoading = false;
       });
     } catch (error) {
@@ -59,479 +112,188 @@ class _TripHistoryScreenState extends State<TripHistoryScreen> {
     }
   }
 
+  int _timestamp(Map<String, dynamic> item) {
+    for (final key in <String>[
+      'completed_at',
+      'completedAt',
+      'cancelled_at',
+      'cancelledAt',
+      'timestamp',
+      'updated_at',
+      'created_at',
+      'createdAt',
+    ]) {
+      final value = item[key];
+      if (value is num) {
+        return value.toInt();
+      }
+      final parsed = int.tryParse(value?.toString() ?? '');
+      if (parsed != null) {
+        return parsed;
+      }
+    }
+    return 0;
+  }
+
+  String _formatDate(Map<String, dynamic> item) {
+    final ts = _timestamp(item);
+    if (ts <= 0) {
+      return 'Date unavailable';
+    }
+    return DriverFinanceService.formatDateTime(
+      DateTime.fromMillisecondsSinceEpoch(ts).toLocal(),
+    );
+  }
+
+  String _formatFare(dynamic raw) {
+    final amount =
+        raw is num ? raw.toDouble() : double.tryParse(raw?.toString() ?? '') ?? 0;
+    return '₦${amount.toStringAsFixed(amount.truncateToDouble() == amount ? 0 : 2)}';
+  }
+
+  String _kindLabel(Map<String, dynamic> item) {
+    if (item['type']?.toString() == 'order') {
+      return 'Delivery / order';
+    }
+    return 'Ride';
+  }
+
+  Future<void> _openDetail(Map<String, dynamic> item) async {
+    final tripId = item['trip_id']?.toString() ?? '';
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => DriverTripDetailScreen(
+          tripId: tripId,
+          driverId: widget.driverId,
+          tripData: item,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final snapshot = _snapshot;
-    final earnings = snapshot?.earnings ?? const <DriverEarningRecord>[];
-    final pendingReviews = earnings
-        .where((DriverEarningRecord record) =>
-            record.settlementStatus == 'payment_review')
-        .length;
-
     return Scaffold(
       appBar: AppBar(title: const Text('Trip history')),
-      body: _isLoading && snapshot == null
-          ? const _TripHistoryLoadingState()
-          : snapshot == null
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _errorMessage != null && _items.isEmpty
               ? _TripHistoryErrorState(
-                  message: _errorMessage ??
-                      'Trip history is unavailable right now. Please try again.',
+                  message: _errorMessage!,
                   onRetry: _loadTripHistory,
                 )
               : RefreshIndicator(
                   onRefresh: () => _loadTripHistory(showLoader: false),
-                  child: ListView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                    children: [
-                      if (_errorMessage != null) ...[
-                        _TripHistoryNoticeCard(message: _errorMessage!),
-                        const SizedBox(height: 16),
-                      ],
-                      Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        children: [
-                          _TripHistorySummaryCard(
-                            title: 'Completed trips',
-                            value: earnings.length.toString(),
-                            icon: Icons.route_outlined,
-                          ),
-                          _TripHistorySummaryCard(
-                            title: 'Net earnings',
-                            value: DriverFinanceService.formatNaira(
-                              snapshot.totalEarnings,
+                  child: _items.isEmpty
+                      ? ListView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          children: const [
+                            SizedBox(height: 120),
+                            _TripHistoryEmptyState(
+                              icon: Icons.receipt_long_outlined,
+                              title: 'No trip records yet',
+                              message:
+                                  'Completed rides and deliveries will appear here after they finish.',
                             ),
-                            icon: Icons.account_balance_wallet_outlined,
-                          ),
-                          _TripHistorySummaryCard(
-                            title: 'Payment reviews',
-                            value: pendingReviews.toString(),
-                            icon: Icons.rule_folder_outlined,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-                      const _TripHistorySectionHeader(
-                        title: 'Completed trip records',
-                        subtitle:
-                            'Gross fare, commission deduction, net payout, payment method, and route details stay aligned with the saved settlement record.',
-                      ),
-                      const SizedBox(height: 12),
-                      if (earnings.isEmpty)
-                        const _TripHistoryEmptyState(
-                          icon: Icons.receipt_long_outlined,
-                          title: 'No trip records yet',
-                          message:
-                              'Completed trips will appear here as soon as your account has finished rides and the settlement data is available.',
+                          ],
                         )
-                      else
-                        ...earnings.map(
-                          (DriverEarningRecord record) => Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: _TripHistoryRecordCard(record: record),
-                          ),
+                      : ListView.separated(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                          itemCount: _items.length,
+                          separatorBuilder: (_, __) => const SizedBox(height: 12),
+                          itemBuilder: (context, index) {
+                            final item = _items[index];
+                            final status =
+                                item['status']?.toString() ?? 'completed';
+                            return Material(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(20),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(20),
+                                onTap: () => _openDetail(item),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(18),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              _formatFare(item['fare']),
+                                              style: const TextStyle(
+                                                fontSize: 20,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                            ),
+                                          ),
+                                          _TripHistoryStatusChip(label: status),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        _formatDate(item),
+                                        style: TextStyle(
+                                          color: Colors.black.withValues(alpha: 0.62),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        _kindLabel(item),
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                          color: Color(0xFF8A6424),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 12),
+                                      Text(
+                                        item['pickup_address']?.toString() ??
+                                            'Pickup unavailable',
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        item['destination_address']?.toString() ??
+                                            'Destination unavailable',
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 12),
+                                      const Align(
+                                        alignment: Alignment.centerRight,
+                                        child: Text(
+                                          'View details',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFF8A6424),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
                         ),
-                    ],
-                  ),
                 ),
-    );
-  }
-}
-
-class _TripHistoryLoadingState extends StatelessWidget {
-  const _TripHistoryLoadingState();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(24),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.06),
-                blurRadius: 18,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const SizedBox(
-                  height: 36,
-                  width: 36,
-                  child: CircularProgressIndicator(strokeWidth: 3),
-                ),
-                const SizedBox(height: 18),
-                const Text(
-                  'Loading trip history',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF111111),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Preparing your completed trip records, payout details, and review status.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.black.withValues(alpha: 0.64),
-                    height: 1.5,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _TripHistorySummaryCard extends StatelessWidget {
-  const _TripHistorySummaryCard({
-    required this.title,
-    required this.value,
-    required this.icon,
-  });
-
-  final String title;
-  final String value;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: MediaQuery.of(context).size.width > 420
-          ? (MediaQuery.of(context).size.width - 44) / 2
-          : double.infinity,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.05),
-              blurRadius: 16,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                height: 42,
-                width: 42,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF3E3BE),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(icon, color: const Color(0xFF8A6424)),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                title,
-                style: TextStyle(
-                  color: Colors.black.withValues(alpha: 0.64),
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                value,
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF111111),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _TripHistorySectionHeader extends StatelessWidget {
-  const _TripHistorySectionHeader({
-    required this.title,
-    required this.subtitle,
-  });
-
-  final String title;
-  final String subtitle;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          title,
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.w800,
-            color: Color(0xFF111111),
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          subtitle,
-          style: TextStyle(
-            color: Colors.black.withValues(alpha: 0.64),
-            height: 1.4,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _TripHistoryRecordCard extends StatelessWidget {
-  const _TripHistoryRecordCard({required this.record});
-
-  final DriverEarningRecord record;
-
-  @override
-  Widget build(BuildContext context) {
-    final isPaymentReview = record.settlementStatus == 'payment_review';
-
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 14,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        record.rideId.isNotEmpty
-                            ? 'Ride ${record.rideId}'
-                            : 'Trip record',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFF111111),
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        DriverFinanceService.formatDateTime(record.tripDate),
-                        style: TextStyle(
-                          color: Colors.black.withValues(alpha: 0.62),
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                _TripHistoryStatusChip(
-                  label: isPaymentReview ? 'Payment review' : 'Completed',
-                  color: isPaymentReview
-                      ? const Color(0xFF8A6424)
-                      : const Color(0xFF1B7F5A),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            _TripHistoryAddressLine(
-              icon: Icons.radio_button_checked,
-              label: 'Pickup',
-              value: record.pickupSummary.isNotEmpty
-                  ? record.pickupSummary
-                  : 'Pickup summary unavailable',
-            ),
-            const SizedBox(height: 10),
-            _TripHistoryAddressLine(
-              icon: Icons.location_on_outlined,
-              label: 'Destination',
-              value: record.destinationSummary.isNotEmpty
-                  ? record.destinationSummary
-                  : 'Destination summary unavailable',
-            ),
-            const SizedBox(height: 18),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: [
-                _TripHistoryMetricTile(
-                  label: 'Gross fare',
-                  value: DriverFinanceService.formatNaira(record.grossFare),
-                ),
-                _TripHistoryMetricTile(
-                  label: 'Commission',
-                  value: DriverFinanceService.formatNaira(record.commission),
-                ),
-                _TripHistoryMetricTile(
-                  label: 'Net payout',
-                  value: DriverFinanceService.formatNaira(record.netEarning),
-                  emphasized: true,
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Icon(
-                  Icons.payments_outlined,
-                  size: 18,
-                  color: Colors.black.withValues(alpha: 0.64),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Payment method: ${record.paymentMethod}',
-                    style: TextStyle(
-                      color: Colors.black.withValues(alpha: 0.72),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TripHistoryMetricTile extends StatelessWidget {
-  const _TripHistoryMetricTile({
-    required this.label,
-    required this.value,
-    this.emphasized = false,
-  });
-
-  final String label;
-  final String value;
-  final bool emphasized;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(minWidth: 130),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: emphasized ? const Color(0xFFFFF8E7) : const Color(0xFFF7F4EE),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: emphasized ? const Color(0xFFE6C97A) : const Color(0xFFE9E2D5),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              color: Colors.black.withValues(alpha: 0.62),
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w800,
-              color: emphasized
-                  ? const Color(0xFF8A6424)
-                  : const Color(0xFF111111),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TripHistoryAddressLine extends StatelessWidget {
-  const _TripHistoryAddressLine({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  final IconData icon;
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(icon, size: 18, color: const Color(0xFF8A6424)),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  color: Colors.black.withValues(alpha: 0.58),
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                value,
-                style: const TextStyle(
-                  color: Color(0xFF111111),
-                  fontWeight: FontWeight.w600,
-                  height: 1.35,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
     );
   }
 }
 
 class _TripHistoryStatusChip extends StatelessWidget {
-  const _TripHistoryStatusChip({
-    required this.label,
-    required this.color,
-  });
+  const _TripHistoryStatusChip({required this.label});
 
   final String label;
-  final Color color;
 
   @override
   Widget build(BuildContext context) {
+    final lower = label.toLowerCase();
+    final color = lower.contains('cancel')
+        ? const Color(0xFFD64545)
+        : const Color(0xFF1B7F5A);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -540,45 +302,7 @@ class _TripHistoryStatusChip extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: TextStyle(
-          color: color,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-}
-
-class _TripHistoryNoticeCard extends StatelessWidget {
-  const _TripHistoryNoticeCard({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFFF6E2),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFFE7C87A)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Icon(Icons.info_outline, color: Color(0xFF8A6424)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              message,
-              style: const TextStyle(
-                color: Color(0xFF6E531D),
-                height: 1.4,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
+        style: TextStyle(color: color, fontWeight: FontWeight.w700),
       ),
     );
   }
@@ -597,48 +321,22 @@ class _TripHistoryEmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return Padding(
       padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(22),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 18,
-            offset: const Offset(0, 10),
-          ),
-        ],
-      ),
       child: Column(
         children: [
-          Container(
-            height: 54,
-            width: 54,
-            decoration: BoxDecoration(
-              color: const Color(0xFFF7F0DF),
-              borderRadius: BorderRadius.circular(18),
-            ),
-            child: Icon(icon, color: const Color(0xFF8A6424)),
-          ),
+          Icon(icon, size: 48, color: const Color(0xFF8A6424)),
           const SizedBox(height: 16),
           Text(
             title,
             textAlign: TextAlign.center,
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w800,
-              color: Color(0xFF111111),
-            ),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
           ),
           const SizedBox(height: 8),
           Text(
             message,
             textAlign: TextAlign.center,
-            style: TextStyle(
-              color: Colors.black.withValues(alpha: 0.66),
-              height: 1.5,
-            ),
+            style: TextStyle(color: Colors.black.withValues(alpha: 0.66)),
           ),
         ],
       ),
@@ -663,20 +361,7 @@ class _TripHistoryErrorState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
-              Icons.sync_problem_outlined,
-              size: 42,
-              color: Color(0xFF8A6424),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Colors.black.withValues(alpha: 0.74),
-                height: 1.5,
-              ),
-            ),
+            Text(message, textAlign: TextAlign.center),
             const SizedBox(height: 18),
             ElevatedButton(
               onPressed: onRetry,

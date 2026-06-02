@@ -327,6 +327,7 @@ class CallService {
     String? uid,
     int? remoteUid,
     String? error,
+    String? reason,
     int? elapsedMs,
     bool? speakerOn,
     bool? muted,
@@ -341,7 +342,7 @@ class CallService {
       channel: channel ?? _activeTraceChannel(rideId),
       uid: uid ?? _lastJoinRequest?.uid,
       remoteUid: remoteUid,
-      error: error,
+      error: error ?? reason,
       elapsedMs: elapsedMs,
       speakerOn: speakerOn,
       muted: muted,
@@ -406,16 +407,49 @@ class CallService {
     return RideCallSession.fromSnapshotValue(normalizedRideId, snapshot.value);
   }
 
-  Future<List<RideCallSession>> fetchCallsForReceiver(String receiverId) async {
-    // Root /calls queries are denied — callers must use fetchCall(rideId).
-    return const <RideCallSession>[];
+  Future<List<RideCallSession>> fetchCallsForReceiver(
+    String receiverId, {
+    String? activeRideId,
+  }) async {
+    final rideId = activeRideId?.trim() ?? '';
+    if (rideId.isEmpty) {
+      debugPrint(
+        '[CALL_LOG_LOAD_EMPTY] receiverId=${receiverId.trim()} reason=no_active_ride',
+      );
+      return const <RideCallSession>[];
+    }
+    debugPrint('[CALL_LOG_LOAD_START] rideId=$rideId role=rider');
+    try {
+      final session = await fetchCall(rideId).timeout(
+        const Duration(seconds: 8),
+      );
+      if (session == null) {
+        debugPrint('[CALL_LOG_LOAD_EMPTY] rideId=$rideId');
+        return const <RideCallSession>[];
+      }
+      debugPrint(
+        '[CALL_LOG_LOAD_OK] rideId=$rideId status=${session.status.name}',
+      );
+      return <RideCallSession>[session];
+    } on TimeoutException {
+      debugPrint('[CALL_LOG_LOAD_ERROR] rideId=$rideId reason=timeout');
+      return const <RideCallSession>[];
+    } catch (error) {
+      debugPrint('[CALL_LOG_LOAD_ERROR] rideId=$rideId error=$error');
+      return const <RideCallSession>[];
+    }
   }
 
   Future<void> prefetchAgoraToken({
     required String channelId,
     required String uid,
+    bool forceRefresh = false,
   }) async {
-    final token = await fetchAgoraToken(channelId, uid, forceRefresh: true);
+    final token = await fetchAgoraToken(
+      channelId,
+      uid,
+      forceRefresh: forceRefresh,
+    );
     if (token == null || token.isEmpty) {
       throw const RideCallException(
         'Unable to connect voice calling right now. Please try again.',
@@ -442,31 +476,54 @@ class CallService {
 
     await _keepRideCallSynced(normalizedRideId);
 
-    final payload = <String, Object?>{
-      'ride_id': normalizedRideId,
-      'rider_id': normalizedRiderId,
-      'driver_id': normalizedDriverId,
-      'started_by': normalizedStartedBy,
-      'callerId': callerId,
-      'receiverId': receiverId,
-      'channelName': channelForRide(normalizedRideId),
-      'status': 'ringing',
-      'createdAt': rtdb.ServerValue.timestamp,
-      'updatedAt': rtdb.ServerValue.timestamp,
-      'acceptedAt': null,
-      'endedAt': null,
-      'endedBy': null,
-    };
-
     late final rtdb.TransactionResult transaction;
     try {
       transaction = await _callRef(normalizedRideId)
           .runTransaction((currentValue) {
             final currentMap = _asStringDynamicMap(currentValue);
-            final status = currentMap?['status']?.toString() ?? '';
-            if (_isActiveStatusString(status)) {
+            final statusRaw = currentMap?['status']?.toString() ?? '';
+            final stateRaw = currentMap?['state']?.toString() ?? '';
+            final effectiveStatus = statusRaw.trim().isNotEmpty
+                ? statusRaw.trim().toLowerCase()
+                : stateRaw.trim().toLowerCase();
+            if (_isActiveStatusString(effectiveStatus)) {
               return rtdb.Transaction.abort();
             }
+            if (_isTerminalStatusString(effectiveStatus)) {
+              _callTrace(
+                'CALL_TERMINAL_STATE_RESET_FOR_RESTART',
+                rideId: normalizedRideId,
+              );
+              _callTrace(
+                'CALL_RESTART_AFTER_ENDED_OK',
+                rideId: normalizedRideId,
+              );
+            }
+            final priorAttempt = switch (currentMap?['callAttempt']) {
+              int value => value,
+              num value => value.toInt(),
+              String value => int.tryParse(value.trim()) ?? 0,
+              _ => 0,
+            };
+            final payload = <String, Object?>{
+              'ride_id': normalizedRideId,
+              'rider_id': normalizedRiderId,
+              'driver_id': normalizedDriverId,
+              'started_by': normalizedStartedBy,
+              'callerId': callerId,
+              'receiverId': receiverId,
+              'channelName': channelForRide(normalizedRideId),
+              'status': 'ringing',
+              'state': 'ringing',
+              'sessionId': '${DateTime.now().millisecondsSinceEpoch}',
+              'callAttempt': priorAttempt + 1,
+              'startedAt': rtdb.ServerValue.timestamp,
+              'createdAt': rtdb.ServerValue.timestamp,
+              'updatedAt': rtdb.ServerValue.timestamp,
+              'acceptedAt': null,
+              'endedAt': null,
+              'endedBy': null,
+            };
             return rtdb.Transaction.success(payload);
           }, applyLocally: false)
           .timeout(_kCallWriteTimeout);
@@ -477,7 +534,19 @@ class CallService {
     }
 
     if (transaction.committed) {
+      _callTrace('CALL_NEW_SESSION_WRITE_OK', rideId: normalizedRideId);
       _callTrace('CALL_SIGNAL_WRITE_OK', rideId: normalizedRideId);
+      clearParticipantWriteCache(rideId: normalizedRideId);
+    } else {
+      final existing = await fetchCall(normalizedRideId);
+      final existingStatus = existing?.status.name ?? '';
+      if (_isActiveStatusString(existingStatus)) {
+        _callTrace(
+          'CALL_START_BLOCKED',
+          rideId: normalizedRideId,
+          reason: 'active_status_$existingStatus',
+        );
+      }
     }
 
     return OutgoingCallRequestResult(
@@ -537,7 +606,14 @@ class CallService {
     }
   }
 
-  Future<void> endAcceptedCall({
+  Future<bool> endAcceptedCall({
+    required String rideId,
+    required String endedBy,
+  }) async {
+    return endCallFromUserTap(rideId: rideId, endedBy: endedBy);
+  }
+
+  Future<bool> endCallFromUserTap({
     required String rideId,
     required String endedBy,
   }) async {
@@ -545,11 +621,17 @@ class CallService {
       rideId: rideId,
       nextStatus: 'ended',
       endedBy: endedBy,
-      allowedStatuses: const <String>{'accepted'},
+      allowedStatuses: const <String>{
+        'calling',
+        'ringing',
+        'accepted',
+        'joined',
+      },
     );
     if (committed) {
       _callTrace('CALL_END_RTDB_OK', rideId: rideId);
     }
+    return committed;
   }
 
   Future<void> endCallForRideLifecycle({
@@ -560,7 +642,12 @@ class CallService {
       rideId: rideId,
       nextStatus: 'ended',
       endedBy: endedBy,
-      allowedStatuses: const <String>{'calling', 'ringing', 'accepted'},
+      allowedStatuses: const <String>{
+        'calling',
+        'ringing',
+        'accepted',
+        'joined',
+      },
     );
     if (committed) {
       _callTrace('CALL_END_RTDB_OK', rideId: rideId);
@@ -1146,7 +1233,7 @@ class CallService {
     }
 
     try {
-      var responseMap = await requestToken(force: false);
+      var responseMap = await requestToken(force: forceRefresh);
       debugPrint('[CALL_SERVICE] callable response: $responseMap');
       final firstReason = responseMap['reason']?.toString().trim() ?? '';
       if (firstReason == 'call_already_active') {
@@ -1248,6 +1335,7 @@ class CallService {
 
             final nextMap = Map<String, Object?>.from(currentMap)
               ..['status'] = nextStatus
+              ..['state'] = nextStatus
               ..['updatedAt'] = rtdb.ServerValue.timestamp;
 
             if (setAcceptedAt) {

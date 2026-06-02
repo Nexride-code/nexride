@@ -71,9 +71,17 @@ class _TripReportScreenState extends State<TripReportScreen> {
       final payload = <String, dynamic>{
         'reportId': reportRef.key,
         'tripId': widget.tripId,
+        'rideId': widget.tripData['rideId']?.toString() ?? widget.tripId,
+        'orderId': widget.tripData['orderId']?.toString() ??
+            widget.tripData['order_id']?.toString() ??
+            '',
         'riderId': widget.riderId,
-        'driverId': widget.tripData['driver_id']?.toString() ?? '',
+        'userId': widget.riderId,
+        'driverId': widget.tripData['driver_id']?.toString() ??
+            widget.tripData['driverId']?.toString() ??
+            '',
         'serviceType': _serviceType.key,
+        'status': widget.tripData['status']?.toString() ?? '',
         'reason': _selectedReason,
         'message': _messageController.text.trim(),
         'status': 'pending',

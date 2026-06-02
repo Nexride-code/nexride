@@ -62,3 +62,11 @@ playstore_assets/*.aab
 # Local tooling (optional) for marketing SVG export
 marketing/instagram_launch/.venv/
 marketing/instagram_launch_v2/.venv/
+
+# Local Flutter/debug artifacts
+.flutter_run_root/
+.flutter_run_root2/
+*.log
+ios_build.log
+.analyze_nexride_out.txt
+.dart_analyze_nexride.txt

@@ -207,13 +207,47 @@ class RiderRideCloudFunctionsService {
   Future<Map<String, dynamic>> submitTripRating({
     required String rideId,
     required double rating,
-  }) =>
-      _call('submitTripRating', <String, dynamic>{
-        'rideId': rideId,
-        'ride_id': rideId,
-        'rating': rating,
-        'role': 'rider',
-      });
+    String? riderId,
+    String? driverId,
+    String? targetId,
+    String? note,
+  }) async {
+    final payload = <String, dynamic>{
+      'rideId': rideId,
+      'ride_id': rideId,
+      'rating': rating,
+      'role': 'rider',
+    };
+    final normalizedRiderId = riderId?.trim() ?? '';
+    final normalizedDriverId = driverId?.trim() ?? '';
+    final normalizedTargetId = targetId?.trim() ?? '';
+    final normalizedNote = note?.trim() ?? '';
+    if (normalizedRiderId.isNotEmpty) {
+      payload['riderId'] = normalizedRiderId;
+      payload['rider_id'] = normalizedRiderId;
+    }
+    if (normalizedDriverId.isNotEmpty) {
+      payload['driverId'] = normalizedDriverId;
+      payload['driver_id'] = normalizedDriverId;
+    }
+    if (normalizedTargetId.isNotEmpty) {
+      payload['targetId'] = normalizedTargetId;
+      payload['target_user_id'] = normalizedTargetId;
+    }
+    if (normalizedNote.isNotEmpty) {
+      payload['note'] = normalizedNote;
+      payload['message'] = normalizedNote;
+    }
+    try {
+      return await _call('submitTripRating', payload);
+    } on FirebaseFunctionsException catch (error) {
+      return <String, dynamic>{
+        'success': false,
+        'reason': error.code,
+        'message': error.message ?? '',
+      };
+    }
+  }
 
   /// Agora RTC token (same backend as driver app).
   Future<Map<String, dynamic>> getRideCallRtcToken({
@@ -440,6 +474,7 @@ class RiderRideCloudFunctionsService {
   }) =>
       _call('createTripShareToken', <String, dynamic>{
         'rideId': rideId,
+        'ride_id': rideId,
       });
 
   Future<Map<String, dynamic>> getRideTrackSummary({

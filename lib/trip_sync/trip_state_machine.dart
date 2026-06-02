@@ -134,7 +134,7 @@ class TripStateMachine {
       'in_progress' ||
       'trip_started' =>
         TripLifecycleState.onTrip,
-      'completed' || 'trip_completed' => TripLifecycleState.completed,
+      'completed' || 'trip_completed' || 'complete' => TripLifecycleState.completed,
       'cancelled' ||
       'canceled' ||
       'trip_cancelled' ||

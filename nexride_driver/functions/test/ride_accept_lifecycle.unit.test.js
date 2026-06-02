@@ -24,7 +24,7 @@ test("buildDriverAcceptAssignmentPatch writes canonical assignment fields", () =
   assert.equal(patch.assigned_driver_uid, driverId);
   assert.equal(patch.status, "assigned");
   assert.equal(patch.request_status, "accepted");
-  assert.equal(patch.trip_state, "driver_assigned");
+  assert.equal(patch.trip_state, "assigned");
   assert.equal(patch.accepted_at_ms, now);
   assert.equal(patch.match_completed_at, now);
   assert.equal(patch.match_completed_at_ms, now);

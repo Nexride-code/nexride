@@ -868,11 +868,18 @@ async function setDriverSubscriptionAutoRenew(data, context, db) {
 }
 
 async function driverConfirmBankTransferPayment(data, context, db) {
+  const { rideAssignedDriverUid } = require("./ride_callables");
   const uid = normUid(context?.auth?.uid);
   if (!uid) return { success: false, reason: "unauthorized" };
   const reference = trim(data?.reference ?? data?.tx_ref, 200);
   if (!reference) return { success: false, reason: "invalid_reference" };
-  const rideId = trim(data?.rideId ?? data?.ride_id, 80);
+  let rideId = trim(data?.rideId ?? data?.ride_id, 80);
+  if (!rideId) {
+    const ptSnap = await db.ref(`payment_transactions/${reference}`).get();
+    const pt = ptSnap.val() && typeof ptSnap.val() === "object" ? ptSnap.val() : {};
+    rideId = trim(pt.ride_id ?? pt.rideId ?? "", 80);
+  }
+  logger.info("PAYMENT_CONFIRM_START", `driverId=${uid}`, `rideId=${rideId || ""}`);
   await db.ref(`payment_transactions/${reference}`).update({
     driver_marked_paid: true,
     driver_marked_paid_at: Date.now(),
@@ -884,58 +891,96 @@ async function driverConfirmBankTransferPayment(data, context, db) {
     `rideId=${rideId || ""}`,
     `reference=${reference}`,
   );
+  if (!rideId) {
+    logger.info("PAYMENT_CONFIRM_FAIL", `driverId=${uid}`, "reason=invalid_ride_id");
+    return { success: false, reason: "invalid_ride_id" };
+  }
   let riderId = "";
-  if (rideId) {
-    const rideRef = db.ref(`ride_requests/${rideId}`);
-    let reason = "unknown";
-    const tx = await rideRef.transaction((cur) => {
-      if (!cur || typeof cur !== "object") {
-        reason = "ride_missing";
-        return;
+  const rideRef = db.ref(`ride_requests/${rideId}`);
+  const preSnap = await rideRef.get();
+  if (!preSnap.exists() || typeof preSnap.val() !== "object") {
+    logger.info("PAYMENT_CONFIRM_FAIL", `driverId=${uid}`, `rideId=${rideId}`, "reason=ride_missing");
+    return { success: false, reason: "ride_missing" };
+  }
+  const paymentPatch = () => {
+    const now = Date.now();
+    return {
+      payment_confirmed: true,
+      payment_verified: true,
+      payment_confirmed_by_driver: true,
+      payment_status: "driver_confirmed",
+      driver_marked_paid: true,
+      driver_confirmed_rider_payment: true,
+      driver_confirmed_rider_payment_at: now,
+      payment_confirmed_at: now,
+      updated_at: now,
+    };
+  };
+  let reason = "unknown";
+  const tx = await rideRef.transaction((cur) => {
+    if (!cur || typeof cur !== "object") {
+      reason = "ride_missing";
+      return;
+    }
+    if (rideAssignedDriverUid(cur) !== uid) {
+      reason = "not_assigned_driver";
+      return;
+    }
+    riderId = normUid(cur.rider_id ?? cur.riderId);
+    return {
+      ...cur,
+      ...paymentPatch(),
+    };
+  });
+  if (!tx.committed) {
+    const retrySnap = await rideRef.get();
+    const retryRide =
+      retrySnap.exists() && typeof retrySnap.val() === "object" ? retrySnap.val() : null;
+    if (retryRide && rideAssignedDriverUid(retryRide) === uid) {
+      riderId = normUid(retryRide.rider_id ?? retryRide.riderId);
+      await rideRef.update(paymentPatch());
+      logger.info(
+        "PAYMENT_CONFIRM_WRITE_OK",
+        `driverId=${uid}`,
+        `rideId=${rideId}`,
+        "path=ride_requests",
+        "mode=fallback_update",
+      );
+      try {
+        const { syncLiveJobMirror } = require("./live_job_mirror");
+        await syncLiveJobMirror(db, rideId);
+      } catch (_) {
+        /* mirror best-effort */
       }
-      const assigned = normUid(cur.driver_id ?? cur.matched_driver_id);
-      if (assigned !== uid) {
-        reason = "not_assigned_driver";
-        return;
-      }
-      riderId = normUid(cur.rider_id);
-      const now = Date.now();
-      return {
-        ...cur,
-        payment_confirmed: true,
-        payment_status: "confirmed",
-        driver_marked_paid: true,
-        driver_confirmed_rider_payment: true,
-        driver_confirmed_rider_payment_at: now,
-        updated_at: now,
-      };
-    });
-    if (!tx.committed) {
+    } else {
+      logger.info("PAYMENT_CONFIRM_FAIL", `driverId=${uid}`, `rideId=${rideId}`, `reason=${reason}`);
       return { success: false, reason };
     }
+  } else {
+    logger.info("PAYMENT_CONFIRM_WRITE_OK", `driverId=${uid}`, `rideId=${rideId}`, "path=ride_requests");
     try {
       const { syncLiveJobMirror } = require("./live_job_mirror");
       await syncLiveJobMirror(db, rideId);
     } catch (_) {
       /* mirror best-effort */
     }
-    if (riderId) {
-      try {
-        const { sendPushToUser } = require("./push_notifications");
-        await sendPushToUser(db, riderId, {
-          title: "Payment confirmed",
-          body: "Driver confirmed your payment.",
-          data: { type: "driver_payment_confirmed", rideId },
-        });
-        logger.info(
-          "PAYMENT_CONFIRMED_RIDER_NOTIFY",
-          `riderId=${riderId}`,
-          `rideId=${rideId}`,
-          `reference=${reference}`,
-        );
-      } catch (_) {
-        /* best-effort */
-      }
+  }
+  if (riderId) {
+    try {
+      const { sendPushToUser } = require("./push_notifications");
+      await sendPushToUser(db, riderId, {
+        title: "Payment confirmed",
+        body: "Driver confirmed your payment.",
+        data: { type: "driver_payment_confirmed", rideId },
+      });
+      logger.info(
+        "PAYMENT_CONFIRMED_RIDER_NOTIFY",
+        `riderId=${riderId}`,
+        `rideId=${rideId}`,
+        `reference=${reference}`,
+      );
+    } catch (_) {
+      /* best-effort */
     }
   }
   return { success: true, reference, rideId: rideId || null };

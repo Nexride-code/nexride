@@ -9,7 +9,7 @@
   "functions": [
     {
       "source": "nexride_driver/functions",
-      "codebase": "nexride_dispatch",
+      "codebase": "default",
       "disallowLegacyRuntimeConfig": true,
       "ignore": [
         "node_modules",

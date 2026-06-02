@@ -30,6 +30,21 @@ class RideCloudFunctionsService {
     return <String, dynamic>{};
   }
 
+  Future<Map<String, dynamic>> _callRating(
+    String name,
+    Map<String, dynamic> payload,
+  ) async {
+    try {
+      return await _call(name, payload);
+    } on FirebaseFunctionsException catch (error) {
+      return <String, dynamic>{
+        'success': false,
+        'reason': error.code,
+        'message': error.message ?? '',
+      };
+    }
+  }
+
   /// Backend-controlled accept (driver uid from auth).
   Future<Map<String, dynamic>> acceptRide({required String rideId}) =>
       _call('acceptRide', <String, dynamic>{
@@ -376,13 +391,39 @@ class RideCloudFunctionsService {
     required String rideId,
     required double rating,
     required String role,
-  }) =>
-      _call('submitTripRating', <String, dynamic>{
-        'rideId': rideId,
-        'ride_id': rideId,
-        'rating': rating,
-        'role': role,
-      });
+    String? riderId,
+    String? driverId,
+    String? targetId,
+    String? note,
+  }) {
+    final payload = <String, dynamic>{
+      'rideId': rideId,
+      'ride_id': rideId,
+      'rating': rating,
+      'role': role,
+    };
+    final normalizedRiderId = riderId?.trim() ?? '';
+    final normalizedDriverId = driverId?.trim() ?? '';
+    final normalizedTargetId = targetId?.trim() ?? '';
+    final normalizedNote = note?.trim() ?? '';
+    if (normalizedRiderId.isNotEmpty) {
+      payload['riderId'] = normalizedRiderId;
+      payload['rider_id'] = normalizedRiderId;
+    }
+    if (normalizedDriverId.isNotEmpty) {
+      payload['driverId'] = normalizedDriverId;
+      payload['driver_id'] = normalizedDriverId;
+    }
+    if (normalizedTargetId.isNotEmpty) {
+      payload['targetId'] = normalizedTargetId;
+      payload['target_user_id'] = normalizedTargetId;
+    }
+    if (normalizedNote.isNotEmpty) {
+      payload['note'] = normalizedNote;
+      payload['message'] = normalizedNote;
+    }
+    return _callRating('submitTripRating', payload);
+  }
 
   Future<Map<String, dynamic>> driverConfirmBankTransferPayment({
     required String rideId,

@@ -1227,6 +1227,17 @@ async function merchantUpdateOrderStatus(data, context, db) {
   }
 
   await ref.update(updates);
+  if (TERMINAL_ORDER.has(next)) {
+    try {
+      const { persistMerchantOrderTerminalHistory } = require("../trip_history_persistence");
+      await persistMerchantOrderTerminalHistory(db, orderId, { ...o, ...updates, order_status: next });
+    } catch (histErr) {
+      logger.warn("TRIP_HISTORY_PERSIST_FAIL", {
+        orderId,
+        err: String(histErr?.message || histErr),
+      });
+    }
+  }
   await db.ref("admin_audit_logs").push().set({
     type: "merchant_order_status",
     merchant_id: mid,

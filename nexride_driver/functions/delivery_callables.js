@@ -1627,6 +1627,16 @@ async function updateDeliveryState(data, context, db) {
   await ref.set(nextRow);
 
   if (TERMINAL_DELIVERY.has(nextState)) {
+    try {
+      const { persistDeliveryTerminalHistory } = require("./trip_history_persistence");
+      await persistDeliveryTerminalHistory(db, deliveryId, nextRow);
+    } catch (histErr) {
+      console.log(
+        "TRIP_HISTORY_PERSIST_FAIL",
+        `deliveryId=${deliveryId}`,
+        histErr?.message ?? histErr,
+      );
+    }
     await clearDeliveryActivePointers(db, {
       deliveryId,
       customerId: normUid(cur.customer_id),
@@ -1679,6 +1689,25 @@ async function expireDeliveryRequest(data, context, db) {
     cancel_reason: "search_timeout",
     updated_at: now,
   });
+  const cancelledRow = {
+    ...row,
+    delivery_state: DELIVERY_STATE.cancelled,
+    trip_state: mirror.trip_state,
+    status: mirror.status,
+    cancelled_at: now,
+    cancel_reason: "search_timeout",
+    updated_at: now,
+  };
+  try {
+    const { persistDeliveryTerminalHistory } = require("./trip_history_persistence");
+    await persistDeliveryTerminalHistory(db, deliveryId, cancelledRow);
+  } catch (histErr) {
+    console.log(
+      "TRIP_HISTORY_PERSIST_FAIL",
+      `deliveryId=${deliveryId}`,
+      histErr?.message ?? histErr,
+    );
+  }
   await clearDeliveryFanoutAndOffers(db, deliveryId, "");
   let driverId = canonicalAssignedDeliveryDriverId(row);
   const merchantId = normUid(row.merchant_id ?? row.merchantId);
@@ -1752,6 +1781,25 @@ async function cancelDeliveryRequest(data, context, db) {
     cancel_reason: cancelReason,
     updated_at: now,
   });
+  const cancelledRow = {
+    ...row,
+    delivery_state: DELIVERY_STATE.cancelled,
+    trip_state: mirror.trip_state,
+    status: mirror.status,
+    cancelled_at: now,
+    cancel_reason: cancelReason,
+    updated_at: now,
+  };
+  try {
+    const { persistDeliveryTerminalHistory } = require("./trip_history_persistence");
+    await persistDeliveryTerminalHistory(db, deliveryId, cancelledRow);
+  } catch (histErr) {
+    console.log(
+      "TRIP_HISTORY_PERSIST_FAIL",
+      `deliveryId=${deliveryId}`,
+      histErr?.message ?? histErr,
+    );
+  }
   await clearDeliveryFanoutAndOffers(db, deliveryId, isDriver ? uid : "");
   await clearDeliveryActivePointers(db, {
     deliveryId,
