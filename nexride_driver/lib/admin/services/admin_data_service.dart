@@ -40,6 +40,7 @@ class AdminDataService {
     'trips': 'adminGetDriverTrips',
     'subscription': 'adminGetDriverSubscription',
     'violations': 'adminGetDriverViolations',
+    'discounts': 'adminGetDriverDiscounts',
     'notes': 'adminGetDriverNotes',
     'audit': 'adminGetDriverAuditTimeline',
   };
@@ -52,68 +53,11 @@ class AdminDataService {
 
   rtdb.DatabaseReference get _rootRef => database.ref();
 
-  static const Map<String, Map<String, dynamic>> _defaultPricingConfig =
-      <String, Map<String, dynamic>>{
-    'lagos': <String, dynamic>{
-      'city': 'Lagos',
-      'baseFareNgn': 800,
-      'perKmNgn': 140,
-      'perMinuteNgn': 18,
-      'minimumFareNgn': 1400,
-      'enabled': true,
-    },
-    'abuja': <String, dynamic>{
-      'city': 'Abuja / FCT',
-      'baseFareNgn': 600,
-      'perKmNgn': 115,
-      'perMinuteNgn': 12,
-      'minimumFareNgn': 1350,
-      'enabled': true,
-    },
-    'delta': <String, dynamic>{
-      'city': 'Delta',
-      'baseFareNgn': 700,
-      'perKmNgn': 125,
-      'perMinuteNgn': 15,
-      'minimumFareNgn': 1400,
-      'enabled': true,
-    },
-    'edo': <String, dynamic>{
-      'city': 'Edo',
-      'baseFareNgn': 600,
-      'perKmNgn': 115,
-      'perMinuteNgn': 12,
-      'minimumFareNgn': 1350,
-      'enabled': true,
-    },
-    'imo': <String, dynamic>{
-      'city': 'Imo',
-      'baseFareNgn': 600,
-      'perKmNgn': 115,
-      'perMinuteNgn': 12,
-      'minimumFareNgn': 1350,
-      'enabled': true,
-    },
-    'anambra': <String, dynamic>{
-      'city': 'Anambra',
-      'baseFareNgn': 600,
-      'perKmNgn': 115,
-      'perMinuteNgn': 12,
-      'minimumFareNgn': 1350,
-      'enabled': true,
-    },
-  };
-
-  /// Stable RTDB key under `app_config/pricing/cities/{slug}` (matches rollout
-  /// region ids: lagos, abuja, delta, edo, imo, anambra). Not used for Rivers/PH.
-  static String _pricingCityStorageKey(String cityName) {
-    final s = cityName.trim().toLowerCase();
+  /// Stable RTDB key under `app_config/pricing/cities/{slug}` — matches
+  /// Firestore `delivery_regions/{regionId}` from the operational registry.
+  static String _pricingCityStorageKey(String cityOrSlug) {
+    final s = cityOrSlug.trim().toLowerCase();
     if (s.startsWith('abuja')) return 'abuja';
-    if (s.startsWith('lagos')) return 'lagos';
-    if (s.startsWith('delta')) return 'delta';
-    if (s.startsWith('edo')) return 'edo';
-    if (s.startsWith('imo')) return 'imo';
-    if (s.startsWith('anambra')) return 'anambra';
     return s
         .replaceAll(RegExp(r'[\s/]+'), '_')
         .replaceAll(RegExp(r'[^a-z0-9_]'), '');
@@ -437,15 +381,29 @@ class AdminDataService {
       ongoingTrips: (dash['active_trips'] as num?)?.toInt() ?? 0,
       completedTrips: 0,
       cancelledTrips: 0,
-      todaysRevenue: 0,
-      totalPlatformRevenue: 0,
+      todaysRevenue: (dash['total_platform_revenue'] as num?)?.toDouble() ?? 0,
+      totalPlatformRevenue:
+          (dash['total_platform_revenue'] as num?)?.toDouble() ?? 0,
       totalDriverPayouts: 0,
-      pendingWithdrawals: 0,
+      pendingWithdrawals: (dash['pending_withdrawals'] as num?)?.toDouble() ?? 0,
       subscriptionDriversCount: 0,
       commissionDriversCount: 0,
-      totalGrossBookings: 0,
-      totalCommissionsEarned: 0,
+      totalGrossBookings: (dash['total_gross_bookings'] as num?)?.toDouble() ?? 0,
+      totalCommissionsEarned:
+          (dash['total_commissions_earned'] as num?)?.toDouble() ?? 0,
       subscriptionRevenue: 0,
+      platformWalletBalance:
+          (dash['platform_wallet_balance'] as num?)?.toDouble() ?? 0,
+      totalBookingFeeRevenue:
+          (dash['total_booking_fee_revenue'] as num?)?.toDouble() ?? 0,
+      platformTotalWithdrawn:
+          (dash['platform_total_withdrawn'] as num?)?.toDouble() ?? 0,
+      pendingPlatformWithdrawals:
+          (dash['pending_platform_withdrawals'] as num?)?.toInt() ?? 0,
+      pendingPlatformWithdrawalsReserved:
+          (dash['pending_platform_withdrawals_reserved_ngn'] as num?)
+              ?.toDouble() ??
+          0,
     );
     Map<String, dynamic> appConfigData = const <String, dynamic>{};
     try {
@@ -604,25 +562,231 @@ class AdminDataService {
     }
   }
 
-  /// Platform ledger revenue buckets (`adminGetFinanceRevenueBuckets`).
-  Future<Map<String, dynamic>> adminGetFinanceRevenueBuckets() async {
+  Future<Map<String, dynamic>> _invokeFinanceCallable(
+    String name,
+    Future<HttpsCallableResult<dynamic>> Function() invoke,
+  ) async {
+    debugPrint('[Finance][CALL] start name=$name');
     try {
-      final callable = FirebaseFunctions.instanceFor(
-        region: 'us-central1',
-      ).httpsCallable(
-        'adminGetFinanceRevenueBuckets',
-        options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+      final result = await invoke();
+      final data = _map(result.data);
+      debugPrint(
+        '[Finance][CALL] ok name=$name success=${data['success']} reason=${data['reason']}',
       );
-      final result = await callable.call(<String, dynamic>{});
-      return _map(result.data);
-    } catch (e) {
-      debugPrint('[Finance][DATA] adminGetFinanceRevenueBuckets error: $e');
+      return data;
+    } on FirebaseFunctionsException catch (e, stackTrace) {
+      debugPrint(
+        '[Finance][CALL] fail name=$name code=${e.code} message=${e.message} details=${e.details}',
+      );
+      debugPrint('[Finance][CALL] stack $stackTrace');
       return <String, dynamic>{
         'success': false,
-        'reason': e.toString(),
-        'buckets': <String, dynamic>{},
+        'reason': e.code,
+        'message': e.message ?? e.toString(),
+        'details': e.details,
+        'callable': name,
+      };
+    } catch (e, stackTrace) {
+      debugPrint('[Finance][CALL] fail name=$name error=$e');
+      debugPrint('[Finance][CALL] stack $stackTrace');
+      return <String, dynamic>{
+        'success': false,
+        'reason': 'client_error',
+        'message': e.toString(),
+        'callable': name,
       };
     }
+  }
+
+  /// Platform ledger revenue buckets (`adminGetFinanceRevenueBuckets`).
+  Future<Map<String, dynamic>> adminGetFinanceRevenueBuckets() async {
+    final data = await _invokeFinanceCallable(
+      'adminGetFinanceRevenueBuckets',
+      () => FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'adminGetFinanceRevenueBuckets',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+          )
+          .call(<String, dynamic>{}),
+    );
+    if (data['success'] != true) {
+      return <String, dynamic>{
+        ...data,
+        'buckets': data['buckets'] is Map
+            ? Map<String, dynamic>.from(data['buckets'] as Map)
+            : <String, dynamic>{},
+      };
+    }
+    return data;
+  }
+
+  /// Production finance diagnostics (`adminGetFinanceDiagnostics`).
+  Future<Map<String, dynamic>> adminGetFinanceDiagnostics() async {
+    return _invokeFinanceCallable(
+      'adminGetFinanceDiagnostics',
+      () => FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'adminGetFinanceDiagnostics',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+          )
+          .call(<String, dynamic>{}),
+    );
+  }
+
+  /// Super Admin finance audit page (`adminGetFinanceAuditPage`).
+  Future<Map<String, dynamic>> adminGetFinanceAuditPage({int limit = 100}) async {
+    return _invokeFinanceCallable(
+      'adminGetFinanceAuditPage',
+      () => FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'adminGetFinanceAuditPage',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 120)),
+          )
+          .call(<String, dynamic>{'limit': limit}),
+    );
+  }
+
+  Future<Map<String, dynamic>> adminGetPlatformWalletSnapshot() async {
+    return _invokeFinanceCallable(
+      'adminGetPlatformWalletSnapshot',
+      () => FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'adminGetPlatformWalletSnapshot',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+          )
+          .call(<String, dynamic>{}),
+    );
+  }
+
+  Future<Map<String, dynamic>> adminListPlatformWalletLedger({int limit = 50}) async {
+    return _invokeFinanceCallable(
+      'adminListPlatformWalletLedger',
+      () => FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'adminListPlatformWalletLedger',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+          )
+          .call(<String, dynamic>{'limit': limit}),
+    );
+  }
+
+  Future<Map<String, dynamic>> adminGetPlatformPayoutDestination() async {
+    return _invokeFinanceCallable(
+      'adminGetPlatformPayoutDestination',
+      () => FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'adminGetPlatformPayoutDestination',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+          )
+          .call(<String, dynamic>{}),
+    );
+  }
+
+  Future<Map<String, dynamic>> adminListFlutterwavePayoutBanks() async {
+    return _invokeFinanceCallable(
+      'adminListFlutterwavePayoutBanks',
+      () => FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'adminListFlutterwavePayoutBanks',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+          )
+          .call(<String, dynamic>{}),
+    );
+  }
+
+  Future<Map<String, dynamic>> adminSavePlatformPayoutDestination({
+    required String bankCode,
+    required String accountNumber,
+    required String accountHolderName,
+  }) async {
+    return _invokeFinanceCallable(
+      'adminSavePlatformPayoutDestination',
+      () => FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable(
+            'adminSavePlatformPayoutDestination',
+            options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+          )
+          .call(<String, dynamic>{
+        'bank_code': bankCode.trim(),
+        'account_number': accountNumber.trim(),
+        'account_holder_name': accountHolderName.trim(),
+      }),
+    );
+  }
+
+  Future<Map<String, dynamic>> adminVerifyPlatformWithdrawalFlutterwavePayout({
+    required String withdrawalId,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminVerifyPlatformWithdrawalFlutterwavePayout',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 90)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawal_id': withdrawalId,
+    });
+    return _map(result.data);
+  }
+
+  Future<Map<String, dynamic>> requestPlatformWithdrawal({
+    required int amountNgn,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'requestPlatformWithdrawal',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{'amount': amountNgn});
+    return _map(result.data);
+  }
+
+  Future<Map<String, dynamic>> adminMarkPlatformWithdrawalPaid({
+    required String withdrawalId,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminMarkPlatformWithdrawalPaid',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawal_id': withdrawalId,
+    });
+    return _map(result.data);
+  }
+
+  Future<Map<String, dynamic>> adminRejectPlatformWithdrawal({
+    required String withdrawalId,
+    String? reason,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminRejectPlatformWithdrawal',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawal_id': withdrawalId,
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+    return _map(result.data);
+  }
+
+  Future<Map<String, dynamic>> adminPayPlatformWithdrawalViaFlutterwave({
+    required String withdrawalId,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminPayPlatformWithdrawalViaFlutterwave',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 90)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawal_id': withdrawalId,
+    });
+    return _map(result.data);
   }
 
   /// Firestore-backed Flutterwave VA payment intents (`adminListPaymentIntents`).
@@ -998,6 +1162,190 @@ class AdminDataService {
         stackTrace: stackTrace,
       );
       return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> fetchRiderEntityTabForAdmin({
+    required String riderId,
+    required String tabId,
+  }) async {
+    final String id = riderId.trim();
+    if (id.isEmpty) return null;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetRiderEntityTab',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'riderId': id,
+        'tabId': tabId,
+        if (tabId == 'trips') 'limit': 25,
+      });
+      final data = _map(result.data);
+      adminPerfWarnPayloadApprox(
+        surface: 'rider_drawer',
+        callableName: 'adminGetRiderEntityTab',
+        approxUtf8Bytes: _approxJsonUtf8Bytes(Map<String, dynamic>.from(data)),
+      );
+      return data;
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchRiderEntityTabForAdmin tab=$tabId error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchRiderEntityTabForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> fetchFleetEntityTabForAdmin({
+    required String businessId,
+    required String tabId,
+  }) async {
+    final String id = businessId.trim();
+    if (id.isEmpty) return null;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGetFleetEntityTab',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'business_id': id,
+        'tabId': tabId,
+        if (tabId == 'payments') 'limit': 25,
+      });
+      return _map(result.data);
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchFleetEntityTabForAdmin tab=$tabId error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchFleetEntityTabForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  Future<bool> adminUpdateFleetPricingConfig({
+    required String businessId,
+    required String paymentModel,
+    double? commissionRate,
+    int? weeklySubscriptionNgn,
+    int? monthlySubscriptionNgn,
+    String? subscriptionStatus,
+    String reason = '',
+  }) async {
+    final String id = businessId.trim();
+    if (id.isEmpty) return false;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminUpdateFleetPricingConfig',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'business_id': id,
+        'payment_model': paymentModel.trim(),
+        if (commissionRate != null) 'commission_rate': commissionRate,
+        if (weeklySubscriptionNgn != null)
+          'weekly_subscription_ngn': weeklySubscriptionNgn,
+        if (monthlySubscriptionNgn != null)
+          'monthly_subscription_ngn': monthlySubscriptionNgn,
+        if (subscriptionStatus != null && subscriptionStatus.trim().isNotEmpty)
+          'subscription_status': subscriptionStatus.trim(),
+        if (reason.trim().isNotEmpty) 'reason': reason.trim(),
+      });
+      return _map(result.data)['success'] == true;
+    } catch (error) {
+      debugPrint('[AdminData] adminUpdateFleetPricingConfig error=$error');
+      return false;
+    }
+  }
+
+  Future<Map<String, dynamic>?> fetchFleetLinkedDriversForAdmin({
+    required String businessId,
+    int limit = 8,
+  }) async {
+    final String id = businessId.trim();
+    if (id.isEmpty) return null;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListFleetLinkedDriversPage',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'business_id': id,
+        'limit': limit,
+      });
+      final data = _map(result.data);
+      if (data['success'] != true) return null;
+      return data;
+    } catch (error) {
+      debugPrint('[AdminData] fetchFleetLinkedDriversForAdmin error=$error');
+      return null;
+    }
+  }
+
+  Future<bool> adminGrantUserDiscountCallable({
+    required String uid,
+    required String appliesTo,
+    required int amountNgn,
+    String entityType = 'rider',
+    int remainingUses = 1,
+    String reason = '',
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminGrantUserDiscount',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'uid': uid.trim(),
+        'entity_type': entityType.trim(),
+        'applies_to': appliesTo.trim(),
+        'amount_ngn': amountNgn,
+        'remaining_uses': remainingUses,
+        if (reason.trim().isNotEmpty) 'reason': reason.trim(),
+        'discount_type': appliesTo.trim(),
+      });
+      return _map(result.data)['success'] == true;
+    } catch (error) {
+      debugPrint('[AdminData] adminGrantUserDiscountCallable error=$error');
+      return false;
+    }
+  }
+
+  Future<bool> adminRevokeUserDiscountCallable({
+    required String uid,
+    required String discountId,
+    String entityType = 'rider',
+    String reason = '',
+  }) async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminRevokeUserDiscount',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'uid': uid.trim(),
+        'entity_type': entityType.trim(),
+        'discount_id': discountId.trim(),
+        if (reason.trim().isNotEmpty) 'reason': reason.trim(),
+      });
+      return _map(result.data)['success'] == true;
+    } catch (error) {
+      debugPrint('[AdminData] adminRevokeUserDiscountCallable error=$error');
+      return false;
     }
   }
 
@@ -1486,6 +1834,107 @@ class AdminDataService {
     }
   }
 
+  Future<bool> adminAssignSupportTicketCallable({
+    required String ticketId,
+    required String assigneeId,
+    String assigneeName = '',
+    String assigneeRole = '',
+  }) async {
+    final id = ticketId.trim();
+    final uid = assigneeId.trim();
+    if (id.isEmpty || uid.isEmpty) return false;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminAssignSupportTicket',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'ticketId': id,
+        'assigneeId': uid,
+        if (assigneeName.trim().isNotEmpty) 'assigneeName': assigneeName.trim(),
+        if (assigneeRole.trim().isNotEmpty) 'assigneeRole': assigneeRole.trim(),
+      });
+      final data = _map(result.data);
+      return data['success'] == true;
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] adminAssignSupportTicketCallable error=$error');
+      debugPrintStack(
+        label: '[AdminData] adminAssignSupportTicketCallable stack',
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  Future<bool> adminUnassignSupportTicketCallable({
+    required String ticketId,
+  }) async {
+    final id = ticketId.trim();
+    if (id.isEmpty) return false;
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminAssignSupportTicket',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{
+        'ticketId': id,
+        'unassign': true,
+      });
+      final data = _map(result.data);
+      return data['success'] == true;
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] adminUnassignSupportTicketCallable error=$error');
+      debugPrintStack(
+        label: '[AdminData] adminUnassignSupportTicketCallable stack',
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  Future<List<AdminSupportStaffMember>> fetchSupportStaffForAdmin() async {
+    try {
+      final callable = FirebaseFunctions.instanceFor(
+        region: 'us-central1',
+      ).httpsCallable(
+        'adminListSupportStaff',
+        options: HttpsCallableOptions(timeout: Duration(seconds: 45)),
+      );
+      final result = await callable.call(<String, dynamic>{});
+      final data = _map(result.data);
+      if (data['success'] != true) return const <AdminSupportStaffMember>[];
+      final rows = data['staff'];
+      if (rows is! List) return const <AdminSupportStaffMember>[];
+      return rows
+          .map((dynamic row) {
+            final map = _map(row);
+            final uid = map['uid']?.toString().trim() ?? '';
+            if (uid.isEmpty) return null;
+            return AdminSupportStaffMember(
+              uid: uid,
+              displayName: map['displayName']?.toString().trim().isNotEmpty == true
+                  ? map['displayName'].toString().trim()
+                  : uid,
+              role: map['role']?.toString().trim() ?? 'support_agent',
+              email: map['email']?.toString().trim() ?? '',
+            );
+          })
+          .whereType<AdminSupportStaffMember>()
+          .toList(growable: false);
+    } catch (error, stackTrace) {
+      debugPrint('[AdminData] fetchSupportStaffForAdmin error=$error');
+      debugPrintStack(
+        label: '[AdminData] fetchSupportStaffForAdmin stack',
+        stackTrace: stackTrace,
+      );
+      return const <AdminSupportStaffMember>[];
+    }
+  }
+
   Future<bool> adminEscalateSupportTicketCallable({
     required String ticketId,
   }) async {
@@ -1825,8 +2274,6 @@ class AdminDataService {
     ensureAdminCallableSuccess(data);
   }
 
-  /// Explicit "mark paid" using the Slice 2 callable. A stable idempotency key
-  /// keyed on the withdrawal id makes retries safe (server also dedupes).
   Future<void> markWithdrawalPaid({
     required AdminWithdrawalRecord withdrawal,
     required String payoutReference,
@@ -1850,6 +2297,42 @@ class AdminDataService {
       if (note.isNotEmpty) 'adminNote': note,
     });
     ensureAdminCallableSuccess(_map(result.data));
+  }
+
+  Future<Map<String, dynamic>> payWithdrawalViaFlutterwave({
+    required AdminWithdrawalRecord withdrawal,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminPayWithdrawalViaFlutterwave',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 90)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawal_id': withdrawal.id,
+      'withdrawalId': withdrawal.id,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
+  }
+
+  Future<Map<String, dynamic>> verifyWithdrawalFlutterwavePayout({
+    required AdminWithdrawalRecord withdrawal,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminVerifyWithdrawalFlutterwavePayout',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 90)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'withdrawal_id': withdrawal.id,
+      'withdrawalId': withdrawal.id,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
   }
 
   /// Explicit "reject" using the Slice 2 callable. Reason is required server-side
@@ -1922,8 +2405,21 @@ class AdminDataService {
   Future<void> updatePricingConfig({
     required List<AdminCityPricing> cities,
     required double commissionRate,
+    required double fleetOwnerCommissionRate,
+    required int bookingFeeNgn,
+    required String bookingFeeMode,
+    required double bookingFeePercent,
+    required int bookingFeeMinNgn,
+    int? bookingFeeMaxNgn,
+    required int dispatchBookingFeeNgn,
+    required String dispatchBookingFeeMode,
+    required double dispatchBookingFeePercent,
+    required int dispatchBookingFeeMinNgn,
+    int? dispatchBookingFeeMaxNgn,
     required int weeklySubscriptionNgn,
     required int monthlySubscriptionNgn,
+    required int fleetWeeklySubscriptionNgn,
+    required int fleetMonthlySubscriptionNgn,
   }) async {
     final callable = FirebaseFunctions.instanceFor(
       region: 'us-central1',
@@ -1933,12 +2429,42 @@ class AdminDataService {
     );
     final result = await callable.call(<String, dynamic>{
       'commissionRate': commissionRate,
+      'fleetOwnerCommissionRate': fleetOwnerCommissionRate,
+      'bookingFeeNgn': bookingFeeNgn,
+      'bookingFeeMode': bookingFeeMode,
+      'bookingFeePercent': bookingFeePercent,
+      'bookingFeeMinNgn': bookingFeeMinNgn,
+      if (bookingFeeMaxNgn != null) 'bookingFeeMaxNgn': bookingFeeMaxNgn,
+      'rides': <String, dynamic>{
+        'bookingFeeNgn': bookingFeeNgn,
+        'bookingFeeMode': bookingFeeMode,
+        'bookingFeePercent': bookingFeePercent,
+        'bookingFeeMinNgn': bookingFeeMinNgn,
+        if (bookingFeeMaxNgn != null) 'bookingFeeMaxNgn': bookingFeeMaxNgn,
+      },
+      'dispatch': <String, dynamic>{
+        'bookingFeeNgn': dispatchBookingFeeNgn,
+        'bookingFeeMode': dispatchBookingFeeMode,
+        'bookingFeePercent': dispatchBookingFeePercent,
+        'bookingFeeMinNgn': dispatchBookingFeeMinNgn,
+        if (dispatchBookingFeeMaxNgn != null)
+          'bookingFeeMaxNgn': dispatchBookingFeeMaxNgn,
+      },
+      'dispatchBookingFeeNgn': dispatchBookingFeeNgn,
+      'dispatchBookingFeeMode': dispatchBookingFeeMode,
+      'dispatchBookingFeePercent': dispatchBookingFeePercent,
+      'dispatchBookingFeeMinNgn': dispatchBookingFeeMinNgn,
+      if (dispatchBookingFeeMaxNgn != null)
+        'dispatchBookingFeeMaxNgn': dispatchBookingFeeMaxNgn,
       'weeklySubscriptionNgn': weeklySubscriptionNgn,
       'monthlySubscriptionNgn': monthlySubscriptionNgn,
+      'fleetWeeklySubscriptionNgn': fleetWeeklySubscriptionNgn,
+      'fleetMonthlySubscriptionNgn': fleetMonthlySubscriptionNgn,
       'cities': cities
           .map(
             (city) => <String, dynamic>{
               'city': city.city,
+              'region_id': city.regionId ?? _pricingCityStorageKey(city.city),
               'baseFareNgn': city.baseFareNgn,
               'perKmNgn': city.perKmNgn,
               'perMinuteNgn': city.perMinuteNgn,
@@ -1953,6 +2479,411 @@ class AdminDataService {
     debugPrint(
       '[AdminPerf] updatePricingConfig callable ok '
       'drivers_processed=${data['drivers_processed'] ?? data['driversProcessed']}',
+    );
+  }
+
+  Future<Map<String, dynamic>> markAlertQueueReviewed({
+    required String queue,
+    String? reason,
+    int limit = 100,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminMarkAlertQueueReviewed',
+      options: HttpsCallableOptions(timeout: const Duration(minutes: 2)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'queue': queue,
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+      'limit': limit,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
+  }
+
+  Future<Map<String, dynamic>> markPaymentIssueReviewed({
+    required String entityType,
+    required String entityId,
+    String? txRef,
+    String? reason,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminMarkPaymentIssueReviewed',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'entity_type': entityType,
+      'entity_id': entityId,
+      if (txRef != null && txRef.trim().isNotEmpty) 'tx_ref': txRef.trim(),
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
+  }
+
+  Future<Map<String, dynamic>> archiveTestRecord({
+    required String entityType,
+    required String entityId,
+    required String confirmation,
+    String? reason,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminArchiveTestRecord',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'entity_type': entityType,
+      'entity_id': entityId,
+      'confirmation': confirmation,
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
+  }
+
+  Future<List<Map<String, dynamic>>> searchArchiveCandidates({
+    required String query,
+    bool includeArchived = false,
+    bool archivedOnly = false,
+    int limit = 12,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminSearchArchiveCandidates',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'query': query,
+      'include_archived': includeArchived,
+      'archived_only': archivedOnly,
+      'limit': limit,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    final raw = data['suggestions'];
+    if (raw is! List) return <Map<String, dynamic>>[];
+    return raw
+        .whereType<Map>()
+        .map((row) => Map<String, dynamic>.from(row))
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> restoreArchivedRecord({
+    required String entityType,
+    required String entityId,
+    String? reason,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminRestoreArchivedRecord',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'entity_type': entityType,
+      'entity_id': entityId,
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
+  }
+
+  Future<Map<String, dynamic>> listArchivedRecords({
+    bool runPurge = true,
+    int limit = 50,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminListArchivedRecords',
+      options: HttpsCallableOptions(timeout: const Duration(minutes: 2)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'run_purge': runPurge,
+      'limit': limit,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
+  }
+
+  Future<Map<String, dynamic>> purgeEligibleArchivedRecords({
+    String? reason,
+    int limit = 100,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminPurgeEligibleArchivedRecords',
+      options: HttpsCallableOptions(timeout: const Duration(minutes: 2)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'limit': limit,
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
+  }
+
+  /// Callable-backed operational settings for `/admin/settings`.
+  Future<AdminSettingsBundle> fetchSettingsConfig({
+    required String adminEmail,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminGetSettingsConfig',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{});
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return _parseSettingsBundleFromCallable(data, adminEmail: adminEmail);
+  }
+
+  Future<AdminSettingsBundle> updateSettingsConfig({
+    required Map<String, dynamic> patch,
+    required String adminEmail,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminUpdateSettingsConfig',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{'patch': patch});
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return _parseSettingsBundleFromCallable(data, adminEmail: adminEmail);
+  }
+
+  AdminSettingsBundle _parseSettingsBundleFromCallable(
+    Map<String, dynamic> data, {
+    required String adminEmail,
+  }) {
+    final settingsMap = _map(data['settings']);
+    final fees = _map(settingsMap['withdrawal_fees']);
+    final pricingSummaryMap = _map(data['pricing_summary']);
+    final pricingSummary = AdminPricingConfig(
+      cities: (pricingSummaryMap['cities'] is List
+              ? pricingSummaryMap['cities'] as List
+              : const <dynamic>[])
+          .map((dynamic row) {
+            final city = _map(row);
+            return AdminCityPricing(
+              city: _text(city['city']).isNotEmpty
+                  ? _text(city['city'])
+                  : _text(city['region_id']),
+              regionId: _text(city['region_id']).isNotEmpty
+                  ? _text(city['region_id'])
+                  : null,
+              baseFareNgn: _firstInt(<dynamic>[
+                city['base_fare_ngn'],
+                city['baseFareNgn'],
+              ]),
+              perKmNgn: _firstInt(<dynamic>[city['per_km_ngn'], city['perKmNgn']]),
+              perMinuteNgn: _firstInt(<dynamic>[
+                city['per_minute_ngn'],
+                city['perMinuteNgn'],
+              ]),
+              minimumFareNgn: _firstInt(<dynamic>[
+                city['minimum_fare_ngn'],
+                city['minimumFareNgn'],
+              ]),
+              enabled: city['enabled'] != false,
+            );
+          })
+          .toList(),
+      commissionRate: _firstPositiveDouble(<dynamic>[
+        pricingSummaryMap['commission_rate'],
+        pricingSummaryMap['commissionRate'],
+        DriverBusinessConfig.commissionRate,
+      ]),
+      fleetOwnerCommissionRate: _firstPositiveDouble(<dynamic>[
+        pricingSummaryMap['fleet_owner_commission_rate'],
+        pricingSummaryMap['fleetOwnerCommissionRate'],
+        pricingSummaryMap['fleet_linked_biker_commission_rate'],
+        pricingSummaryMap['fleetLinkedBikerCommissionRate'],
+        pricingSummaryMap['commission_rate'],
+        pricingSummaryMap['commissionRate'],
+        DriverBusinessConfig.commissionRate,
+      ]),
+      bookingFeeNgn: _firstInt(<dynamic>[
+        pricingSummaryMap['booking_fee_ngn'],
+        pricingSummaryMap['bookingFeeNgn'],
+        100,
+      ]),
+      bookingFeeMode: _firstText(<dynamic>[
+        pricingSummaryMap['booking_fee_mode'],
+        pricingSummaryMap['bookingFeeMode'],
+        'max_fixed_or_percentage',
+      ]),
+      bookingFeePercent: _firstPositiveDouble(<dynamic>[
+        pricingSummaryMap['booking_fee_percent'],
+        pricingSummaryMap['bookingFeePercent'],
+        3,
+      ]),
+      bookingFeeMinNgn: _firstInt(<dynamic>[
+        pricingSummaryMap['booking_fee_min_ngn'],
+        pricingSummaryMap['bookingFeeMinNgn'],
+        100,
+      ]),
+      bookingFeeMaxNgn: () {
+        final raw =
+            pricingSummaryMap['booking_fee_max_ngn'] ?? pricingSummaryMap['bookingFeeMaxNgn'];
+        if (raw == null || raw.toString().trim().isEmpty) {
+          return null;
+        }
+        return _firstInt(<dynamic>[raw]);
+      }(),
+      dispatchBookingFeeNgn: _firstInt(<dynamic>[
+        pricingSummaryMap['dispatch']?['booking_fee_ngn'],
+        pricingSummaryMap['dispatch']?['bookingFeeNgn'],
+        pricingSummaryMap['dispatch_booking_fee_ngn'],
+        pricingSummaryMap['dispatchBookingFeeNgn'],
+        150,
+      ]),
+      dispatchBookingFeeMode: _firstText(<dynamic>[
+        pricingSummaryMap['dispatch']?['booking_fee_mode'],
+        pricingSummaryMap['dispatch']?['bookingFeeMode'],
+        pricingSummaryMap['dispatch_booking_fee_mode'],
+        pricingSummaryMap['dispatchBookingFeeMode'],
+        'max_fixed_or_percentage',
+      ]),
+      dispatchBookingFeePercent: _firstPositiveDouble(<dynamic>[
+        pricingSummaryMap['dispatch']?['booking_fee_percent'],
+        pricingSummaryMap['dispatch']?['bookingFeePercent'],
+        pricingSummaryMap['dispatch_booking_fee_percent'],
+        pricingSummaryMap['dispatchBookingFeePercent'],
+        5,
+      ]),
+      dispatchBookingFeeMinNgn: _firstInt(<dynamic>[
+        pricingSummaryMap['dispatch']?['booking_fee_min_ngn'],
+        pricingSummaryMap['dispatch']?['bookingFeeMinNgn'],
+        pricingSummaryMap['dispatch_booking_fee_min_ngn'],
+        pricingSummaryMap['dispatchBookingFeeMinNgn'],
+        150,
+      ]),
+      dispatchBookingFeeMaxNgn: () {
+        final raw = pricingSummaryMap['dispatch']?['booking_fee_max_ngn'] ??
+            pricingSummaryMap['dispatch']?['bookingFeeMaxNgn'] ??
+            pricingSummaryMap['dispatch_booking_fee_max_ngn'] ??
+            pricingSummaryMap['dispatchBookingFeeMaxNgn'];
+        if (raw == null || raw.toString().trim().isEmpty) {
+          return null;
+        }
+        return _firstInt(<dynamic>[raw]);
+      }(),
+      weeklySubscriptionNgn: _firstInt(<dynamic>[
+        pricingSummaryMap['weekly_subscription_ngn'],
+        pricingSummaryMap['weeklySubscriptionNgn'],
+        DriverBusinessConfig.weeklySubscriptionPriceNgn,
+      ]),
+      monthlySubscriptionNgn: _firstInt(<dynamic>[
+        pricingSummaryMap['monthly_subscription_ngn'],
+        pricingSummaryMap['monthlySubscriptionNgn'],
+        DriverBusinessConfig.monthlySubscriptionPriceNgn,
+      ]),
+      fleetWeeklySubscriptionNgn: _firstInt(<dynamic>[
+        pricingSummaryMap['fleet_weekly_subscription_ngn'],
+        pricingSummaryMap['fleetWeeklySubscriptionNgn'],
+        pricingSummaryMap['weekly_subscription_ngn'],
+        pricingSummaryMap['weeklySubscriptionNgn'],
+        DriverBusinessConfig.weeklySubscriptionPriceNgn,
+      ]),
+      fleetMonthlySubscriptionNgn: _firstInt(<dynamic>[
+        pricingSummaryMap['fleet_monthly_subscription_ngn'],
+        pricingSummaryMap['fleetMonthlySubscriptionNgn'],
+        pricingSummaryMap['monthly_subscription_ngn'],
+        pricingSummaryMap['monthlySubscriptionNgn'],
+        DriverBusinessConfig.monthlySubscriptionPriceNgn,
+      ]),
+      loadedFromBackend: true,
+      lastUpdated: _dateFromCandidates(<dynamic>[
+        pricingSummaryMap['updated_at'],
+        pricingSummaryMap['updatedAt'],
+      ]),
+      updatedBy: _text(
+        pricingSummaryMap['updated_by'] ?? pricingSummaryMap['updatedBy'],
+      ).isEmpty
+          ? null
+          : _text(pricingSummaryMap['updated_by'] ?? pricingSummaryMap['updatedBy']),
+      rawData: pricingSummaryMap,
+    );
+
+    final cityEnablementRaw = _map(data['city_enablement']);
+    final cityEnablement = <String, bool>{
+      for (final entry in cityEnablementRaw.entries)
+        entry.key: entry.value != false,
+    };
+
+    final activeTypes = (settingsMap['active_request_service_types'] is List
+            ? settingsMap['active_request_service_types'] as List
+            : const <dynamic>[])
+        .map((dynamic v) => _text(v).toLowerCase())
+        .where((String s) => s.isNotEmpty)
+        .toList();
+
+    final settings = AdminOperationalSettings(
+      withdrawalNoticeText: _firstText(<dynamic>[
+        settingsMap['withdrawal_notice_text'],
+      ], fallback: DriverFinanceService.payoutNoticeText),
+      cityEnablement: cityEnablement,
+      driverVerificationRequired:
+          settingsMap['driver_verification_required'] == true,
+      requireBvnVerification:
+          settingsMap['require_bvn_verification'] == true,
+      activeServiceTypes: activeTypes.isNotEmpty
+          ? activeTypes
+          : DriverFeatureFlags.activeRequestServiceTypes.toList(),
+      offRouteToleranceMeters: _firstInt(<dynamic>[
+        settingsMap['off_route_tolerance_meters'],
+        250,
+      ]),
+      adminEmail: adminEmail,
+      driverWithdrawalFeeNgn: _firstInt(<dynamic>[
+        fees['driver_withdrawal_fee_ngn'],
+        50,
+      ]),
+      merchantWithdrawalFeeNgn: _firstInt(<dynamic>[
+        fees['merchant_withdrawal_fee_ngn'],
+        50,
+      ]),
+      fleetWithdrawalFeeNgn: _firstInt(<dynamic>[
+        fees['fleet_withdrawal_fee_ngn'],
+        50,
+      ]),
+      rawData: settingsMap,
+    );
+
+    final meta = _map(data['meta']);
+    return AdminSettingsBundle(
+      settings: settings,
+      pricingSummary: pricingSummary,
+      cityEnablement: cityEnablement,
+      lastUpdated: _dateFromCandidates(<dynamic>[
+        meta['updated_at'],
+        meta['updatedAt'],
+      ]),
+      updatedBy: _text(meta['updated_by'] ?? meta['updatedBy']).isEmpty
+          ? null
+          : _text(meta['updated_by'] ?? meta['updatedBy']),
+      historyId: _text(
+        meta['settings_history_id'] ?? meta['settingsHistoryId'],
+      ).isEmpty
+          ? null
+          : _text(meta['settings_history_id'] ?? meta['settingsHistoryId']),
     );
   }
 
@@ -2076,6 +3007,67 @@ class AdminDataService {
     });
     final data = _map(result.data);
     ensureAdminCallableSuccess(data);
+  }
+
+  Future<void> adminDeleteUser({
+    required String uid,
+    required String role,
+    required String reason,
+    String merchantId = '',
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminDeleteUser',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'uid': uid,
+      'role': role,
+      'reason': reason,
+      if (merchantId.trim().isNotEmpty) 'merchant_id': merchantId.trim(),
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+  }
+
+  Future<void> adminRestoreUser({
+    required String uid,
+    required String role,
+    String note = '',
+    String merchantId = '',
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminRestoreUser',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'uid': uid,
+      'role': role,
+      if (note.trim().isNotEmpty) 'note': note.trim(),
+      if (merchantId.trim().isNotEmpty) 'merchant_id': merchantId.trim(),
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+  }
+
+  Future<Map<String, dynamic>> adminListPaymentAuditFeed({
+    int limit = 60,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'adminListPaymentAuditFeed',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'limit': limit,
+    });
+    final data = _map(result.data);
+    ensureAdminCallableSuccess(data);
+    return data;
   }
 
   Future<void> adminDeleteAccount({
@@ -3102,6 +4094,32 @@ class AdminDataService {
     return subscriptions;
   }
 
+  /// Matches Cloud Functions `countDriverVerificationPending` (driver_documents SSOT).
+  static int countPendingDriverVerificationDrivers(
+    Map<String, dynamic> driverDocumentsData,
+  ) {
+    final pendingDrivers = <String>{};
+    for (final entry in driverDocumentsData.entries) {
+      final driverId = entry.key;
+      final docs = entry.value;
+      if (docs is! Map) continue;
+      for (final raw in docs.values) {
+        if (raw is! Map) continue;
+        final status = '${raw['status'] ?? ''}'.trim().toLowerCase();
+        final result = '${raw['result'] ?? ''}'.trim().toLowerCase();
+        final pending = status == 'submitted' ||
+            status == 'pending' ||
+            result == 'awaiting_review' ||
+            result == 'pending';
+        if (pending) {
+          pendingDrivers.add(driverId);
+          break;
+        }
+      }
+    }
+    return pendingDrivers.length;
+  }
+
   List<AdminVerificationCase> _buildVerificationCases({
     required Map<String, dynamic> driversData,
     required Map<String, dynamic> driverVerificationsData,
@@ -3267,37 +4285,37 @@ class AdminDataService {
   AdminPricingConfig _buildPricingConfig(Map<String, dynamic> appConfigData) {
     final pricing = _map(appConfigData['pricing']);
     final pricingCities = _map(pricing['cities']);
-    final mergedCities = <String, Map<String, dynamic>>{
-      for (final entry in _defaultPricingConfig.entries)
-        entry.key: <String, dynamic>{...entry.value},
-    };
 
-    for (final entry in pricingCities.entries) {
-      final slug = _pricingCityStorageKey(entry.key);
-      mergedCities[slug] = <String, dynamic>{
-        ...mergedCities[slug] ?? const <String, dynamic>{},
-        ..._map(entry.value),
-      };
-    }
-
-    final cities = mergedCities.values
+    final cities = pricingCities.entries
         .map(
-          (Map<String, dynamic> city) => AdminCityPricing(
-            city: _titleCase(
-                _text(city['city']).isNotEmpty ? _text(city['city']) : 'City'),
-            baseFareNgn:
-                _firstInt(<dynamic>[city['baseFareNgn'], city['base_fare']]),
-            perKmNgn: _firstInt(<dynamic>[city['perKmNgn'], city['per_km']]),
-            perMinuteNgn: _firstInt(<dynamic>[
-              city['perMinuteNgn'],
-              city['per_minute'],
-            ]),
-            minimumFareNgn: _firstInt(<dynamic>[
-              city['minimumFareNgn'],
-              city['minimum_fare'],
-            ]),
-            enabled: city['enabled'] != false,
-          ),
+          (MapEntry<String, dynamic> entry) {
+            final slug = entry.key.trim();
+            final city = _map(entry.value);
+            final regionId = _text(city['region_id'] ?? city['regionId']).isNotEmpty
+                ? _text(city['region_id'] ?? city['regionId'])
+                : slug;
+            final label = _text(city['city']).isNotEmpty
+                ? _titleCase(_text(city['city']))
+                : _titleCase(regionId);
+            return AdminCityPricing(
+              regionId: regionId,
+              city: label,
+              baseFareNgn:
+                  _firstInt(<dynamic>[city['baseFareNgn'], city['base_fare']]),
+              perKmNgn: _firstInt(<dynamic>[city['perKmNgn'], city['per_km']]),
+              perMinuteNgn: _firstInt(<dynamic>[
+                city['perMinuteNgn'],
+                city['per_minute'],
+              ]),
+              minimumFareNgn: _firstInt(<dynamic>[
+                city['minimumFareNgn'],
+                city['minimum_fare'],
+              ]),
+              enabled: city['enabled'] != false,
+              rolloutRegionEnabled:
+                  city['rollout_region_enabled'] != false,
+            );
+          },
         )
         .toList()
       ..sort(
@@ -3310,6 +4328,80 @@ class AdminDataService {
         pricing['commission_rate'],
         DriverBusinessConfig.commissionRate,
       ]),
+      fleetOwnerCommissionRate: _firstPositiveDouble(<dynamic>[
+        pricing['fleetOwnerCommissionRate'],
+        pricing['fleet_owner_commission_rate'],
+        pricing['fleetLinkedBikerCommissionRate'],
+        pricing['fleet_linked_biker_commission_rate'],
+        pricing['commissionRate'],
+        pricing['commission_rate'],
+        DriverBusinessConfig.commissionRate,
+      ]),
+      bookingFeeNgn: _firstInt(<dynamic>[
+        pricing['bookingFeeNgn'],
+        pricing['booking_fee_ngn'],
+        100,
+      ]),
+      bookingFeeMode: _firstText(<dynamic>[
+        pricing['bookingFeeMode'],
+        pricing['booking_fee_mode'],
+        'max_fixed_or_percentage',
+      ]),
+      bookingFeePercent: _firstPositiveDouble(<dynamic>[
+        pricing['bookingFeePercent'],
+        pricing['booking_fee_percent'],
+        3,
+      ]),
+      bookingFeeMinNgn: _firstInt(<dynamic>[
+        pricing['bookingFeeMinNgn'],
+        pricing['booking_fee_min_ngn'],
+        100,
+      ]),
+      bookingFeeMaxNgn: () {
+        final raw = pricing['bookingFeeMaxNgn'] ?? pricing['booking_fee_max_ngn'];
+        if (raw == null || raw.toString().trim().isEmpty) {
+          return null;
+        }
+        return _firstInt(<dynamic>[raw]);
+      }(),
+      dispatchBookingFeeNgn: _firstInt(<dynamic>[
+        pricing['dispatch']?['bookingFeeNgn'],
+        pricing['dispatch']?['booking_fee_ngn'],
+        pricing['dispatchBookingFeeNgn'],
+        pricing['dispatch_booking_fee_ngn'],
+        150,
+      ]),
+      dispatchBookingFeeMode: _firstText(<dynamic>[
+        pricing['dispatch']?['bookingFeeMode'],
+        pricing['dispatch']?['booking_fee_mode'],
+        pricing['dispatchBookingFeeMode'],
+        pricing['dispatch_booking_fee_mode'],
+        'max_fixed_or_percentage',
+      ]),
+      dispatchBookingFeePercent: _firstPositiveDouble(<dynamic>[
+        pricing['dispatch']?['bookingFeePercent'],
+        pricing['dispatch']?['booking_fee_percent'],
+        pricing['dispatchBookingFeePercent'],
+        pricing['dispatch_booking_fee_percent'],
+        5,
+      ]),
+      dispatchBookingFeeMinNgn: _firstInt(<dynamic>[
+        pricing['dispatch']?['bookingFeeMinNgn'],
+        pricing['dispatch']?['booking_fee_min_ngn'],
+        pricing['dispatchBookingFeeMinNgn'],
+        pricing['dispatch_booking_fee_min_ngn'],
+        150,
+      ]),
+      dispatchBookingFeeMaxNgn: () {
+        final raw = pricing['dispatch']?['bookingFeeMaxNgn'] ??
+            pricing['dispatch']?['booking_fee_max_ngn'] ??
+            pricing['dispatchBookingFeeMaxNgn'] ??
+            pricing['dispatch_booking_fee_max_ngn'];
+        if (raw == null || raw.toString().trim().isEmpty) {
+          return null;
+        }
+        return _firstInt(<dynamic>[raw]);
+      }(),
       weeklySubscriptionNgn: _firstInt(<dynamic>[
         pricing['weeklySubscriptionNgn'],
         pricing['weekly_subscription_ngn'],
@@ -3320,8 +4412,25 @@ class AdminDataService {
         pricing['monthly_subscription_ngn'],
         DriverBusinessConfig.monthlySubscriptionPriceNgn,
       ]),
+      fleetWeeklySubscriptionNgn: _firstInt(<dynamic>[
+        pricing['fleetWeeklySubscriptionNgn'],
+        pricing['fleet_weekly_subscription_ngn'],
+        pricing['weeklySubscriptionNgn'],
+        pricing['weekly_subscription_ngn'],
+        DriverBusinessConfig.weeklySubscriptionPriceNgn,
+      ]),
+      fleetMonthlySubscriptionNgn: _firstInt(<dynamic>[
+        pricing['fleetMonthlySubscriptionNgn'],
+        pricing['fleet_monthly_subscription_ngn'],
+        pricing['monthlySubscriptionNgn'],
+        pricing['monthly_subscription_ngn'],
+        DriverBusinessConfig.monthlySubscriptionPriceNgn,
+      ]),
       loadedFromBackend: pricing.isNotEmpty,
       lastUpdated: _dateFromCandidates(<dynamic>[pricing['updatedAt']]),
+      updatedBy: _text(pricing['updatedBy'] ?? pricing['updated_by']).isEmpty
+          ? null
+          : _text(pricing['updatedBy'] ?? pricing['updated_by']),
       rawData: pricing,
     );
   }

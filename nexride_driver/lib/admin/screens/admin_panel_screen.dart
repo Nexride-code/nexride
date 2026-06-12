@@ -16,11 +16,13 @@ import '../services/admin_action_executor.dart';
 import '../services/admin_auth_service.dart';
 import '../services/admin_data_service.dart';
 import '../utils/admin_formatters.dart';
+import '../utils/admin_callable_feedback.dart';
 import '../utils/admin_perf_guard.dart';
 import '../widgets/admin_charts.dart';
 import '../widgets/admin_components.dart';
-import '../widgets/admin_finance_revenue_buckets_panel.dart';
+import '../widgets/admin_finance_section.dart';
 import '../widgets/admin_driver_drawer_tabs.dart';
+import '../widgets/admin_rider_drawer_tabs.dart';
 import '../widgets/admin_entity_drawer.dart';
 import '../widgets/admin_entity_drawer_controller.dart';
 import '../widgets/admin_delivery_chat_transcript_sheet.dart';
@@ -37,6 +39,7 @@ import 'admin_rollout_regions_screen.dart';
 import 'admin_service_areas_screen.dart';
 import 'admin_verification_center_screen.dart';
 import 'admin_audit_logs_screen.dart';
+import 'admin_finance_audit_screen.dart';
 import 'admin_payment_intents_screen.dart';
 import '../support/proof_open.dart';
 import '../../services/driver_finance_service.dart';
@@ -138,6 +141,24 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   String? _errorMessage;
   bool _tokenRefreshedForDashboardLoad = false;
   Map<AdminSection, int> _sidebarBadgeCounts = <AdminSection, int>{};
+  Map<String, int> _sidebarCallableCounts = <String, int>{};
+  AdminSettingsBundle? _settingsBundle;
+  bool _settingsLoading = false;
+  bool _settingsSaving = false;
+
+  String get _effectiveWithdrawalNoticeText {
+    final fromBundle =
+        (_settingsBundle?.settings.withdrawalNoticeText ?? '').trim();
+    if (fromBundle.isNotEmpty) {
+      return fromBundle;
+    }
+    final fromSnapshot =
+        (_snapshot?.settings.withdrawalNoticeText ?? '').trim();
+    if (fromSnapshot.isNotEmpty) {
+      return fromSnapshot;
+    }
+    return DriverFinanceService.payoutNoticeText;
+  }
   final List<_AdminPendingNotification> _pendingNotifications =
       <_AdminPendingNotification>[];
   Timer? _badgeRefreshTimer;
@@ -190,6 +211,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     'trips',
     'subscription',
     'violations',
+    'discounts',
     'notes',
     'audit',
   ];
@@ -244,6 +266,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           unawaited(_loadDashboardOnly());
         }
       });
+    } else if (_section == AdminSection.settings) {
+      _isLoading = false;
+      _settingsLoading = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(_loadSettingsOnly());
+        }
+      });
     } else if (_section == AdminSection.withdrawals) {
       _isLoading = false;
       _withdrawalsOnlyLoading = true;
@@ -273,6 +303,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         _section == AdminSection.systemHealth ||
         _section == AdminSection.paymentIntents ||
         _section == AdminSection.auditLogs ||
+        _section == AdminSection.financeAudit ||
         _section == AdminSection.regions ||
         _section == AdminSection.serviceAreas ||
         _section == AdminSection.merchants ||
@@ -363,7 +394,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         _supportTicketsServerNextCursor = null;
         _supportTicketsServerHasMore = false;
       });
-      _syncBadgesFromSnapshot(snapshot);
+      unawaited(_refreshSidebarBadgesFromCallable());
       _recomputeDriverFilter();
       debugPrint(
         '[AdminPanel] snapshot loaded riders=${snapshot.riders.length} drivers=${snapshot.drivers.length} trips=${snapshot.trips.length}',
@@ -387,6 +418,51 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       }
       setState(() {
         _isLoading = false;
+        _errorMessage = _buildLoadFailureMessage(error);
+      });
+    }
+  }
+
+  Future<void> _loadSettingsOnly() async {
+    if (mounted) {
+      setState(() {
+        _settingsLoading = true;
+        _errorMessage = null;
+      });
+    }
+    try {
+      if (!_tokenRefreshedForDashboardLoad) {
+        await _authService.forceTokenRefresh();
+        _tokenRefreshedForDashboardLoad = true;
+      }
+      final bundle = await _dataService
+          .fetchSettingsConfig(adminEmail: widget.session.email)
+          .timeout(widget.snapshotTimeout);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsBundle = bundle;
+        _settingsLoading = false;
+        _isLoading = false;
+      });
+    } on TimeoutException catch (error) {
+      debugPrint('[AdminPanel] settings load timeout $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsLoading = false;
+        _errorMessage =
+            'Unable to load settings right now. The request timed out — try again in a moment.';
+      });
+    } catch (error) {
+      debugPrint('[AdminPanel] settings load failed: $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsLoading = false;
         _errorMessage = _buildLoadFailureMessage(error);
       });
     }
@@ -688,6 +764,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
+        if (_settingsBundle == null) {
+          unawaited(_loadSettingsOnly());
+        }
         unawaited(_loadWithdrawalsOnly());
       }
     });
@@ -988,6 +1067,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
   }
 
+  Future<void> _ensureAdminTokenFresh() async {
+    if (_tokenRefreshedForDashboardLoad) {
+      return;
+    }
+    await _authService.forceTokenRefresh();
+    _tokenRefreshedForDashboardLoad = true;
+  }
+
   /// Section-aware refresh: drivers section uses the lightweight loader;
   /// all other sections use the full snapshot loader.
   Future<void> _refresh() async {
@@ -1014,7 +1101,10 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       await _loadSupportTicketsOnly(resetServerCursors: false);
     } else if (_section == AdminSection.finance) {
       await _loadDashboardOnly();
+    } else if (_section == AdminSection.settings) {
+      await _loadSettingsOnly();
     } else if (_section == AdminSection.auditLogs ||
+        _section == AdminSection.financeAudit ||
         _section == AdminSection.paymentIntents ||
         _section == AdminSection.liveOperations ||
         _section == AdminSection.systemHealth ||
@@ -1052,6 +1142,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       onLogout: _logout,
       liveDataSections: _snapshot?.liveDataSections ?? const <String, bool>{},
       sidebarBadgeCounts: _sidebarBadgeCounts,
+      sidebarCallableCounts: _sidebarCallableCounts,
       pendingNotifications: _pendingNotifications
           .map(
             (item) => AdminPendingNotification(
@@ -1075,7 +1166,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   }
 
   Future<void> _refreshSidebarBadgesFromCallable() async {
-    if (!widget.enableRealtimeBadgeListeners || !mounted) {
+    if (!mounted) {
       return;
     }
     try {
@@ -1092,17 +1183,64 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       if (data['success'] != true || !mounted) {
         return;
       }
+      final nextCallableCounts = <String, int>{
+        'subscription_drivers_pending':
+            _badgeInt(data['subscription_drivers_pending']),
+        'trips_payment_pending_confirmation':
+            _badgeInt(data['trips_payment_pending_confirmation']),
+        'support_tickets_open': _badgeInt(data['support_tickets_open']),
+        'driver_verification_pending_drivers': _badgeInt(
+          data['driver_verification_pending_drivers'] ??
+              data['driver_verification_pending'],
+        ),
+        'driver_verification_pending_documents':
+            _badgeInt(data['driver_verification_pending_documents']),
+        'riders_pending': _badgeInt(data['riders_pending']),
+        'drivers_pending': _badgeInt(data['drivers_pending']),
+        'wallets_pending': _badgeInt(data['wallets_pending']),
+        'withdrawals_pending': _badgeInt(data['withdrawals_pending']),
+        'payments_pending': _badgeInt(data['payments_pending']),
+        'verification_pending_total':
+            _badgeInt(data['verification_pending_total']),
+      };
+      setState(() {
+        _sidebarCallableCounts = nextCallableCounts;
+      });
       _setBadgeCount(
         AdminSection.subscriptions,
-        _badgeInt(data['subscription_drivers_pending']),
+        nextCallableCounts['subscription_drivers_pending'] ?? 0,
       );
       _setBadgeCount(
         AdminSection.trips,
-        _badgeInt(data['trips_payment_pending_confirmation']),
+        nextCallableCounts['trips_payment_pending_confirmation'] ?? 0,
       );
       _setBadgeCount(
         AdminSection.support,
-        _badgeInt(data['support_tickets_open']),
+        nextCallableCounts['support_tickets_open'] ?? 0,
+      );
+      _setBadgeCount(
+        AdminSection.verification,
+        nextCallableCounts['driver_verification_pending_drivers'] ?? 0,
+      );
+      _setBadgeCount(
+        AdminSection.riders,
+        nextCallableCounts['riders_pending'] ?? 0,
+      );
+      _setBadgeCount(
+        AdminSection.drivers,
+        nextCallableCounts['drivers_pending'] ?? 0,
+      );
+      _setBadgeCount(
+        AdminSection.finance,
+        nextCallableCounts['wallets_pending'] ?? 0,
+      );
+      _setBadgeCount(
+        AdminSection.withdrawals,
+        nextCallableCounts['withdrawals_pending'] ?? 0,
+      );
+      _setBadgeCount(
+        AdminSection.paymentIntents,
+        nextCallableCounts['payments_pending'] ?? 0,
       );
     } catch (error) {
       debugPrint('[AdminPanel] badge refresh failed: $error');
@@ -1114,49 +1252,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       return value.toInt();
     }
     return int.tryParse(value?.toString().trim() ?? '') ?? 0;
-  }
-
-  void _syncBadgesFromSnapshot(AdminPanelSnapshot snapshot) {
-    var ridersPending = 0;
-    for (final AdminRiderRecord r in snapshot.riders) {
-      final v = r.verificationStatus.toLowerCase();
-      if (v == 'pending' || v == 'submitted' || v == 'in_review') {
-        ridersPending += 1;
-      }
-    }
-    _setBadgeCount(AdminSection.riders, ridersPending);
-
-    var driverVerificationPending = 0;
-    var subscriptionPending = 0;
-    for (final AdminDriverRecord d in snapshot.drivers) {
-      final v = d.verificationStatus.toLowerCase();
-      if (v == 'pending' || v == 'submitted' || v == 'in_review') {
-        driverVerificationPending += 1;
-      }
-      final sub = d.subscriptionStatus.toLowerCase();
-      final hasProof =
-          '${d.rawData['subscription_proof_url'] ?? ''}'.trim().isNotEmpty;
-      if (d.rawData['subscription_pending'] == true ||
-          sub == 'pending' ||
-          sub == 'pending_review' ||
-          hasProof) {
-        subscriptionPending += 1;
-      }
-    }
-    _setBadgeCount(AdminSection.verification, driverVerificationPending);
-    _setBadgeCount(AdminSection.subscriptions, subscriptionPending);
-
-    var tripsPending = 0;
-    for (final AdminTripRecord t in snapshot.trips) {
-      final p =
-          (t.rawData['payment_status'] as String? ?? '').toLowerCase().replaceAll(RegExp(r'[\s-]+'), '_');
-      if (p == 'pending_manual_confirmation' ||
-          p == 'pending_review' ||
-          p == 'pending') {
-        tripsPending += 1;
-      }
-    }
-    _setBadgeCount(AdminSection.trips, tripsPending);
   }
 
   void _setBadgeCount(AdminSection section, int count) {
@@ -1199,6 +1294,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             _beginRidersSectionLoad();
           }
           if (next == AdminSection.withdrawals) {
+            if (_settingsBundle == null) {
+              unawaited(_loadSettingsOnly());
+            }
             if (_withdrawalsOnly == null) {
               _beginWithdrawalsSectionLoad();
             } else {
@@ -1215,6 +1313,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           if (next == AdminSection.finance && _snapshot == null) {
             unawaited(_loadDashboardOnly());
           }
+          if (next == AdminSection.settings && _settingsBundle == null) {
+            unawaited(_loadSettingsOnly());
+          }
         }
         SystemNavigator.routeInformationUpdated(uri: Uri.parse(nextRoute));
         return;
@@ -1228,6 +1329,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     setState(() {
       _section = next;
     });
+    if (next == AdminSection.finance ||
+        next == AdminSection.trips ||
+        next == AdminSection.paymentIntents) {
+      unawaited(_ensureAdminTokenFresh());
+    }
     if (next == AdminSection.drivers &&
         !AdminDriversRouteDebug.driversRouteFakeLocalDrivers &&
         _driversOnly == null) {
@@ -1237,6 +1343,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       _beginRidersSectionLoad();
     }
     if (next == AdminSection.withdrawals) {
+      if (_settingsBundle == null) {
+        unawaited(_loadSettingsOnly());
+      }
       if (_withdrawalsOnly == null) {
         _beginWithdrawalsSectionLoad();
       } else {
@@ -1252,6 +1361,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     }
     if (next == AdminSection.finance && _snapshot == null) {
       unawaited(_loadDashboardOnly());
+    }
+    if (next == AdminSection.settings && _settingsBundle == null) {
+      unawaited(_loadSettingsOnly());
     }
   }
 
@@ -1289,6 +1401,16 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                       color: AdminThemeTokens.slate,
                     ),
                   ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Signed in as ${widget.session.email} (${widget.session.adminRole}). '
+                    'Ask a super admin to set custom claim admin_role or grant this permission.',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      height: 1.45,
+                      color: Color(0xFF5C564D),
+                    ),
+                  ),
                   const SizedBox(height: 20),
                   AdminPrimaryButton(
                     label: 'Go to dashboard',
@@ -1310,7 +1432,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         _section == AdminSection.liveOperations ||
         _section == AdminSection.systemHealth ||
         _section == AdminSection.paymentIntents ||
-        _section == AdminSection.auditLogs) {
+        _section == AdminSection.auditLogs ||
+        _section == AdminSection.financeAudit) {
       if (_section == AdminSection.liveOperations) {
         debugPrint('[LIVE_OPS][AdminPanel] routing to AdminLiveOpsDashboardScreen');
       }
@@ -1356,6 +1479,10 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   ),
               AdminSection.auditLogs => AdminAuditLogsScreen(
                     dataService: _dataService,
+                  ),
+              AdminSection.financeAudit => AdminFinanceAuditScreen(
+                    dataService: _dataService,
+                    session: widget.session,
                   ),
               _ => const SizedBox.shrink(),
             },
@@ -1558,6 +1685,55 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       );
     }
 
+    if (_section == AdminSection.settings) {
+      if (_settingsLoading && _settingsBundle == null) {
+        return const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: CircularProgressIndicator(),
+          ),
+        );
+      }
+      if (_settingsBundle == null) {
+        return _buildUnavailableState(
+          title: 'Unable to load settings right now',
+          message: _errorMessage ??
+              'Settings could not be loaded from the backend.',
+        );
+      }
+      return AnimatedSwitcher(
+        duration: const Duration(milliseconds: 240),
+        child: SingleChildScrollView(
+          key: const ValueKey<AdminSection>(AdminSection.settings),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              if (_settingsLoading) ...<Widget>[
+                const LinearProgressIndicator(minHeight: 3),
+                const SizedBox(height: 12),
+              ],
+              if (_errorMessage?.trim().isNotEmpty ?? false) ...<Widget>[
+                _buildRefreshNotice(_errorMessage!),
+                const SizedBox(height: 16),
+              ],
+              _SettingsEditor(
+                bundle: _settingsBundle!,
+                session: widget.session,
+                dataService: _dataService,
+                saving: _settingsSaving,
+                onSave: _saveSettingsConfig,
+                onOpenPricing: () => _handleSectionSelected(AdminSection.pricing),
+                onOpenServiceAreas: () =>
+                    _handleSectionSelected(AdminSection.serviceAreas),
+                onQueueCleaned: _refreshSidebarBadgesFromCallable,
+                onLogout: _logout,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     if (_snapshot == null && _isLoading) {
       return AdminEmptyState(
         title: 'Loading ${_section.label.toLowerCase()}',
@@ -1629,7 +1805,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               AdminSection.auditLogs => AdminAuditLogsScreen(
                     dataService: _dataService,
                   ),
-              AdminSection.settings => _buildSettingsSection(_snapshot!),
+              AdminSection.financeAudit => AdminFinanceAuditScreen(
+                    dataService: _dataService,
+                    session: widget.session,
+                  ),
+              AdminSection.settings => const SizedBox.shrink(),
             },
           ],
         ),
@@ -1728,10 +1908,19 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       _MetricCardEntry(
         icon: Icons.account_balance_outlined,
         data: AdminMetricCardData(
-          label: 'Platform revenue',
+          label: 'Platform wallet balance',
+          value: formatAdminCurrency(metrics.platformWalletBalance),
+          caption:
+              'Production platform wallet balance (wallets/nexride_platform/balance).',
+        ),
+      ),
+      _MetricCardEntry(
+        icon: Icons.savings_outlined,
+        data: AdminMetricCardData(
+          label: 'Platform revenue (lifetime)',
           value: formatAdminCurrency(metrics.totalPlatformRevenue),
           caption:
-              'Commissions plus subscription revenue currently visible from backend records.',
+              'Total credited platform revenue (commission + booking fees + other owner revenue).',
         ),
       ),
       _MetricCardEntry(
@@ -1779,9 +1968,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               'Live platform visibility across riders, drivers, trips, revenue, withdrawals, compliance, and issue management.',
           kpis: <String, String>{
             'Gross bookings': formatAdminCurrency(metrics.totalGrossBookings),
-            'Commissions': formatAdminCurrency(metrics.totalCommissionsEarned),
-            'Subscription revenue':
-                formatAdminCurrency(metrics.subscriptionRevenue),
+            'Commission revenue': formatAdminCurrency(metrics.totalCommissionsEarned),
+            'Booking fee revenue': formatAdminCurrency(metrics.totalBookingFeeRevenue),
+            'Platform wallet': formatAdminCurrency(metrics.platformWalletBalance),
+            'Pending platform withdrawals':
+                '${metrics.pendingPlatformWithdrawals} (${formatAdminCurrency(metrics.pendingPlatformWithdrawalsReserved)})',
             'Last sync': formatAdminDateTime(snapshot.fetchedAt),
           },
         ),
@@ -1886,7 +2077,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         const AdminSectionHeader(
           title: 'Riders management',
           description:
-              'Live rider directory (server-paged). Open a row for full profile context, identity review, account controls, or flag support to contact the rider.',
+              'Live rider directory (server-paged). Open a row, then use the Discounts tab in the side drawer to grant or revoke user_discounts/{uid} entries.',
         ),
         const SizedBox(height: 16),
         _buildFilterBar(
@@ -2208,8 +2399,20 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   }
 
   String _buildLoadFailureMessage(Object error) {
+    if (error is AdminCallableResultException) {
+      final data = error.data;
+      if (data['reason_code'] == 'admin_permission_denied') {
+        final required = data['required_permission']?.toString() ?? 'unknown';
+        return 'Access denied for ${_section.label}. Missing permission: $required. '
+            'Role: ${widget.session.adminRole}. Sign out and back in after your admin_role claim is updated.';
+      }
+      if (data['reason_code'] == 'unauthorized') {
+        return 'Admin session unauthorized. Sign out and sign in again, or confirm admins/${widget.session.uid} exists in RTDB.';
+      }
+    }
     if (_isPermissionDenied(error)) {
-      return 'Your account is signed in but does not have access. Contact the NexRide system administrator.';
+      return 'RTDB read denied for ${_section.label}. Your Firebase Auth user may lack admins/${widget.session.uid} '
+          'or the required admin_role custom claim (needed: ${requiredPermissionForSection(_section) ?? "dashboard.read"}).';
     }
     final details = error.toString().replaceFirst('Exception: ', '').trim();
     if (details.isNotEmpty) {
@@ -2401,6 +2604,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             DataColumn(label: Text('Driver')),
             DataColumn(label: Text('City')),
             DataColumn(label: Text('State / region')),
+            DataColumn(label: Text('Ownership')),
             DataColumn(label: Text('Account')),
             DataColumn(label: Text('Verification')),
             DataColumn(label: Text('Vehicle')),
@@ -2435,6 +2639,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                         ? driver.stateOrRegion
                         : '—',
                   ),
+                ),
+                DataCell(
+                  Text(adminDriverOwnershipLabel(driver.rawData)),
                 ),
                 DataCell(AdminStatusChip(driver.accountStatus)),
                 DataCell(AdminStatusChip(driver.verificationStatus)),
@@ -2532,107 +2739,27 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   }
 
   Widget _buildFinanceSection(AdminPanelSnapshot snapshot) {
-    final metrics = snapshot.metrics;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        AdminFinanceRevenueBucketsPanel(
-          dataService: _dataService,
-          session: widget.session,
-        ),
-        const SizedBox(height: 24),
-        AdminSummaryBanner(
-          title: 'Finance and revenue',
-          subtitle:
-              'Platform-level visibility into gross bookings, commissions, subscription monetization, driver payouts, pending payouts, and city-by-city revenue performance.',
-          kpis: <String, String>{
-            'Gross bookings': formatAdminCurrency(metrics.totalGrossBookings),
-            'Commissions': formatAdminCurrency(metrics.totalCommissionsEarned),
-            'Subscriptions': formatAdminCurrency(metrics.subscriptionRevenue),
-            'Pending payouts': formatAdminCurrency(metrics.pendingWithdrawals),
-          },
-        ),
-        const SizedBox(height: 20),
-        _buildMetricGrid(<_MetricCardEntry>[
-          _MetricCardEntry(
-            icon: Icons.receipt_long_outlined,
-            data: AdminMetricCardData(
-              label: 'Gross bookings',
-              value: formatAdminCurrency(metrics.totalGrossBookings),
-              caption:
-                  'Total completed-ride fare volume currently visible from trips.',
-            ),
-          ),
-          _MetricCardEntry(
-            icon: Icons.percent_rounded,
-            data: AdminMetricCardData(
-              label: 'Commissions earned',
-              value: formatAdminCurrency(metrics.totalCommissionsEarned),
-              caption: 'Commission revenue realized from completed trips.',
-            ),
-          ),
-          _MetricCardEntry(
-            icon: Icons.workspace_premium_outlined,
-            data: AdminMetricCardData(
-              label: 'Subscription revenue',
-              value: formatAdminCurrency(metrics.subscriptionRevenue),
-              caption:
-                  'Revenue inferred from subscription plan records and payment states.',
-            ),
-          ),
-          _MetricCardEntry(
-            icon: Icons.payments_outlined,
-            data: AdminMetricCardData(
-              label: 'Driver payouts',
-              value: formatAdminCurrency(metrics.totalDriverPayouts),
-              caption:
-                  'Driver-side trip payouts calculated from monetization rules.',
-            ),
-          ),
-        ]),
-        const SizedBox(height: 20),
-        _buildResponsiveTwoUp(
-          left: AdminFinanceBarsCard(
-            title: 'Daily finance',
-            items: snapshot.dailyFinance,
-          ),
-          right: AdminFinanceBarsCard(
-            title: 'Weekly finance',
-            items: snapshot.weeklyFinance,
-          ),
-        ),
-        const SizedBox(height: 20),
-        _buildResponsiveTwoUp(
-          left: AdminFinanceBarsCard(
-            title: 'Monthly finance',
-            items: snapshot.monthlyFinance,
-          ),
-          right: AdminFinanceBarsCard(
-            title: 'City finance',
-            items: snapshot.cityFinance,
-          ),
-        ),
-      ],
+    return AdminFinanceSection(
+      snapshot: snapshot,
+      dataService: _dataService,
+      session: widget.session,
+      withdrawalNoticeText: _effectiveWithdrawalNoticeText,
     );
   }
 
   Widget _buildWithdrawalsSection() {
     final rows = _withdrawalsOnly ?? const <AdminWithdrawalRecord>[];
     adminPerfWarnRowBudget(surface: 'withdrawals_table', rowCount: rows.length);
-    final configured =
-        (_snapshot?.settings.withdrawalNoticeText ?? '').trim();
-    final noticeText = configured.isNotEmpty
-        ? configured
-        : DriverFinanceService.payoutNoticeText;
+    final noticeText = _effectiveWithdrawalNoticeText;
 
     if (rows.isEmpty) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           const AdminSectionHeader(
-            title: 'Driver withdrawals',
+            title: 'Wallet withdrawals',
             description:
-                'Server-paged payout queue (50 per page). Search by driver id or name; filter by status.',
+                'Driver, merchant, and fleet business payout queue (50 per page). Search by withdrawal id, party id, or entity type.',
           ),
           const SizedBox(height: 16),
           AdminSurfaceCard(
@@ -2673,9 +2800,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         const AdminSectionHeader(
-          title: 'Driver withdrawals',
+          title: 'Wallet withdrawals',
           description:
-              'Callable-backed queue: 50 rows per request with server-side search and status filters.',
+              'Callable-backed queue for driver, merchant, and fleet payouts with server-side search and status filters.',
         ),
         const SizedBox(height: 16),
         AdminSurfaceCard(
@@ -2709,7 +2836,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               child: AdminTextFilterField(
                 controller: _withdrawalSearchController,
                 hintText:
-                    'Search withdrawal id, driver uid, merchant id, or name',
+                    'Search withdrawal id, driver uid, merchant id, fleet id, or entity',
                 onChanged: (_) => _scheduleWithdrawalSearchReload(),
               ),
             ),
@@ -2757,10 +2884,18 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                 !item.hasPayoutDestination;
             final String partyLabel = item.entityType == 'merchant'
                 ? (item.merchantId.isNotEmpty ? item.merchantId : 'Merchant')
-                : item.driverName;
+                : item.entityType == 'fleet'
+                    ? (item.businessId.isNotEmpty
+                        ? item.businessId
+                        : 'Fleet business')
+                    : item.driverName;
             final String partySub = item.entityType == 'merchant'
                 ? (item.driverName.isNotEmpty ? item.driverName : '')
-                : item.driverId;
+                : item.entityType == 'fleet'
+                    ? (item.rawData['owner_uid']?.toString() ??
+                        item.rawData['requested_by_uid']?.toString() ??
+                        '')
+                    : item.driverId;
             final String typeLabel = item.userType.isNotEmpty
                 ? sentenceCaseStatus(item.userType)
                 : sentenceCaseStatus(item.entityType);
@@ -2872,7 +3007,12 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                   ),
                 ),
                 DataCell(Text(formatAdminDateTime(item.requestDate))),
-                DataCell(_withdrawalActionsFor(item)),
+                DataCell(
+                  SizedBox(
+                    width: 220,
+                    child: _withdrawalActionsFor(item),
+                  ),
+                ),
               ],
             );
           }).toList(),
@@ -2995,6 +3135,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             columns: const <DataColumn>[
               DataColumn(label: Text('Ticket')),
               DataColumn(label: Text('Status')),
+              DataColumn(label: Text('Assigned')),
               DataColumn(label: Text('Subject')),
               DataColumn(label: Text('Ride')),
               DataColumn(label: Text('Created by')),
@@ -3007,6 +3148,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                 cells: <DataCell>[
                   DataCell(Text(t.id, style: const TextStyle(fontWeight: FontWeight.w700))),
                   DataCell(AdminStatusChip(t.status)),
+                  DataCell(Text(
+                    t.isAssigned ? t.assignedToName : 'Unassigned',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  )),
                   DataCell(Text(
                     t.subject.isNotEmpty ? t.subject : '—',
                     maxLines: 2,
@@ -3080,6 +3226,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
 
     final detail = await _dataService.fetchSupportTicketForAdmin(item.id);
+    final staff = await _dataService.fetchSupportStaffForAdmin();
     if (!mounted) {
       return;
     }
@@ -3095,6 +3242,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     final ticket = Map<String, dynamic>.from(
       _mapStringDynamic(detail['ticket']) ?? const <String, dynamic>{},
     );
+    final assignedUid = ticket['assignedToUid']?.toString().trim().isNotEmpty == true
+        ? ticket['assignedToUid'].toString().trim()
+        : ticket['assignedToStaffId']?.toString().trim() ?? item.assignedToUid;
+    final assignedName = ticket['assignedToName']?.toString().trim().isNotEmpty == true
+        ? ticket['assignedToName'].toString().trim()
+        : ticket['assignedToStaffName']?.toString().trim() ?? item.assignedToName;
+    final assignedRole = ticket['assignedRole']?.toString().trim() ?? item.assignedRole;
+    var assigneeDraft = assignedUid.isNotEmpty ? assignedUid : 'unassigned';
     final messagesRaw = detail['messages'];
     final messageEntries = <MapEntry<String, dynamic>>[];
     if (messagesRaw is Map) {
@@ -3136,12 +3291,135 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                     AdminKeyValueWrap(
                       items: <String, String>{
                         'Status': ticket['status']?.toString() ?? item.status,
+                        'Assigned': assignedName.isNotEmpty ? assignedName : 'Unassigned',
+                        if (assignedRole.isNotEmpty) 'Assignee role': assignedRole,
                         'Subject':
                             ticket['subject']?.toString() ?? item.subject,
                         'Ride': ticket['ride_id']?.toString() ?? item.rideId,
                         'Created by':
                             ticket['createdByUserId']?.toString() ??
                                 item.createdByUserId,
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Assignment',
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    const SizedBox(height: 8),
+                    StatefulBuilder(
+                      builder: (BuildContext context, StateSetter setDialogState) {
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            AdminFilterDropdown<String>(
+                              value: assigneeDraft,
+                              items: <DropdownMenuItem<String>>[
+                                const DropdownMenuItem<String>(
+                                  value: 'unassigned',
+                                  child: Text('Unassigned'),
+                                ),
+                                ...staff.map(
+                                  (AdminSupportStaffMember member) =>
+                                      DropdownMenuItem<String>(
+                                    value: member.uid,
+                                    child: Text(
+                                      '${member.displayName} • ${member.role}',
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              onChanged: (String? value) {
+                                setDialogState(() {
+                                  assigneeDraft = value ?? 'unassigned';
+                                });
+                              },
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              children: <Widget>[
+                                TextButton(
+                                  onPressed: () async {
+                                    final selected = staff.firstWhere(
+                                      (AdminSupportStaffMember m) =>
+                                          m.uid == assigneeDraft,
+                                      orElse: () => AdminSupportStaffMember(
+                                        uid: assigneeDraft,
+                                        displayName: assigneeDraft,
+                                        role: 'support_agent',
+                                      ),
+                                    );
+                                    final ok = assigneeDraft == 'unassigned'
+                                        ? await _dataService
+                                            .adminUnassignSupportTicketCallable(
+                                          ticketId: item.id,
+                                        )
+                                        : await _dataService
+                                            .adminAssignSupportTicketCallable(
+                                          ticketId: item.id,
+                                          assigneeId: selected.uid,
+                                          assigneeName: selected.displayName,
+                                          assigneeRole: selected.role,
+                                        );
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          ok
+                                              ? (assigneeDraft == 'unassigned'
+                                                  ? 'Ticket unassigned'
+                                                  : 'Ticket assigned')
+                                              : 'Assignment update failed',
+                                        ),
+                                      ),
+                                    );
+                                    if (ok) {
+                                      await _loadSupportTicketsOnly(
+                                        resetServerCursors: false,
+                                      );
+                                    }
+                                  },
+                                  child: Text(
+                                    assigneeDraft == 'unassigned'
+                                        ? 'Unassign'
+                                        : (assignedUid.isNotEmpty
+                                            ? 'Reassign'
+                                            : 'Assign'),
+                                  ),
+                                ),
+                                if (assignedUid.isNotEmpty)
+                                  TextButton(
+                                    onPressed: () async {
+                                      final ok = await _dataService
+                                          .adminUnassignSupportTicketCallable(
+                                        ticketId: item.id,
+                                      );
+                                      if (!mounted) return;
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            ok
+                                                ? 'Ticket unassigned'
+                                                : 'Unassign failed',
+                                          ),
+                                        ),
+                                      );
+                                      if (ok) {
+                                        setDialogState(() {
+                                          assigneeDraft = 'unassigned';
+                                        });
+                                        await _loadSupportTicketsOnly(
+                                          resetServerCursors: false,
+                                        );
+                                      }
+                                    },
+                                    child: const Text('Unassign'),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        );
                       },
                     ),
                     const SizedBox(height: 16),
@@ -3313,15 +3591,39 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       pricing: snapshot.pricingConfig,
       settings: snapshot.settings,
       canEditPricing: widget.session.hasPermission('settings.write'),
-      onSave: (List<AdminCityPricing> cities, double commissionRate,
-          int weeklySubscriptionNgn, int monthlySubscriptionNgn) async {
+      onSave: (List<AdminCityPricing> cities, double commissionRate, int bookingFeeNgn,
+          String bookingFeeMode, double bookingFeePercent, int bookingFeeMinNgn,
+          int? bookingFeeMaxNgn, int dispatchBookingFeeNgn, String dispatchBookingFeeMode,
+          double dispatchBookingFeePercent, int dispatchBookingFeeMinNgn,
+          int? dispatchBookingFeeMaxNgn, int weeklySubscriptionNgn, int monthlySubscriptionNgn,
+          double fleetOwnerCommissionRate,
+          int fleetWeeklySubscriptionNgn, int fleetMonthlySubscriptionNgn) async {
         await _dataService.updatePricingConfig(
           cities: cities,
           commissionRate: commissionRate,
+          fleetOwnerCommissionRate: fleetOwnerCommissionRate,
+          bookingFeeNgn: bookingFeeNgn,
+          bookingFeeMode: bookingFeeMode,
+          bookingFeePercent: bookingFeePercent,
+          bookingFeeMinNgn: bookingFeeMinNgn,
+          bookingFeeMaxNgn: bookingFeeMaxNgn,
+          dispatchBookingFeeNgn: dispatchBookingFeeNgn,
+          dispatchBookingFeeMode: dispatchBookingFeeMode,
+          dispatchBookingFeePercent: dispatchBookingFeePercent,
+          dispatchBookingFeeMinNgn: dispatchBookingFeeMinNgn,
+          dispatchBookingFeeMaxNgn: dispatchBookingFeeMaxNgn,
           weeklySubscriptionNgn: weeklySubscriptionNgn,
           monthlySubscriptionNgn: monthlySubscriptionNgn,
+          fleetWeeklySubscriptionNgn: fleetWeeklySubscriptionNgn,
+          fleetMonthlySubscriptionNgn: fleetMonthlySubscriptionNgn,
         );
         await _loadSnapshot();
+        if (mounted) {
+          setState(() {
+            _settingsBundle = null;
+          });
+          unawaited(_loadSettingsOnly());
+        }
       },
     );
   }
@@ -3931,14 +4233,23 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     AdminDriverRecord driver, {
     AdminEntityDrawerController? drawerController,
   }) async {
+    final String? reason = await _promptAdminReason(
+      title: 'Soft-delete driver',
+      fieldLabel: 'Deletion reason (required, min 8 chars)',
+      minLength: 8,
+    );
+    if (reason == null || !mounted) {
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (BuildContext ctx) {
         return AlertDialog(
-          title: const Text('Delete driver account?'),
+          title: const Text('Soft-delete driver account?'),
           content: Text(
-            'This permanently deletes ${driver.name} (${driver.id}) from '
-            'Realtime Database and Firebase Auth. This cannot be undone.',
+            'Marks ${driver.name} (${driver.id}) as deleted, disables sign-in, '
+            'and blocks new rides/deliveries/withdrawals. Finance history is retained. '
+            'This can be restored from admin.',
           ),
           actions: <Widget>[
             TextButton(
@@ -3948,7 +4259,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             TextButton(
               style: TextButton.styleFrom(foregroundColor: Colors.red.shade800),
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Delete'),
+              child: const Text('Soft delete'),
             ),
           ],
         );
@@ -3960,10 +4271,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     await _actionExecutor.run<void>(
       context: context,
       actionName: 'driver_delete',
-      successMessage: 'Driver account deleted.',
-      invoke: () => _dataService.adminDeleteAccount(
+      successMessage: 'Driver account soft-deleted.',
+      invoke: () => _dataService.adminDeleteUser(
         uid: driver.id,
         role: 'driver',
+        reason: reason,
       ),
       emitAudit: ({
         required bool success,
@@ -4083,14 +4395,23 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
   }
 
   Future<void> _riderDelete(AdminRiderRecord rider) async {
+    final String? reason = await _promptAdminReason(
+      title: 'Soft-delete rider',
+      fieldLabel: 'Deletion reason (required, min 8 chars)',
+      minLength: 8,
+    );
+    if (reason == null || !mounted) {
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (BuildContext ctx) {
         return AlertDialog(
-          title: const Text('Delete rider account?'),
+          title: const Text('Soft-delete rider account?'),
           content: Text(
-            'This permanently deletes ${rider.name} (${rider.id}) from '
-            'Realtime Database and Firebase Auth. This cannot be undone.',
+            'Marks ${rider.name} (${rider.id}) as deleted, disables sign-in, '
+            'and blocks new rides/deliveries. Finance history is retained. '
+            'This can be restored from admin.',
           ),
           actions: <Widget>[
             TextButton(
@@ -4100,7 +4421,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             TextButton(
               style: TextButton.styleFrom(foregroundColor: Colors.red.shade800),
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Delete'),
+              child: const Text('Soft delete'),
             ),
           ],
         );
@@ -4112,10 +4433,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     await _actionExecutor.run<void>(
       context: context,
       actionName: 'rider_delete',
-      successMessage: 'Rider account deleted.',
-      invoke: () => _dataService.adminDeleteAccount(
+      successMessage: 'Rider account soft-deleted.',
+      invoke: () => _dataService.adminDeleteUser(
         uid: rider.id,
         role: 'rider',
+        reason: reason,
       ),
       emitAudit: ({
         required bool success,
@@ -4203,6 +4525,13 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             ),
           ),
         ),
+        if (driver.accountStatus.toLowerCase() == 'deleted')
+          _rbacTextButton(
+            allowed: widget.session.hasPermission('settings.write'),
+            label: 'Restore',
+            onPressed: () =>
+                unawaited(_driverRestore(driver, drawerController: null)),
+          ),
         const SizedBox(width: 8),
         _rbacTextButton(
           allowed: widget.session.hasPermission('settings.write'),
@@ -4212,6 +4541,42 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
               unawaited(_driverDelete(driver, drawerController: null)),
         ),
       ],
+    );
+  }
+
+  Future<void> _driverRestore(
+    AdminDriverRecord driver, {
+    AdminEntityDrawerController? drawerController,
+  }) async {
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'driver_restore',
+      successMessage: 'Driver account restored.',
+      invoke: () => _dataService.adminRestoreUser(
+        uid: driver.id,
+        role: 'driver',
+      ),
+      onSuccess: (_) {
+        drawerController?.invalidateTabs(
+          AdminCacheInvalidationRegistry.tabsFor('driver_restore'),
+        );
+        unawaited(_refreshDriverRows());
+      },
+    );
+  }
+
+  Future<void> _riderRestore(AdminRiderRecord rider) async {
+    await _actionExecutor.run<void>(
+      context: context,
+      actionName: 'rider_restore',
+      successMessage: 'Rider account restored.',
+      invoke: () => _dataService.adminRestoreUser(
+        uid: rider.id,
+        role: 'rider',
+      ),
+      onSuccess: (_) {
+        unawaited(_refresh());
+      },
     );
   }
 
@@ -4244,12 +4609,16 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           case 'delete':
             unawaited(_riderDelete(rider));
             break;
+          case 'restore':
+            unawaited(_riderRestore(rider));
+            break;
         }
       },
       itemBuilder: (BuildContext context) {
         final bool rw = widget.session.hasPermission('riders.write');
         final bool sw = widget.session.hasPermission('support.write');
         final bool st = widget.session.hasPermission('settings.write');
+        final bool deleted = rider.status.toLowerCase() == 'deleted';
         return <PopupMenuEntry<String>>[
           PopupMenuItem<String>(
             value: 'warn',
@@ -4266,6 +4635,12 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
             enabled: sw,
             child: const Text('Support flag'),
           ),
+          if (deleted)
+            PopupMenuItem<String>(
+              value: 'restore',
+              enabled: st,
+              child: const Text('Restore'),
+            ),
           const PopupMenuDivider(),
           PopupMenuItem<String>(
             value: 'delete',
@@ -4398,137 +4773,50 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
   }
 
-  Widget _buildSettingsSection(AdminPanelSnapshot snapshot) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        const AdminSectionHeader(
-          title: 'Settings and configuration',
-          description:
-              'Review fare model, monetization rules, withdrawal notice text, city enablement, operational constants, and admin access details.',
+  Future<void> _saveSettingsConfig(Map<String, dynamic> patch) async {
+    if (!widget.session.hasPermission('settings.write')) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('You do not have permission to update settings.'),
         ),
-        const SizedBox(height: 16),
-        AdminSurfaceCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              const Text(
-                'Fare model summary',
-                style: TextStyle(
-                  color: AdminThemeTokens.ink,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Wrap(
-                spacing: 16,
-                runSpacing: 16,
-                children:
-                    snapshot.pricingConfig.cities.map((AdminCityPricing city) {
-                  return Container(
-                    width: 260,
-                    padding: const EdgeInsets.all(18),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8F5EF),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Row(
-                          children: <Widget>[
-                            Expanded(
-                              child: Text(
-                                city.city,
-                                style: const TextStyle(
-                                  color: AdminThemeTokens.ink,
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                            ),
-                            AdminStatusChip(
-                                city.enabled ? 'enabled' : 'disabled'),
-                          ],
-                        ),
-                        const SizedBox(height: 14),
-                        Text(
-                            'Base fare • ${formatAdminCurrency(city.baseFareNgn)}'),
-                        Text('Per km • ${formatAdminCurrency(city.perKmNgn)}'),
-                        Text(
-                            'Per minute • ${formatAdminCurrency(city.perMinuteNgn)}'),
-                        Text(
-                            'Minimum fare • ${formatAdminCurrency(city.minimumFareNgn)}'),
-                      ],
-                    ),
-                  );
-                }).toList(),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        AdminSurfaceCard(
-          child: AdminKeyValueWrap(
-            items: <String, String>{
-              'Commission model':
-                  '${(snapshot.pricingConfig.commissionRate * 100).toStringAsFixed(0)}% commission',
-              'Weekly subscription': formatAdminCurrency(
-                  snapshot.pricingConfig.weeklySubscriptionNgn),
-              'Monthly subscription': formatAdminCurrency(
-                  snapshot.pricingConfig.monthlySubscriptionNgn),
-              'Withdrawal notice': snapshot.settings.withdrawalNoticeText,
-              'Verification required':
-                  snapshot.settings.driverVerificationRequired ? 'Yes' : 'No',
-              'Off-route tolerance':
-                  '${snapshot.settings.offRouteToleranceMeters} meters',
-              'Active request services':
-                  formatAdminActiveRequestServiceSummary(
-                    snapshot.settings.activeServiceTypes,
-                  ),
-              'Admin profile': widget.session.email,
-            },
-          ),
-        ),
-        const SizedBox(height: 16),
-        AdminSurfaceCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              const Text(
-                'City enablement',
-                style: TextStyle(
-                  color: AdminThemeTokens.ink,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: snapshot.settings.cityEnablement.entries
-                    .map((MapEntry<String, bool> entry) {
-                  return AdminStatusChip(
-                    '${entry.key} ${entry.value ? 'enabled' : 'disabled'}',
-                    color: entry.value
-                        ? AdminThemeTokens.success
-                        : AdminThemeTokens.warning,
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 20),
-              AdminGhostButton(
-                label: 'Log out admin session',
-                onPressed: _logout,
-                icon: Icons.logout_rounded,
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
+      );
+      return;
+    }
+    setState(() {
+      _settingsSaving = true;
+      _errorMessage = null;
+    });
+    try {
+      final bundle = await _dataService.updateSettingsConfig(
+        patch: patch,
+        adminEmail: widget.session.email,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsBundle = bundle;
+        _settingsSaving = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Settings saved and applied.')),
+      );
+    } catch (error) {
+      debugPrint('[AdminPanel] settings save failed: $error');
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsSaving = false;
+        _errorMessage = _buildLoadFailureMessage(error);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Settings save failed: $error')),
+      );
+    }
   }
 
   Widget _buildMetricGrid(List<_MetricCardEntry> entries) {
@@ -4976,385 +5264,167 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
   }
 
-  Future<void> _showRiderDialog(AdminRiderRecord rider) async {
-    final Map<String, dynamic>? envelope =
-        await _dataService.fetchRiderProfileForAdmin(rider.id);
+  Future<void> _showRiderDialog(
+    AdminRiderRecord rider, {
+    String? initialTabId,
+  }) async {
     if (!mounted) {
       return;
     }
-    final Map<String, dynamic> detailRider = envelope != null &&
-            envelope['rider'] is Map
-        ? Map<String, dynamic>.from(envelope['rider'] as Map)
-        : Map<String, dynamic>.from(rider.rawData);
-    final Map<String, dynamic>? authMeta = envelope != null &&
-            envelope['auth_metadata'] is Map
-        ? Map<String, dynamic>.from(envelope['auth_metadata'] as Map)
-        : null;
-
-    int msFrom(dynamic v) {
-      if (v is num) {
-        return v.toInt();
-      }
-      if (v is String) {
-        return int.tryParse(v) ?? 0;
-      }
-      return 0;
-    }
-
-    String strOf(dynamic v) => '${v ?? ''}'.trim();
-
-    String tryFormatAuthTs(String raw) {
-      if (raw.isEmpty) {
-        return raw;
-      }
-      try {
-        return formatAdminDateTime(DateTime.parse(raw));
-      } catch (_) {
-        return raw;
-      }
-    }
-
-    final int createdMs = msFrom(
-      detailRider['created_at'] ?? detailRider['createdAt'],
-    );
-    final String email = strOf(detailRider['email']).isNotEmpty
-        ? strOf(detailRider['email'])
-        : rider.email;
-    final String phone = strOf(detailRider['phone']).isNotEmpty
-        ? strOf(detailRider['phone'])
-        : rider.phone;
-    final bool profileDone = detailRider.containsKey('profile_completed')
-        ? detailRider['profile_completed'] == true
-        : rider.profileCompleted;
-    final String onboardingLabel = !detailRider.containsKey('onboarding_completed')
-        ? 'Unknown'
-        : (detailRider['onboarding_completed'] == true ? 'Complete' : 'Incomplete');
-    final String lastAuth = strOf(authMeta?['last_sign_in_time']);
-    final String authCreated = strOf(authMeta?['creation_time']);
-    final String authCreatedDisplay = authCreated.isNotEmpty
-        ? tryFormatAuthTs(authCreated)
-        : (createdMs > 0
-            ? formatAdminDateTime(
-                DateTime.fromMillisecondsSinceEpoch(createdMs),
-              )
-            : 'Not set');
-    final String lastAuthDisplay =
-        lastAuth.isNotEmpty ? tryFormatAuthTs(lastAuth) : 'Not set';
-    final String serviceArea = <String>[
-      strOf(detailRider['city']),
-      strOf(detailRider['state']),
-      strOf(detailRider['rollout_city_id']),
-    ].where((String e) => e.isNotEmpty).join(', ');
-    final Map<String, dynamic> walletMap =
-        detailRider['wallet'] is Map
-            ? Map<String, dynamic>.from(detailRider['wallet'] as Map)
-            : <String, dynamic>{};
-    final String walletLine = walletMap['balance'] != null
-        ? formatAdminCurrency(
-            (walletMap['balance'] as num?)?.toDouble() ?? rider.walletBalance,
-          )
-        : formatAdminCurrency(rider.walletBalance);
-    final int? tripHint = envelope != null && envelope['trip_count_hint'] is num
-        ? (envelope['trip_count_hint'] as num).toInt()
-        : null;
-    final String tripsLine = tripHint != null
-        ? 'About $tripHint trip history keys under users (capped count)'
-        : '${rider.tripSummary.completedTrips} completed / ${rider.tripSummary.totalTrips} total (from list row)';
-
-    final List<dynamic> warnRaw = envelope != null &&
-            envelope['warnings_tail'] is List
-        ? envelope['warnings_tail'] as List<dynamic>
-        : const <dynamic>[];
-    final List<dynamic> evtRaw = envelope != null &&
-            envelope['account_events'] is List
-        ? envelope['account_events'] as List<dynamic>
-        : const <dynamic>[];
-    final StringBuffer susp = StringBuffer();
-    for (final dynamic e in evtRaw) {
-      if (e is Map) {
-        final Map<String, dynamic> m = Map<String, dynamic>.from(e);
-        final int at = msFrom(m['at']);
-        susp.writeln(
-          '${m['code']}: ${m['message']}${at > 0 ? ' @ ${formatAdminDateTime(DateTime.fromMillisecondsSinceEpoch(at))}' : ''}',
-        );
-      }
-    }
-    for (final dynamic w in warnRaw) {
-      if (w is Map) {
-        final Map<String, dynamic> m = Map<String, dynamic>.from(w);
-        final int at = msFrom(m['created_at']);
-        susp.writeln(
-          '${m['kind']}: ${m['message']}${at > 0 ? ' @ ${formatAdminDateTime(DateTime.fromMillisecondsSinceEpoch(at))}' : ''}',
-        );
-      }
-    }
-    final String suspText =
-        susp.isEmpty ? 'None in RTDB warning / account-event fields.' : susp.toString().trim();
-
-    await _showDetailsDialog(
-      title: rider.name,
-      subtitle: phone.isNotEmpty ? phone : rider.id,
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          AdminKeyValueWrap(
-            items: <String, String>{
-              'UID': rider.id,
-              'Auth creation': authCreatedDisplay,
-              'Email': email.isNotEmpty ? email : 'Not set',
-              'Phone': phone.isNotEmpty ? phone : 'Not set',
-              'Profile completed': profileDone ? 'Yes' : 'No',
-              'Onboarding': onboardingLabel,
-              'Last login (Auth)': lastAuthDisplay,
-              'Service area':
-                  serviceArea.isNotEmpty ? serviceArea : 'Not set',
-              'Wallet': walletLine,
-              'Trips': tripsLine,
-              'Suspension / warnings': suspText,
-              'City': rider.city.isNotEmpty ? rider.city : 'Not set',
-              'Status': sentenceCaseStatus(rider.status),
-              'Verification': sentenceCaseStatus(rider.verificationStatus),
-              'Risk': sentenceCaseStatus(rider.riskStatus),
-              'Payment': sentenceCaseStatus(rider.paymentStatus),
-              'Trip history (list)':
-                  '${rider.tripSummary.completedTrips} completed / ${rider.tripSummary.totalTrips} total',
-              'Outstanding fees': formatAdminCurrency(rider.outstandingFeesNgn),
-            },
-          ),
-          const SizedBox(height: 18),
-          if (_isRiderIdentityVerified(rider))
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Icon(
-                    Icons.verified_user_rounded,
-                    size: 22,
-                    color: Colors.green.shade700,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Rider identity is verified. Approve / reject selfie actions are hidden.',
-                      style: TextStyle(
-                        fontSize: 14,
-                        height: 1.35,
-                        color: Colors.grey.shade800,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            )
-          else
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: <Widget>[
-                AdminGhostButton(
-                  label: 'Approve rider selfie',
-                  onPressed: () async {
-                    Navigator.of(context).pop();
-                    if (!mounted) {
-                      return;
-                    }
-                    await _actionExecutor.run<void>(
-                      context: context,
-                      actionName: 'rider_review_selfie_approve',
-                      successMessage: 'Selfie approved.',
-                      useDefaultMutationThrottle: true,
-                      invoke: () => _dataService.adminReviewRiderFirestoreIdentity(
-                        riderId: rider.id,
-                        approve: true,
-                      ),
-                      emitAudit: ({
-                        required bool success,
-                        Object? value,
-                        Object? error,
-                        required String correlationId,
-                      }) {
-                        return _riderAudit(
-                          action: 'rider_review_selfie_approve',
-                          riderId: rider.id,
-                          before: rider.verificationStatus,
-                          after: success ? 'approved' : null,
-                          metadata: <String, dynamic>{
-                            if (!success && error != null) 'error': error.toString(),
-                          },
-                          correlationId: correlationId,
-                        );
-                      },
-                      onSuccess: (_) {
-                        unawaited(_refresh());
-                      },
-                    );
-                  },
-                ),
-                AdminGhostButton(
-                  label: 'Reject rider selfie',
-                  onPressed: () async {
-                    final reason = await _promptAdminReason(
-                      title: 'Reject rider selfie',
-                      fieldLabel: 'Reason (audit trail, min 8 chars)',
-                      minLength: 8,
-                    );
-                    if (reason == null || !mounted) {
-                      return;
-                    }
-                    Navigator.of(context).pop();
-                    if (!mounted) {
-                      return;
-                    }
-                    await _actionExecutor.run<void>(
-                      context: context,
-                      actionName: 'rider_review_selfie_reject',
-                      successMessage: 'Selfie rejected.',
-                      useDefaultMutationThrottle: true,
-                      invoke: () => _dataService.adminReviewRiderFirestoreIdentity(
-                        riderId: rider.id,
-                        approve: false,
-                        rejectionReason: reason,
-                      ),
-                      emitAudit: ({
-                        required bool success,
-                        Object? value,
-                        Object? error,
-                        required String correlationId,
-                      }) {
-                        return _riderAudit(
-                          action: 'rider_review_selfie_reject',
-                          riderId: rider.id,
-                          before: rider.verificationStatus,
-                          after: success ? 'rejected' : null,
-                          metadata: <String, dynamic>{
-                            'rejectionReason': reason,
-                            if (!success && error != null) 'error': error.toString(),
-                          },
-                          correlationId: correlationId,
-                        );
-                      },
-                      onSuccess: (_) {
-                        unawaited(_refresh());
-                      },
-                    );
-                  },
-                ),
-              ],
-            ),
-          const SizedBox(height: 14),
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: <Widget>[
-              AdminGhostButton(
-                label: 'Tell support to contact rider',
-                onPressed: () async {
-                  await _runSupportContactFlagForUser(
-                    uid: rider.id,
-                    role: 'rider',
-                    displayLabel: rider.name,
-                  );
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          Row(
-            children: <Widget>[
-              AdminPrimaryButton(
-                label: rider.status == 'suspended'
-                    ? 'Reactivate rider'
-                    : 'Suspend rider',
-                onPressed: () async {
-                  if (rider.status == 'suspended') {
-                    Navigator.of(context).pop();
-                    if (!mounted) {
-                      return;
-                    }
-                    await _actionExecutor.run<void>(
-                      context: context,
-                      actionName: 'rider_reactivate',
-                      successMessage: 'Rider reactivated.',
-                      useDefaultMutationThrottle: true,
-                      invoke: () => _dataService.updateRiderStatus(
-                        riderId: rider.id,
-                        status: 'active',
-                      ),
-                      emitAudit: ({
-                        required bool success,
-                        Object? value,
-                        Object? error,
-                        required String correlationId,
-                      }) {
-                        return _riderAudit(
-                          action: 'rider_reactivate',
-                          riderId: rider.id,
-                          before: rider.status,
-                          after: success ? 'active' : null,
-                          metadata: <String, dynamic>{
-                            if (!success && error != null) 'error': error.toString(),
-                          },
-                          correlationId: correlationId,
-                        );
-                      },
-                      onSuccess: (_) {
-                        unawaited(_refresh());
-                      },
-                    );
-                    return;
-                  }
-                  final reason = await _promptAdminReason(
-                    title: 'Suspend rider',
-                    fieldLabel: 'Reason (shown internally)',
-                    minLength: 8,
-                  );
-                  if (reason == null || !mounted) {
-                    return;
-                  }
-                  Navigator.of(context).pop();
-                  if (!mounted) {
-                    return;
-                  }
-                  await _actionExecutor.run<void>(
-                    context: context,
-                    actionName: 'rider_suspend',
-                    successMessage: 'Rider suspended.',
-                    useDefaultMutationThrottle: true,
-                    invoke: () => _dataService.adminSuspendAccount(
-                      uid: rider.id,
-                      role: 'rider',
-                      reason: reason,
-                    ),
-                    emitAudit: ({
-                      required bool success,
-                      Object? value,
-                      Object? error,
-                      required String correlationId,
-                    }) {
-                      return _riderAudit(
-                        action: 'rider_suspend',
-                        riderId: rider.id,
-                        before: rider.status,
-                        after: success ? 'suspended' : null,
-                        metadata: <String, dynamic>{
-                          'reason': reason,
-                          if (!success && error != null) 'error': error.toString(),
-                        },
-                        correlationId: correlationId,
-                      );
-                    },
-                    onSuccess: (_) {
-                      unawaited(_refresh());
-                    },
-                  );
-                },
-              ),
-            ],
-          ),
-        ],
+    final int t0 = DateTime.now().millisecondsSinceEpoch;
+    final AdminEntityDrawerController controller = AdminEntityDrawerController();
+    final int initialIndex = _riderDrawerTabIndex(initialTabId);
+    await AdminEntityDrawer.present(
+      context,
+      entityType: 'rider',
+      entityId: rider.id,
+      title: rider.name.isNotEmpty ? rider.name : rider.id,
+      subtitle: rider.phone.isNotEmpty ? rider.phone : rider.email,
+      tabs: const <AdminEntityTabSpec>[
+        AdminEntityTabSpec(id: 'overview', label: 'Overview', icon: Icons.person_outline),
+        AdminEntityTabSpec(
+          id: 'identity',
+          label: 'Identity / Verification',
+          icon: Icons.verified_user_outlined,
+        ),
+        AdminEntityTabSpec(
+          id: 'wallet',
+          label: 'Wallet',
+          icon: Icons.account_balance_wallet_outlined,
+        ),
+        AdminEntityTabSpec(id: 'trips', label: 'Trips', icon: Icons.route_outlined),
+        AdminEntityTabSpec(
+          id: 'payments',
+          label: 'Payments',
+          icon: Icons.payments_outlined,
+        ),
+        AdminEntityTabSpec(
+          id: 'support',
+          label: 'Support',
+          icon: Icons.support_agent_outlined,
+        ),
+        AdminEntityTabSpec(
+          id: 'discounts',
+          label: 'Discounts',
+          icon: Icons.local_offer_outlined,
+        ),
+        AdminEntityTabSpec(
+          id: 'notes',
+          label: 'Notes',
+          icon: Icons.sticky_note_2_outlined,
+        ),
+        AdminEntityTabSpec(id: 'audit', label: 'Audit', icon: Icons.history),
+      ],
+      controller: controller,
+      debugOpenStartedMs: t0,
+      cachePolicy: AdminEntityCachePolicy.riderDrawer(),
+      initialTabIndex: initialIndex,
+      loadBody: (String tabId) => AdminRiderDrawerTabs.loadBody(
+        rider: rider,
+        tabId: tabId,
+        dataService: _dataService,
+        actionButtonsFor: (AdminRiderRecord r) => _riderDrawerActionButtons(r, controller),
+        onGrantDiscount: ({
+          required String riderId,
+          required String appliesTo,
+          required int amountNgn,
+          int remainingUses = 1,
+          String reason = '',
+        }) async {
+          final bool ok = await _dataService.adminGrantUserDiscountCallable(
+            uid: riderId,
+            entityType: 'rider',
+            appliesTo: appliesTo,
+            amountNgn: amountNgn,
+            remainingUses: remainingUses,
+            reason: reason,
+          );
+          if (ok) {
+            controller.invalidateTabs(<String>{'discounts'});
+          }
+          return ok;
+        },
+        onRevokeDiscount: ({
+          required String riderId,
+          required String discountId,
+          String reason = '',
+        }) async {
+          final bool ok = await _dataService.adminRevokeUserDiscountCallable(
+            uid: riderId,
+            entityType: 'rider',
+            discountId: discountId,
+            reason: reason,
+          );
+          if (ok) {
+            controller.invalidateTabs(<String>{'discounts'});
+          }
+          return ok;
+        },
       ),
     );
+  }
+
+  static const List<String> _riderDrawerTabIds = <String>[
+    'overview',
+    'identity',
+    'wallet',
+    'trips',
+    'payments',
+    'support',
+    'discounts',
+    'notes',
+    'audit',
+  ];
+
+  int _riderDrawerTabIndex(String? tabId) {
+    if (tabId == null || tabId.trim().isEmpty) {
+      return 0;
+    }
+    final int i = _riderDrawerTabIds.indexOf(tabId.trim());
+    return i >= 0 ? i : 0;
+  }
+
+  List<Widget> _riderDrawerActionButtons(
+    AdminRiderRecord rider,
+    AdminEntityDrawerController controller,
+  ) {
+    final bool rw = widget.session.hasPermission('riders.write');
+    final bool sw = widget.session.hasPermission('support.write');
+    final bool st = widget.session.hasPermission('settings.write');
+    final bool deleted = rider.status.toLowerCase() == 'deleted';
+    return <Widget>[
+      if (rw)
+        OutlinedButton(
+          onPressed: () => unawaited(_riderWarn(rider)),
+          child: const Text('Warn'),
+        ),
+      if (rw)
+        OutlinedButton(
+          onPressed: () => unawaited(_riderSuspend(rider)),
+          child: const Text('Suspend'),
+        ),
+      if (sw)
+        OutlinedButton(
+          onPressed: () => unawaited(
+            _runSupportContactFlagForUser(
+              uid: rider.id,
+              role: 'rider',
+              displayLabel: rider.name,
+            ),
+          ),
+          child: const Text('Support flag'),
+        ),
+      if (deleted && st)
+        OutlinedButton(
+          onPressed: () => unawaited(_riderRestore(rider)),
+          child: const Text('Restore'),
+        ),
+      if (!deleted && st)
+        OutlinedButton(
+          onPressed: () => unawaited(_riderDelete(rider)),
+          child: Text('Delete', style: TextStyle(color: Colors.red.shade800)),
+        ),
+    ];
   }
 
   int _driverDrawerTabIndex(String? tabId) {
@@ -5453,6 +5523,18 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           }
         }
         await _showRiderDialog(rider ?? AdminHealthDrilldownNav.minimalRider(riderId));
+        return;
+      case 'open_rider_payments_pending':
+        _handleSectionSelected(AdminSection.paymentIntents);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Payments → Bank transfer intents: filter pending, pending_transfer, or pending_review.',
+              ),
+            ),
+          );
+        }
         return;
       case 'open_payment_intent':
         _handleSectionSelected(AdminSection.paymentIntents);
@@ -5660,10 +5742,13 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           : s(m['accountStatus'] ?? m['account_status']),
       status: s(m['status']).isEmpty ? 'offline' : s(m['status']),
       isOnline: m['isOnline'] == true || m['is_online'] == true,
-      verificationStatus:
-          s(ver['overallStatus'] ?? m['verification_status']).isEmpty
-              ? 'incomplete'
-              : s(ver['overallStatus'] ?? m['verification_status']),
+      verificationStatus: () {
+        if (m['nexride_verified'] == true || m['is_verified'] == true) {
+          return 'approved';
+        }
+        final String fromVer = s(ver['overallStatus'] ?? m['verification_status']);
+        return fromVer.isEmpty ? 'incomplete' : fromVer;
+      }(),
       vehicleName: s(m['car'] ?? veh['model']),
       plateNumber: s(m['plate'] ?? veh['plate']),
       tripCount: int.tryParse('${m['tripCount'] ?? m['trip_count'] ?? 0}') ?? 0,
@@ -5865,6 +5950,11 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
           icon: Icons.report_problem_outlined,
         ),
         AdminEntityTabSpec(
+          id: 'discounts',
+          label: 'Discounts',
+          icon: Icons.local_offer_outlined,
+        ),
+        AdminEntityTabSpec(
           id: 'notes',
           label: 'Notes',
           icon: Icons.sticky_note_2_outlined,
@@ -5882,12 +5972,55 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
         dataService: _dataService,
         actionButtonsFor: (AdminDriverRecord d) =>
             _driverAccountActionButtons(d, drawerController: controller),
+        onGrantDiscount: ({
+          required String driverId,
+          required String appliesTo,
+          required int amountNgn,
+          int remainingUses = 1,
+          String reason = '',
+        }) async {
+          final bool ok = await _dataService.adminGrantUserDiscountCallable(
+            uid: driverId,
+            entityType: 'driver',
+            appliesTo: appliesTo,
+            amountNgn: amountNgn,
+            remainingUses: remainingUses,
+            reason: reason,
+          );
+          if (ok) {
+            controller.invalidateTabs(<String>{'discounts'});
+          }
+          return ok;
+        },
+        onRevokeDiscount: ({
+          required String driverId,
+          required String discountId,
+          String reason = '',
+        }) async {
+          final bool ok = await _dataService.adminRevokeUserDiscountCallable(
+            uid: driverId,
+            entityType: 'driver',
+            discountId: discountId,
+            reason: reason,
+          );
+          if (ok) {
+            controller.invalidateTabs(<String>{'discounts'});
+          }
+          return ok;
+        },
       ),
     );
   }
 
   bool get _canApproveWithdrawals =>
       widget.session.hasPermission('withdrawals.approve');
+
+  void _refreshWithdrawalsAfterAction() {
+    if (!mounted || _section != AdminSection.withdrawals) {
+      return;
+    }
+    unawaited(_loadWithdrawalsOnly(resetServerCursors: false));
+  }
 
   /// Explicit "mark paid" via the Slice 2 callable. Requires a payout reference
   /// (validated in the dialog before this runs).
@@ -5930,6 +6063,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       onSuccess: (_) {
         unawaited(_refresh());
       },
+      onSettled: _refreshWithdrawalsAfterAction,
     );
   }
 
@@ -5974,16 +6108,135 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       onSuccess: (_) {
         unawaited(_refresh());
       },
+      onSettled: _refreshWithdrawalsAfterAction,
     );
   }
 
   AdminWithdrawalActions _withdrawalActionsFor(AdminWithdrawalRecord item) {
     return AdminWithdrawalActions(
       status: item.status,
+      withdrawalId: item.id,
       canApprove: _canApproveWithdrawals,
+      canPayViaFlutterwave: item.canPayViaFlutterwave,
+      showFlutterwavePayout: true,
       onMarkPaid: (String payoutReference) =>
           _markWithdrawalPaidAction(item, payoutReference),
       onReject: (String reason) => _rejectWithdrawalAction(item, reason),
+      onPayViaFlutterwave: item.canPayViaFlutterwave
+          ? () => _payWithdrawalViaFlutterwaveAction(item)
+          : null,
+      onVerifyFlutterwave: item.isProcessing || item.isReviewing
+          ? () => _verifyWithdrawalFlutterwaveAction(item)
+          : null,
+    );
+  }
+
+  Future<void> _payWithdrawalViaFlutterwaveAction(
+    AdminWithdrawalRecord withdrawal,
+  ) async {
+    if (!mounted) {
+      return;
+    }
+    if (!withdrawal.isPending) {
+      debugPrint(
+        'ADMIN_WITHDRAWAL_ACTION_BLOCKED_NOT_PENDING '
+        'withdrawalId=${withdrawal.id} '
+        'status=${withdrawal.status}',
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Only pending withdrawals can be paid. Current status: ${sentenceCaseStatus(withdrawal.status)}.',
+          ),
+        ),
+      );
+      _refreshWithdrawalsAfterAction();
+      return;
+    }
+    await _actionExecutor.run<Map<String, dynamic>>(
+      context: context,
+      actionName: 'withdrawal_pay_flutterwave',
+      successMessage: 'Flutterwave payout initiated.',
+      useDefaultMutationThrottle: true,
+      invoke: () => _dataService.payWithdrawalViaFlutterwave(withdrawal: withdrawal),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        return _withdrawalAudit(
+          action: 'withdrawal_pay_flutterwave',
+          withdrawalId: withdrawal.id,
+          before: withdrawal.status,
+          after: success ? 'processing' : null,
+          metadata: <String, dynamic>{
+            if (value is Map<String, dynamic>) ...value,
+            if (!success && error != null) 'error': error.toString(),
+          },
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (Map<String, dynamic> res) {
+        final reason = (res['reason'] ?? '').toString();
+        if (reason == 'paid') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Flutterwave payout completed and wallet debited.')),
+          );
+        } else if (reason == 'processing') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Flutterwave transfer is processing. Verify again shortly.')),
+          );
+        }
+        unawaited(_refresh());
+      },
+      onSettled: _refreshWithdrawalsAfterAction,
+    );
+  }
+
+  Future<void> _verifyWithdrawalFlutterwaveAction(
+    AdminWithdrawalRecord withdrawal,
+  ) async {
+    if (!mounted) {
+      return;
+    }
+    await _actionExecutor.run<Map<String, dynamic>>(
+      context: context,
+      actionName: 'withdrawal_verify_flutterwave',
+      successMessage: 'Flutterwave transfer status refreshed.',
+      useDefaultMutationThrottle: true,
+      invoke: () =>
+          _dataService.verifyWithdrawalFlutterwavePayout(withdrawal: withdrawal),
+      emitAudit: ({
+        required bool success,
+        Object? value,
+        Object? error,
+        required String correlationId,
+      }) {
+        return _withdrawalAudit(
+          action: 'withdrawal_verify_flutterwave',
+          withdrawalId: withdrawal.id,
+          before: withdrawal.status,
+          after: success && value is Map<String, dynamic>
+              ? value['reason']?.toString()
+              : null,
+          metadata: <String, dynamic>{
+            if (value is Map<String, dynamic>) ...value,
+            if (!success && error != null) 'error': error.toString(),
+          },
+          correlationId: correlationId,
+        );
+      },
+      onSuccess: (Map<String, dynamic> res) {
+        final reason = (res['reason'] ?? '').toString();
+        if (reason == 'paid') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Flutterwave payout confirmed. Wallet debited.')),
+          );
+        }
+        unawaited(_refresh());
+      },
+      onSettled: _refreshWithdrawalsAfterAction,
     );
   }
 
@@ -6068,10 +6321,31 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                 ? withdrawal.merchantId
                                 : '—')
                             : '—',
+                        'Fleet business ID': withdrawal.entityType == 'fleet'
+                            ? (withdrawal.businessId.isNotEmpty
+                                ? withdrawal.businessId
+                                : '—')
+                            : '—',
+                        'Owner UID': withdrawal.entityType == 'fleet'
+                            ? (withdrawal.rawData['owner_uid']?.toString() ??
+                                withdrawal.rawData['requested_by_uid']?.toString() ??
+                                '—')
+                            : '—',
                         'Party name': withdrawal.driverName.isNotEmpty
                             ? withdrawal.driverName
                             : '—',
-                        'Amount': formatAdminCurrency(withdrawal.amount),
+                        'Amount (requested)': formatAdminCurrency(
+                          (withdrawal.rawData['requested_amount'] as num?)?.toDouble() ??
+                              withdrawal.amount,
+                        ),
+                        if ((withdrawal.rawData['withdrawal_fee'] as num?) != null)
+                          'Withdrawal fee': formatAdminCurrency(
+                            (withdrawal.rawData['withdrawal_fee'] as num?)!.toDouble(),
+                          ),
+                        if ((withdrawal.rawData['payout_amount'] as num?) != null)
+                          'Payout amount (net)': formatAdminCurrency(
+                            (withdrawal.rawData['payout_amount'] as num?)!.toDouble(),
+                          ),
                         'Current status':
                             sentenceCaseStatus(withdrawal.status),
                         'Requested at':
@@ -6090,10 +6364,37 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                         'Account holder name': withdrawal.accountName.isNotEmpty
                             ? withdrawal.accountName
                             : '—',
+                        if ((withdrawal.rawData['flutterwave_transfer_id'] ??
+                                withdrawal.rawData['transfer_id'])
+                            ?.toString()
+                            .isNotEmpty ??
+                            false)
+                          'Flutterwave transfer ID':
+                              (withdrawal.rawData['flutterwave_transfer_id'] ??
+                                      withdrawal.rawData['transfer_id'])
+                                  .toString(),
+                        if ((withdrawal.rawData['flutterwave_transfer_reference'] ??
+                                withdrawal.rawData['transfer_reference'])
+                            ?.toString()
+                            .isNotEmpty ??
+                            false)
+                          'Flutterwave reference':
+                              (withdrawal.rawData['flutterwave_transfer_reference'] ??
+                                      withdrawal.rawData['transfer_reference'])
+                                  .toString(),
+                        if ((withdrawal.rawData['flutterwave_payout_status'] ??
+                                withdrawal.rawData['flutterwave_payout_last_error'])
+                            ?.toString()
+                            .isNotEmpty ??
+                            false)
+                          'Flutterwave payout status':
+                              (withdrawal.rawData['flutterwave_payout_status'] ??
+                                      withdrawal.rawData['flutterwave_payout_last_error'])
+                                  .toString(),
                       },
                     ),
                     const SizedBox(height: 18),
-                    if (withdrawal.isPending) ...<Widget>[
+                    if (withdrawal.isPending || withdrawal.isProcessing) ...<Widget>[
                       const Text(
                         'Actions',
                         style: TextStyle(
@@ -6106,6 +6407,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                       AdminWithdrawalActions(
                         status: withdrawal.status,
                         canApprove: _canApproveWithdrawals,
+                        showFlutterwavePayout: true,
                         onMarkPaid: (String payoutReference) async {
                           Navigator.of(dialogContext).pop();
                           await _markWithdrawalPaidAction(
@@ -6116,6 +6418,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                         onReject: (String reason) async {
                           Navigator.of(dialogContext).pop();
                           await _rejectWithdrawalAction(withdrawal, reason);
+                        },
+                        onPayViaFlutterwave: () async {
+                          Navigator.of(dialogContext).pop();
+                          await _payWithdrawalViaFlutterwaveAction(withdrawal);
+                        },
+                        onVerifyFlutterwave: () async {
+                          Navigator.of(dialogContext).pop();
+                          await _verifyWithdrawalFlutterwaveAction(withdrawal);
                         },
                       ),
                     ] else
@@ -6313,8 +6623,21 @@ class _PricingEditor extends StatefulWidget {
   final Future<void> Function(
     List<AdminCityPricing> cities,
     double commissionRate,
+    int bookingFeeNgn,
+    String bookingFeeMode,
+    double bookingFeePercent,
+    int bookingFeeMinNgn,
+    int? bookingFeeMaxNgn,
+    int dispatchBookingFeeNgn,
+    String dispatchBookingFeeMode,
+    double dispatchBookingFeePercent,
+    int dispatchBookingFeeMinNgn,
+    int? dispatchBookingFeeMaxNgn,
     int weeklySubscriptionNgn,
     int monthlySubscriptionNgn,
+    double fleetOwnerCommissionRate,
+    int fleetWeeklySubscriptionNgn,
+    int fleetMonthlySubscriptionNgn,
   ) onSave;
 
   @override
@@ -6323,8 +6646,21 @@ class _PricingEditor extends StatefulWidget {
 
 class _PricingEditorState extends State<_PricingEditor> {
   late final TextEditingController _commissionController;
+  late final TextEditingController _bookingFeeController;
+  late final TextEditingController _bookingFeePercentController;
+  late final TextEditingController _bookingFeeMinController;
+  late final TextEditingController _bookingFeeMaxController;
+  late String _bookingFeeMode;
+  late final TextEditingController _dispatchBookingFeeController;
+  late final TextEditingController _dispatchBookingFeePercentController;
+  late final TextEditingController _dispatchBookingFeeMinController;
+  late final TextEditingController _dispatchBookingFeeMaxController;
+  late String _dispatchBookingFeeMode;
   late final TextEditingController _weeklyController;
   late final TextEditingController _monthlyController;
+  late final TextEditingController _fleetOwnerCommissionController;
+  late final TextEditingController _fleetWeeklyController;
+  late final TextEditingController _fleetMonthlyController;
   late final Map<String, _CityPricingControllers> _cityControllers;
   bool _saving = false;
 
@@ -6334,11 +6670,46 @@ class _PricingEditorState extends State<_PricingEditor> {
     _commissionController = TextEditingController(
       text: (widget.pricing.commissionRate * 100).toStringAsFixed(0),
     );
+    _bookingFeeController = TextEditingController(
+      text: widget.pricing.bookingFeeNgn.toString(),
+    );
+    _bookingFeeMode = widget.pricing.bookingFeeMode;
+    _bookingFeePercentController = TextEditingController(
+      text: widget.pricing.bookingFeePercent.toStringAsFixed(1),
+    );
+    _bookingFeeMinController = TextEditingController(
+      text: widget.pricing.bookingFeeMinNgn.toString(),
+    );
+    _bookingFeeMaxController = TextEditingController(
+      text: widget.pricing.bookingFeeMaxNgn?.toString() ?? '',
+    );
+    _dispatchBookingFeeMode = widget.pricing.dispatchBookingFeeMode;
+    _dispatchBookingFeeController = TextEditingController(
+      text: widget.pricing.dispatchBookingFeeNgn.toString(),
+    );
+    _dispatchBookingFeePercentController = TextEditingController(
+      text: widget.pricing.dispatchBookingFeePercent.toStringAsFixed(1),
+    );
+    _dispatchBookingFeeMinController = TextEditingController(
+      text: widget.pricing.dispatchBookingFeeMinNgn.toString(),
+    );
+    _dispatchBookingFeeMaxController = TextEditingController(
+      text: widget.pricing.dispatchBookingFeeMaxNgn?.toString() ?? '',
+    );
     _weeklyController = TextEditingController(
       text: widget.pricing.weeklySubscriptionNgn.toString(),
     );
     _monthlyController = TextEditingController(
       text: widget.pricing.monthlySubscriptionNgn.toString(),
+    );
+    _fleetOwnerCommissionController = TextEditingController(
+      text: (widget.pricing.fleetOwnerCommissionRate * 100).toStringAsFixed(0),
+    );
+    _fleetWeeklyController = TextEditingController(
+      text: widget.pricing.fleetWeeklySubscriptionNgn.toString(),
+    );
+    _fleetMonthlyController = TextEditingController(
+      text: widget.pricing.fleetMonthlySubscriptionNgn.toString(),
     );
     _cityControllers = <String, _CityPricingControllers>{
       for (final city in widget.pricing.cities)
@@ -6349,8 +6720,19 @@ class _PricingEditorState extends State<_PricingEditor> {
   @override
   void dispose() {
     _commissionController.dispose();
+    _bookingFeeController.dispose();
+    _bookingFeePercentController.dispose();
+    _bookingFeeMinController.dispose();
+    _bookingFeeMaxController.dispose();
+    _dispatchBookingFeeController.dispose();
+    _dispatchBookingFeePercentController.dispose();
+    _dispatchBookingFeeMinController.dispose();
+    _dispatchBookingFeeMaxController.dispose();
     _weeklyController.dispose();
     _monthlyController.dispose();
+    _fleetOwnerCommissionController.dispose();
+    _fleetWeeklyController.dispose();
+    _fleetMonthlyController.dispose();
     for (final controllers in _cityControllers.values) {
       controllers.dispose();
     }
@@ -6369,14 +6751,59 @@ class _PricingEditorState extends State<_PricingEditor> {
     }
     final commissionPercent =
         double.tryParse(_commissionController.text.trim());
+    final bookingFee = int.tryParse(_bookingFeeController.text.trim());
+    final bookingFeePercent =
+        double.tryParse(_bookingFeePercentController.text.trim());
+    final bookingFeeMin = int.tryParse(_bookingFeeMinController.text.trim());
+    final bookingFeeMaxRaw = _bookingFeeMaxController.text.trim();
+    final bookingFeeMax =
+        bookingFeeMaxRaw.isEmpty ? null : int.tryParse(bookingFeeMaxRaw);
+    final dispatchBookingFee =
+        int.tryParse(_dispatchBookingFeeController.text.trim());
+    final dispatchBookingFeePercent =
+        double.tryParse(_dispatchBookingFeePercentController.text.trim());
+    final dispatchBookingFeeMin =
+        int.tryParse(_dispatchBookingFeeMinController.text.trim());
+    final dispatchBookingFeeMaxRaw =
+        _dispatchBookingFeeMaxController.text.trim();
+    final dispatchBookingFeeMax = dispatchBookingFeeMaxRaw.isEmpty
+        ? null
+        : int.tryParse(dispatchBookingFeeMaxRaw);
     final weekly = int.tryParse(_weeklyController.text.trim());
     final monthly = int.tryParse(_monthlyController.text.trim());
+    final fleetOwnerPercent =
+        double.tryParse(_fleetOwnerCommissionController.text.trim());
+    final fleetWeekly = int.tryParse(_fleetWeeklyController.text.trim());
+    final fleetMonthly = int.tryParse(_fleetMonthlyController.text.trim());
     if (commissionPercent == null ||
+        bookingFee == null ||
+        bookingFeePercent == null ||
+        bookingFeeMin == null ||
+        dispatchBookingFee == null ||
+        dispatchBookingFeePercent == null ||
+        dispatchBookingFeeMin == null ||
         weekly == null ||
         monthly == null ||
+        fleetOwnerPercent == null ||
+        fleetWeekly == null ||
+        fleetMonthly == null ||
         commissionPercent < 0 ||
+        bookingFee < 0 ||
+        bookingFeePercent < 0 ||
+        bookingFeePercent > 100 ||
+        bookingFeeMin < 0 ||
+        (bookingFeeMax != null && bookingFeeMax < bookingFeeMin) ||
+        dispatchBookingFee < 0 ||
+        dispatchBookingFeePercent < 0 ||
+        dispatchBookingFeePercent > 100 ||
+        dispatchBookingFeeMin < 0 ||
+        (dispatchBookingFeeMax != null &&
+            dispatchBookingFeeMax < dispatchBookingFeeMin) ||
         weekly < 0 ||
-        monthly < 0) {
+        monthly < 0 ||
+        fleetOwnerPercent < 0 ||
+        fleetWeekly < 0 ||
+        fleetMonthly < 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content: Text('Enter valid pricing and monetization values.')),
@@ -6400,14 +6827,24 @@ class _PricingEditorState extends State<_PricingEditor> {
         );
         return;
       }
+      AdminCityPricing? sourceCity;
+      for (final AdminCityPricing row in widget.pricing.cities) {
+        if (row.city == entry.key) {
+          sourceCity = row;
+          break;
+        }
+      }
       cities.add(
         AdminCityPricing(
           city: entry.key,
+          regionId: sourceCity?.regionId,
           baseFareNgn: baseFare,
           perKmNgn: perKm,
           perMinuteNgn: perMinute,
           minimumFareNgn: minimumFare,
-          enabled: controllers.enabled,
+          enabled: sourceCity?.rolloutRegionEnabled ?? controllers.enabled,
+          rolloutRegionEnabled:
+              sourceCity?.rolloutRegionEnabled ?? controllers.enabled,
         ),
       );
     }
@@ -6419,8 +6856,21 @@ class _PricingEditorState extends State<_PricingEditor> {
       await widget.onSave(
         cities,
         commissionPercent / 100,
+        bookingFee,
+        _bookingFeeMode,
+        bookingFeePercent,
+        bookingFeeMin,
+        bookingFeeMax,
+        dispatchBookingFee,
+        _dispatchBookingFeeMode,
+        dispatchBookingFeePercent,
+        dispatchBookingFeeMin,
+        dispatchBookingFeeMax,
         weekly,
         monthly,
+        fleetOwnerPercent / 100,
+        fleetWeekly,
+        fleetMonthly,
       );
       if (!mounted) {
         return;
@@ -6445,26 +6895,41 @@ class _PricingEditorState extends State<_PricingEditor> {
         AdminSummaryBanner(
           title: 'Pricing management',
           subtitle:
-              'Display or safely edit official fare formulas for rollout regions (Lagos, Abuja/FCT, Delta, Edo, Imo, Anambra), together with NexRide monetization rules.',
+              'Fare formulas for every state in the Service Areas registry, plus NexRide monetization rules. Enable or disable regions under Service Areas — not here.',
           kpis: <String, String>{
-            'Commission drivers':
+            'Independent commission':
                 '${(widget.pricing.commissionRate * 100).toStringAsFixed(0)}%',
-            'Weekly subscription':
+            'Fleet owner commission':
+                '${(widget.pricing.fleetOwnerCommissionRate * 100).toStringAsFixed(0)}%',
+            'Ride booking fee':
+                widget.pricing.bookingFeeSummary,
+            'Dispatch booking fee':
+                widget.pricing.dispatchBookingFeeSummary,
+            'Driver weekly sub':
                 formatAdminCurrency(widget.pricing.weeklySubscriptionNgn),
-            'Monthly subscription':
-                formatAdminCurrency(widget.pricing.monthlySubscriptionNgn),
+            'Fleet weekly sub':
+                formatAdminCurrency(widget.pricing.fleetWeeklySubscriptionNgn),
             'Config source': widget.pricing.loadedFromBackend
                 ? 'Live backend'
                 : 'Official defaults',
           },
         ),
         const SizedBox(height: 20),
+        if (widget.pricing.lastUpdated != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text(
+              'Last updated: ${widget.pricing.lastUpdated!.toUtc()}'
+              '${widget.pricing.updatedBy != null ? ' by ${widget.pricing.updatedBy}' : ''}',
+              style: const TextStyle(color: Color(0xFF6A645A), fontSize: 12),
+            ),
+          ),
         AdminSurfaceCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               const Text(
-                'Monetization rules',
+                'Independent driver monetization',
                 style: TextStyle(
                   color: AdminThemeTokens.ink,
                   fontSize: 18,
@@ -6472,11 +6937,180 @@ class _PricingEditorState extends State<_PricingEditor> {
                 ),
               ),
               const SizedBox(height: 16),
-              _editorField(_commissionController, 'Commission rate (%)'),
+              _editorField(_commissionController, 'Independent driver commission (%)'),
               const SizedBox(height: 12),
-              _editorField(_weeklyController, 'Weekly subscription (₦)'),
+              _editorField(_weeklyController, 'Driver weekly subscription (₦)'),
               const SizedBox(height: 12),
-              _editorField(_monthlyController, 'Monthly subscription (₦)'),
+              _editorField(_monthlyController, 'Driver monthly subscription (₦)'),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        AdminSurfaceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text(
+                'Ride booking fee',
+                style: TextStyle(
+                  color: AdminThemeTokens.ink,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                value: _bookingFeeMode,
+                decoration: const InputDecoration(
+                  labelText: 'Ride booking fee mode',
+                  border: OutlineInputBorder(),
+                ),
+                items: const <DropdownMenuItem<String>>[
+                  DropdownMenuItem<String>(
+                    value: 'fixed',
+                    child: Text('Fixed amount'),
+                  ),
+                  DropdownMenuItem<String>(
+                    value: 'percentage',
+                    child: Text('Percentage of trip fare'),
+                  ),
+                  DropdownMenuItem<String>(
+                    value: 'max_fixed_or_percentage',
+                    child: Text('Higher of fixed, percent, or minimum'),
+                  ),
+                ],
+                onChanged: widget.canEditPricing
+                    ? (String? value) {
+                        if (value == null) {
+                          return;
+                        }
+                        setState(() {
+                          _bookingFeeMode = value;
+                        });
+                      }
+                    : null,
+              ),
+              const SizedBox(height: 12),
+              _editorField(_bookingFeeController, 'Ride fixed booking fee (₦)'),
+              const SizedBox(height: 12),
+              _editorField(_bookingFeePercentController, 'Ride booking fee percent (%)'),
+              const SizedBox(height: 12),
+              _editorField(_bookingFeeMinController, 'Ride minimum booking fee (₦)'),
+              const SizedBox(height: 12),
+              _editorField(
+                _bookingFeeMaxController,
+                'Ride maximum booking fee (₦, optional)',
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        AdminSurfaceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text(
+                'Dispatch booking fee',
+                style: TextStyle(
+                  color: AdminThemeTokens.ink,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Applied to NexRide Dispatch delivery requests only. Customer pays delivery fee + dispatch booking fee.',
+                style: TextStyle(color: Color(0xFF6A645A), height: 1.4),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                value: _dispatchBookingFeeMode,
+                decoration: const InputDecoration(
+                  labelText: 'Dispatch booking fee mode',
+                  border: OutlineInputBorder(),
+                ),
+                items: const <DropdownMenuItem<String>>[
+                  DropdownMenuItem<String>(
+                    value: 'fixed',
+                    child: Text('Fixed amount'),
+                  ),
+                  DropdownMenuItem<String>(
+                    value: 'percentage',
+                    child: Text('Percentage of delivery fee'),
+                  ),
+                  DropdownMenuItem<String>(
+                    value: 'max_fixed_or_percentage',
+                    child: Text('Higher of fixed, percent, or minimum'),
+                  ),
+                ],
+                onChanged: widget.canEditPricing
+                    ? (String? value) {
+                        if (value == null) {
+                          return;
+                        }
+                        setState(() {
+                          _dispatchBookingFeeMode = value;
+                        });
+                      }
+                    : null,
+              ),
+              const SizedBox(height: 12),
+              _editorField(
+                _dispatchBookingFeeController,
+                'Dispatch fixed booking fee (₦)',
+              ),
+              const SizedBox(height: 12),
+              _editorField(
+                _dispatchBookingFeePercentController,
+                'Dispatch booking fee percent (%)',
+              ),
+              const SizedBox(height: 12),
+              _editorField(
+                _dispatchBookingFeeMinController,
+                'Dispatch minimum booking fee (₦)',
+              ),
+              const SizedBox(height: 12),
+              _editorField(
+                _dispatchBookingFeeMaxController,
+                'Dispatch maximum booking fee (₦, optional)',
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        AdminSurfaceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text(
+                'Fleet / dispatch monetization',
+                style: TextStyle(
+                  color: AdminThemeTokens.ink,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Global defaults for dispatch fleet owners. '
+                'Applied to fleet-owned delivery earnings before crediting the fleet wallet. '
+                'Optional per-fleet overrides remain on merchants/{businessId}.',
+                style: TextStyle(color: Color(0xFF6A645A), height: 1.4),
+              ),
+              const SizedBox(height: 16),
+              _editorField(
+                _fleetOwnerCommissionController,
+                'Fleet owner commission (%)',
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Applied to fleet-owned delivery earnings before crediting the fleet wallet.',
+                style: TextStyle(color: Color(0xFF6A645A), height: 1.4),
+              ),
+              const SizedBox(height: 12),
+              _editorField(_fleetWeeklyController, 'Fleet weekly subscription (₦)'),
+              const SizedBox(height: 12),
+              _editorField(_fleetMonthlyController, 'Fleet monthly subscription (₦)'),
               const SizedBox(height: 12),
               Text(
                 widget.settings.withdrawalNoticeText,
@@ -6509,16 +7143,15 @@ class _PricingEditorState extends State<_PricingEditor> {
                           ),
                         ),
                       ),
-                      Switch.adaptive(
-                        value: controllers.enabled,
-                        activeTrackColor: AdminThemeTokens.gold,
-                        onChanged: widget.canEditPricing
-                            ? (bool value) {
-                                setState(() {
-                                  controllers.enabled = value;
-                                });
-                              }
-                            : null,
+                      Tooltip(
+                        message: city.rolloutRegionEnabled
+                            ? 'Region ON in Service Areas'
+                            : 'Region OFF in Service Areas — rides blocked',
+                        child: Switch.adaptive(
+                          value: city.rolloutRegionEnabled,
+                          activeTrackColor: AdminThemeTokens.gold,
+                          onChanged: null,
+                        ),
                       ),
                     ],
                   ),
@@ -6637,6 +7270,872 @@ class _CityPricingControllers {
     perKm.dispose();
     perMinute.dispose();
     minimumFare.dispose();
+  }
+}
+
+class _SettingsEditor extends StatefulWidget {
+  const _SettingsEditor({
+    required this.bundle,
+    required this.session,
+    required this.dataService,
+    required this.saving,
+    required this.onSave,
+    required this.onOpenPricing,
+    required this.onOpenServiceAreas,
+    required this.onQueueCleaned,
+    required this.onLogout,
+  });
+
+  final AdminSettingsBundle bundle;
+  final AdminSession session;
+  final AdminDataService dataService;
+  final bool saving;
+  final Future<void> Function(Map<String, dynamic> patch) onSave;
+  final VoidCallback onOpenPricing;
+  final VoidCallback onOpenServiceAreas;
+  final Future<void> Function() onQueueCleaned;
+  final VoidCallback onLogout;
+
+  @override
+  State<_SettingsEditor> createState() => _SettingsEditorState();
+}
+
+class _SettingsEditorState extends State<_SettingsEditor> {
+  static const List<String> _serviceTypeOptions = <String>[
+    'ride',
+    'dispatch_delivery',
+    'delivery',
+    'groceries_mart',
+    'restaurants_food',
+    'merchant_food_order',
+  ];
+
+  late final TextEditingController _noticeController;
+  late final TextEditingController _offRouteController;
+  late final TextEditingController _driverFeeController;
+  late final TextEditingController _merchantFeeController;
+  late final TextEditingController _fleetFeeController;
+  late bool _verificationRequired;
+  late bool _requireBvn;
+  late Set<String> _activeServices;
+
+  @override
+  void initState() {
+    super.initState();
+    _noticeController = TextEditingController();
+    _offRouteController = TextEditingController();
+    _driverFeeController = TextEditingController();
+    _merchantFeeController = TextEditingController();
+    _fleetFeeController = TextEditingController();
+    _syncFromBundle(widget.bundle);
+  }
+
+  @override
+  void didUpdateWidget(covariant _SettingsEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.bundle.historyId != widget.bundle.historyId ||
+        oldWidget.bundle.lastUpdated != widget.bundle.lastUpdated) {
+      _syncFromBundle(widget.bundle);
+    }
+  }
+
+  void _syncFromBundle(AdminSettingsBundle bundle) {
+    final s = bundle.settings;
+    _noticeController.text = s.withdrawalNoticeText;
+    _offRouteController.text = s.offRouteToleranceMeters.toString();
+    _driverFeeController.text = s.driverWithdrawalFeeNgn.toString();
+    _merchantFeeController.text = s.merchantWithdrawalFeeNgn.toString();
+    _fleetFeeController.text = s.fleetWithdrawalFeeNgn.toString();
+    _verificationRequired = s.driverVerificationRequired;
+    _requireBvn = s.requireBvnVerification;
+    _activeServices = s.activeServiceTypes.map((String v) => v.toLowerCase()).toSet();
+  }
+
+  @override
+  void dispose() {
+    _noticeController.dispose();
+    _offRouteController.dispose();
+    _driverFeeController.dispose();
+    _merchantFeeController.dispose();
+    _fleetFeeController.dispose();
+    super.dispose();
+  }
+
+  bool get _canEdit => widget.session.hasPermission('settings.write');
+
+  Future<void> _save() async {
+    final notice = _noticeController.text.trim();
+    if (notice.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Withdrawal notice cannot be empty.')),
+      );
+      return;
+    }
+    final offRoute = int.tryParse(_offRouteController.text.trim());
+    final driverFee = int.tryParse(_driverFeeController.text.trim());
+    final merchantFee = int.tryParse(_merchantFeeController.text.trim());
+    final fleetFee = int.tryParse(_fleetFeeController.text.trim());
+    if (offRoute == null || offRoute < 50 || offRoute > 5000) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Off-route tolerance must be between 50 and 5000 meters.'),
+        ),
+      );
+      return;
+    }
+    if (driverFee == null ||
+        merchantFee == null ||
+        fleetFee == null ||
+        driverFee < 0 ||
+        merchantFee < 0 ||
+        fleetFee < 0 ||
+        driverFee > 50000 ||
+        merchantFee > 50000 ||
+        fleetFee > 50000) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter valid withdrawal fee amounts (0–50000).')),
+      );
+      return;
+    }
+    if (_activeServices.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select at least one active request service.')),
+      );
+      return;
+    }
+    await widget.onSave(<String, dynamic>{
+      'withdrawal_notice_text': notice,
+      'driver_verification_required': _verificationRequired,
+      'require_bvn_verification': _requireBvn,
+      'off_route_tolerance_meters': offRoute,
+      'active_request_service_types': _activeServices.toList()..sort(),
+      'driver_withdrawal_fee_ngn': driverFee,
+      'merchant_withdrawal_fee_ngn': merchantFee,
+      'fleet_withdrawal_fee_ngn': fleetFee,
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pricing = widget.bundle.pricingSummary;
+    final metaLine = widget.bundle.lastUpdated != null
+        ? 'Last updated ${formatAdminDateTime(widget.bundle.lastUpdated)}'
+            '${widget.bundle.updatedBy != null ? ' by ${widget.bundle.updatedBy}' : ''}'
+        : 'Last updated: not recorded yet';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        const AdminSectionHeader(
+          title: 'Settings and configuration',
+          description:
+              'Edit operational settings backed by the server. Fare commission and booking fees are managed under Pricing; city rollout is managed under Service Areas.',
+        ),
+        const SizedBox(height: 8),
+        Text(
+          metaLine,
+          style: TextStyle(color: AdminThemeTokens.ink.withValues(alpha: 0.72)),
+        ),
+        const SizedBox(height: 16),
+        AdminSurfaceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  const Expanded(
+                    child: Text(
+                      'Fare model summary (read-only)',
+                      style: TextStyle(
+                        color: AdminThemeTokens.ink,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  TextButton(onPressed: widget.onOpenPricing, child: const Text('Edit in Pricing')),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${(pricing.commissionRate * 100).toStringAsFixed(0)}% commission · '
+                'Ride booking ${pricing.bookingFeeSummary} · '
+                'Dispatch booking ${pricing.dispatchBookingFeeSummary} · '
+                'Weekly ${formatAdminCurrency(pricing.weeklySubscriptionNgn)} · '
+                'Monthly ${formatAdminCurrency(pricing.monthlySubscriptionNgn)}',
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: pricing.cities.map((AdminCityPricing city) {
+                  return AdminStatusChip(
+                    '${city.city} ${city.enabled ? 'enabled' : 'disabled'}',
+                  );
+                }).toList(),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        AdminSurfaceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text(
+                'Operational settings',
+                style: TextStyle(
+                  color: AdminThemeTokens.ink,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _noticeController,
+                enabled: _canEdit && !widget.saving,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  labelText: 'Withdrawal notice',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Driver verification required'),
+                subtitle: const Text(
+                  'When enabled, unverified drivers cannot go online or receive offers.',
+                ),
+                value: _verificationRequired,
+                onChanged: _canEdit && !widget.saving
+                    ? (bool v) => setState(() => _verificationRequired = v)
+                    : null,
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Require BVN verification'),
+                subtitle: const Text('Dispatch gates require approved BVN before offers.'),
+                value: _requireBvn,
+                onChanged: _canEdit && !widget.saving
+                    ? (bool v) => setState(() => _requireBvn = v)
+                    : null,
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _offRouteController,
+                enabled: _canEdit && !widget.saving,
+                decoration: const InputDecoration(
+                  labelText: 'Off-route tolerance (meters)',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.number,
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Active request services',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: _serviceTypeOptions.map((String key) {
+                  final selected = _activeServices.contains(key);
+                  return FilterChip(
+                    label: Text(key),
+                    selected: selected,
+                    onSelected: _canEdit && !widget.saving
+                        ? (bool v) {
+                            setState(() {
+                              if (v) {
+                                _activeServices.add(key);
+                              } else {
+                                _activeServices.remove(key);
+                              }
+                            });
+                          }
+                        : null,
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Withdrawal fees (NGN)',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: TextField(
+                      controller: _driverFeeController,
+                      enabled: _canEdit && !widget.saving,
+                      decoration: const InputDecoration(
+                        labelText: 'Driver fee',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: _merchantFeeController,
+                      enabled: _canEdit && !widget.saving,
+                      decoration: const InputDecoration(
+                        labelText: 'Merchant fee',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: _fleetFeeController,
+                      enabled: _canEdit && !widget.saving,
+                      decoration: const InputDecoration(
+                        labelText: 'Fleet fee',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              if (_canEdit)
+                AdminPrimaryButton(
+                  label: widget.saving ? 'Saving…' : 'Save settings',
+                  onPressed: widget.saving ? null : _save,
+                  icon: Icons.save_outlined,
+                )
+              else
+                Text(
+                  kAdminNoPermissionTooltip,
+                  style: TextStyle(color: AdminThemeTokens.ink.withValues(alpha: 0.7)),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        AdminSurfaceCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  const Expanded(
+                    child: Text(
+                      'City enablement (read-only)',
+                      style: TextStyle(
+                        color: AdminThemeTokens.ink,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: widget.onOpenServiceAreas,
+                    child: const Text('Manage in Service Areas'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: widget.bundle.cityEnablement.entries
+                    .map((MapEntry<String, bool> entry) {
+                  return AdminStatusChip(
+                    '${entry.key} ${entry.value ? 'enabled' : 'disabled'}',
+                    color: entry.value
+                        ? AdminThemeTokens.success
+                        : AdminThemeTokens.warning,
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 12),
+              Text('Admin profile: ${widget.session.email}'),
+              const SizedBox(height: 20),
+              _QueueCleanupPanel(
+                session: widget.session,
+                dataService: widget.dataService,
+                onQueueCleaned: widget.onQueueCleaned,
+              ),
+              const SizedBox(height: 20),
+              AdminGhostButton(
+                label: 'Log out admin session',
+                onPressed: widget.onLogout,
+                icon: Icons.logout_rounded,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _QueueCleanupPanel extends StatefulWidget {
+  const _QueueCleanupPanel({
+    required this.session,
+    required this.dataService,
+    required this.onQueueCleaned,
+  });
+
+  final AdminSession session;
+  final AdminDataService dataService;
+  final Future<void> Function() onQueueCleaned;
+
+  @override
+  State<_QueueCleanupPanel> createState() => _QueueCleanupPanelState();
+}
+
+class _QueueCleanupPanelState extends State<_QueueCleanupPanel> {
+  bool _busy = false;
+  bool _showArchivedRecords = false;
+  String _entityType = 'ride';
+  String _searchQuery = '';
+  List<Map<String, dynamic>> _suggestions = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> _archivedRecords = <Map<String, dynamic>>[];
+  Map<String, dynamic>? _selectedSuggestion;
+  Timer? _searchDebounce;
+  final TextEditingController _searchController = TextEditingController();
+  final TextEditingController _archiveConfirmController = TextEditingController();
+
+  bool get _canEdit => widget.session.hasPermission('settings.write');
+  bool get _isSuperAdmin => widget.session.adminRole == 'super_admin';
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController.addListener(() {
+      _onSearchChanged(_searchController.text);
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    _archiveConfirmController.dispose();
+    super.dispose();
+  }
+
+  void _onSearchChanged(String value) {
+    _searchQuery = value.trim();
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 280), () async {
+      if (_searchQuery.length < 2) {
+        if (!mounted) return;
+        setState(() {
+          _suggestions = <Map<String, dynamic>>[];
+        });
+        return;
+      }
+      try {
+        final rows = await widget.dataService.searchArchiveCandidates(
+          query: _searchQuery,
+          includeArchived: _showArchivedRecords,
+          archivedOnly: _showArchivedRecords,
+        );
+        if (!mounted) return;
+        setState(() {
+          _suggestions = rows;
+          if (_selectedSuggestion != null) {
+            final selectedId = '${_selectedSuggestion!['entity_id']}';
+            final stillExists = rows.any(
+              (row) => '${row['entity_id']}' == selectedId,
+            );
+            if (!stillExists) {
+              _selectedSuggestion = null;
+            }
+          }
+        });
+      } catch (_) {
+        if (!mounted) return;
+        setState(() {
+          _suggestions = <Map<String, dynamic>>[];
+        });
+      }
+    });
+  }
+
+  Future<void> _loadArchivedRecords() async {
+    if (!_isSuperAdmin || _busy) return;
+    setState(() => _busy = true);
+    try {
+      final data = await widget.dataService.listArchivedRecords(runPurge: true);
+      if (!mounted) return;
+      final raw = data['records'];
+      setState(() {
+        _archivedRecords = raw is List
+            ? raw
+                .whereType<Map>()
+                .map((row) => Map<String, dynamic>.from(row))
+                .toList()
+            : <Map<String, dynamic>>[];
+      });
+      final purge = data['purge'];
+      if (purge is Map && (purge['purged'] as num? ?? 0) > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Lazy purge removed ${purge['purged']} expired archived record(s).',
+            ),
+          ),
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load archived records: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _runBulk(String queue, String label) async {
+    if (!_canEdit || _busy) return;
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Mark $label reviewed?'),
+        content: Text(
+          'Sets reviewed_by_admin and archived flags only. '
+          'Verified payments, wallet ledgers, and settlement proofs are never deleted.',
+        ),
+        actions: <Widget>[
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Mark reviewed')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final data = await widget.dataService.markAlertQueueReviewed(
+        queue: queue,
+        reason: 'admin_settings_bulk_review',
+      );
+      await widget.onQueueCleaned();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '$label: reviewed ${data['reviewed'] ?? 0}, skipped ${data['skipped'] ?? 0}.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Queue cleanup failed: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _archiveTestRecord() async {
+    if (!_isSuperAdmin || _busy) return;
+    final selected = _selectedSuggestion;
+    final entityId = selected != null
+        ? '${selected['entity_id']}'.trim()
+        : _searchController.text.trim();
+    final entityType = selected != null
+        ? '${selected['entity_type'] ?? _entityType}'.trim()
+        : _entityType;
+    final confirmation = _archiveConfirmController.text.trim();
+    if (entityId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select or enter a ride/delivery/ticket id.')),
+      );
+      return;
+    }
+    if (confirmation != 'ARCHIVE TEST DATA') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Type ARCHIVE TEST DATA to confirm.')),
+      );
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await widget.dataService.archiveTestRecord(
+        entityType: entityType,
+        entityId: entityId,
+        confirmation: confirmation,
+        reason: 'admin_settings_test_archive',
+      );
+      await widget.onQueueCleaned();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Archived test record $entityType:$entityId')),
+      );
+      _searchController.clear();
+      _archiveConfirmController.clear();
+      setState(() {
+        _selectedSuggestion = null;
+        _suggestions = <Map<String, dynamic>>[];
+      });
+      if (_showArchivedRecords) {
+        await _loadArchivedRecords();
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Archive blocked or failed: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _restoreArchivedRecord(Map<String, dynamic> row) async {
+    if (!_isSuperAdmin || _busy) return;
+    final entityType = '${row['entity_type'] ?? ''}'.trim();
+    final entityId = '${row['entity_id'] ?? ''}'.trim();
+    if (entityType.isEmpty || entityId.isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      await widget.dataService.restoreArchivedRecord(
+        entityType: entityType,
+        entityId: entityId,
+        reason: 'admin_settings_restore_archived',
+      );
+      await widget.onQueueCleaned();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Restored $entityType:$entityId')),
+      );
+      await _loadArchivedRecords();
+      _onSearchChanged(_searchController.text);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Restore failed: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AdminSurfaceCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Text(
+            'Queue / alert cleanup',
+            style: TextStyle(
+              color: AdminThemeTokens.ink,
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Clears sidebar badge noise from old test alerts using review/archive flags. '
+            'Does not delete payments/{payId}, payment_transactions, payment_settlements, or wallet ledgers.',
+            style: TextStyle(color: Color(0xFF6A645A), height: 1.4),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: <Widget>[
+              AdminGhostButton(
+                label: _busy ? 'Working…' : 'Mark trip payment alerts reviewed',
+                onPressed: _canEdit && !_busy
+                    ? () => _runBulk('trips_payment_pending', 'Trip payment pending')
+                    : null,
+                icon: Icons.check_circle_outline,
+              ),
+              AdminGhostButton(
+                label: _busy ? 'Working…' : 'Mark payment alerts reviewed',
+                onPressed: _canEdit && !_busy
+                    ? () => _runBulk('payment_alerts', 'Payment alerts')
+                    : null,
+                icon: Icons.payments_outlined,
+              ),
+              AdminGhostButton(
+                label: _busy ? 'Working…' : 'Mark support tickets reviewed',
+                onPressed: _canEdit && !_busy
+                    ? () => _runBulk('support_tickets', 'Support tickets')
+                    : null,
+                icon: Icons.support_agent_outlined,
+              ),
+            ],
+          ),
+          if (_isSuperAdmin) ...<Widget>[
+            const SizedBox(height: 20),
+            const Text(
+              'Archive test record (Super Admin)',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Archives instead of deleting. Record is hidden from admin lists for 60 days, '
+              'then eligible for lazy purge when you open archived records or run cleanup.',
+              style: TextStyle(color: Color(0xFF6A645A), height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: _entityType,
+              decoration: const InputDecoration(
+                labelText: 'Default entity type',
+                border: OutlineInputBorder(),
+              ),
+              items: const <DropdownMenuItem<String>>[
+                DropdownMenuItem(value: 'ride', child: Text('Ride / trip')),
+                DropdownMenuItem(value: 'delivery', child: Text('Delivery')),
+                DropdownMenuItem(value: 'support_ticket', child: Text('Support ticket')),
+              ],
+              onChanged: _busy
+                  ? null
+                  : (value) {
+                      if (value == null) return;
+                      setState(() => _entityType = value);
+                    },
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _searchController,
+              enabled: !_busy,
+              decoration: InputDecoration(
+                labelText: 'Search ride_requests / delivery_requests / support_tickets',
+                hintText: 'Type id fragment (min 2 chars)',
+                border: const OutlineInputBorder(),
+                suffixIcon: _showArchivedRecords
+                    ? const Icon(Icons.inventory_2_outlined)
+                    : const Icon(Icons.search),
+              ),
+            ),
+            if (_suggestions.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 8),
+              Material(
+                elevation: 1,
+                borderRadius: BorderRadius.circular(8),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 180),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: _suggestions.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final row = _suggestions[index];
+                      final label = '${row['label'] ?? row['entity_id']}';
+                      final subtitle = <String>[
+                        if (row['status'] != null) '${row['status']}',
+                        if (row['payment_status'] != null) '${row['payment_status']}',
+                        if (row['subject'] != null) '${row['subject']}',
+                      ].join(' · ');
+                      return ListTile(
+                        dense: true,
+                        title: Text(label),
+                        subtitle: subtitle.isEmpty ? null : Text(subtitle),
+                        selected: _selectedSuggestion?['entity_id'] == row['entity_id'],
+                        onTap: _busy
+                            ? null
+                            : () {
+                                setState(() {
+                                  _selectedSuggestion = row;
+                                  _entityType = '${row['entity_type'] ?? _entityType}';
+                                  _searchController.text = '${row['entity_id']}';
+                                  _searchController.selection = TextSelection.collapsed(
+                                    offset: _searchController.text.length,
+                                  );
+                                });
+                              },
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: _archiveConfirmController,
+              enabled: !_busy,
+              decoration: const InputDecoration(
+                labelText: 'Type ARCHIVE TEST DATA to confirm',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            AdminGhostButton(
+              label: 'Archive guarded test record',
+              onPressed: !_busy ? _archiveTestRecord : null,
+              icon: Icons.archive_outlined,
+            ),
+            const SizedBox(height: 16),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Show archived records'),
+              subtitle: const Text(
+                'Search includes archived rows. Opening also runs lazy purge for records past 60 days.',
+              ),
+              value: _showArchivedRecords,
+              onChanged: _busy
+                  ? null
+                  : (bool value) async {
+                      setState(() {
+                        _showArchivedRecords = value;
+                        _selectedSuggestion = null;
+                      });
+                      _onSearchChanged(_searchController.text);
+                      if (value) {
+                        await _loadArchivedRecords();
+                      } else {
+                        setState(() => _archivedRecords = <Map<String, dynamic>>[]);
+                      }
+                    },
+            ),
+            if (_showArchivedRecords) ...<Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      '${_archivedRecords.length} archived record(s)',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _busy ? null : _loadArchivedRecords,
+                    child: const Text('Refresh / purge eligible'),
+                  ),
+                ],
+              ),
+              if (_archivedRecords.isEmpty)
+                const Text(
+                  'No archived records found in recent scan.',
+                  style: TextStyle(color: Color(0xFF6A645A)),
+                )
+              else
+                ..._archivedRecords.take(20).map((row) {
+                  final label = '${row['label'] ?? row['entity_id']}';
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: Text(label),
+                    subtitle: Text(
+                      'Purge eligible: ${row['purge_eligible_at'] != null ? formatAdminDateTime(DateTime.fromMillisecondsSinceEpoch((row['purge_eligible_at'] as num).toInt())) : '—'}',
+                    ),
+                    trailing: TextButton(
+                      onPressed: _busy ? null : () => _restoreArchivedRecord(row),
+                      child: const Text('Restore'),
+                    ),
+                  );
+                }),
+            ],
+          ],
+        ],
+      ),
+    );
   }
 }
 

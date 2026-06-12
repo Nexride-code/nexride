@@ -2,11 +2,114 @@
  * Admin business mutations — RTDB/Firestore writes only from server (audited).
  */
 
+const admin = require("firebase-admin");
 const { logger } = require("firebase-functions");
 const adminAuditLog = require("./admin_audit_log");
 const adminPerms = require("./admin_permissions");
 const { normUid } = require("./admin_auth");
 const withdrawFlow = require("./withdraw_flow");
+const { mergePricingCitiesWithOperationalRegistry } = require("./pricing_rollout_registry");
+const {
+  BOOKING_FEE_MODES,
+  DEFAULT_BOOKING_FEE_MODE,
+  DEFAULT_BOOKING_FEE_NGN,
+  DEFAULT_BOOKING_FEE_PERCENT,
+  DEFAULT_BOOKING_FEE_MIN_NGN,
+  DEFAULT_DISPATCH_BOOKING_FEE_MODE,
+  DEFAULT_DISPATCH_BOOKING_FEE_NGN,
+  DEFAULT_DISPATCH_BOOKING_FEE_PERCENT,
+  DEFAULT_DISPATCH_BOOKING_FEE_MIN_NGN,
+  normalizePricingConfig,
+  normalizeBookingFeePolicy,
+} = require("./app_config_pricing");
+
+function readBookingFeePolicyInput(data, scope) {
+  const nested =
+    data?.[scope] && typeof data[scope] === "object" ? data[scope] : {};
+  const prefix = scope === "dispatch" ? "dispatch" : "";
+  const pick = (camel, snake) =>
+    nested[camel] ??
+    nested[snake] ??
+    (prefix
+      ? data?.[`${prefix}${camel.charAt(0).toUpperCase()}${camel.slice(1)}`] ??
+        data?.[`${prefix}_${snake}`]
+      : data?.[camel] ?? data?.[snake]);
+
+  const defaults =
+    scope === "dispatch"
+      ? {
+          mode: DEFAULT_DISPATCH_BOOKING_FEE_MODE,
+          bookingFeeNgn: DEFAULT_DISPATCH_BOOKING_FEE_NGN,
+          bookingFeePercent: DEFAULT_DISPATCH_BOOKING_FEE_PERCENT,
+          bookingFeeMinNgn: DEFAULT_DISPATCH_BOOKING_FEE_MIN_NGN,
+          bookingFeeMaxNgn: null,
+        }
+      : {
+          mode: DEFAULT_BOOKING_FEE_MODE,
+          bookingFeeNgn: DEFAULT_BOOKING_FEE_NGN,
+          bookingFeePercent: DEFAULT_BOOKING_FEE_PERCENT,
+          bookingFeeMinNgn: DEFAULT_BOOKING_FEE_MIN_NGN,
+          bookingFeeMaxNgn: null,
+        };
+
+  const maxRaw = pick("bookingFeeMaxNgn", "booking_fee_max_ngn");
+  const maxParsed = Number(maxRaw);
+  return normalizeBookingFeePolicy(
+    {
+      bookingFeeMode: pick("bookingFeeMode", "booking_fee_mode"),
+      bookingFeeNgn: pick("bookingFeeNgn", "booking_fee_ngn"),
+      bookingFeePercent: pick("bookingFeePercent", "booking_fee_percent"),
+      bookingFeeMinNgn: pick("bookingFeeMinNgn", "booking_fee_min_ngn"),
+      bookingFeeMaxNgn:
+        maxRaw == null || String(maxRaw).trim() === "" ? null : maxParsed,
+    },
+    defaults,
+    scope === "rides" ? data : null,
+  );
+}
+
+function validateBookingFeePolicy(policy, label) {
+  if (!Number.isFinite(policy.bookingFeeNgn) || policy.bookingFeeNgn < 0) {
+    return { ok: false, reason: `invalid_${label}_booking_fee` };
+  }
+  if (!BOOKING_FEE_MODES.has(policy.bookingFeeMode)) {
+    return { ok: false, reason: `invalid_${label}_booking_fee_mode` };
+  }
+  if (
+    !Number.isFinite(policy.bookingFeePercent) ||
+    policy.bookingFeePercent < 0 ||
+    policy.bookingFeePercent > 100
+  ) {
+    return { ok: false, reason: `invalid_${label}_booking_fee_percent` };
+  }
+  if (!Number.isFinite(policy.bookingFeeMinNgn) || policy.bookingFeeMinNgn < 0) {
+    return { ok: false, reason: `invalid_${label}_booking_fee_min` };
+  }
+  if (
+    policy.bookingFeeMaxNgn != null &&
+    (!Number.isFinite(policy.bookingFeeMaxNgn) ||
+      policy.bookingFeeMaxNgn < 0 ||
+      policy.bookingFeeMaxNgn < policy.bookingFeeMinNgn)
+  ) {
+    return { ok: false, reason: `invalid_${label}_booking_fee_max` };
+  }
+  return { ok: true };
+}
+
+function bookingFeePolicyResponseAliases(policy) {
+  return {
+    bookingFeeNgn: policy.bookingFeeNgn,
+    booking_fee_ngn: policy.bookingFeeNgn,
+    bookingFeeMode: policy.bookingFeeMode,
+    booking_fee_mode: policy.bookingFeeMode,
+    bookingFeePercent: policy.bookingFeePercent,
+    booking_fee_percent: policy.bookingFeePercent,
+    bookingFeeMinNgn: policy.bookingFeeMinNgn,
+    booking_fee_min_ngn: policy.bookingFeeMinNgn,
+    bookingFeeMaxNgn: policy.bookingFeeMaxNgn,
+    booking_fee_max_ngn: policy.bookingFeeMaxNgn,
+  };
+}
 
 function nowMs() {
   return Date.now();
@@ -283,6 +386,26 @@ async function adminReviewDriverVerificationCase(data, context, db) {
     updates[`users/${driverId}/kyc_status/admin_approved_at`] = now;
     updates[`users/${driverId}/kyc_status/admin_approved_by`] = reviewedBy;
     updates[`users/${driverId}/kyc_status/updated_at`] = now;
+  } else if (action === "reject") {
+    updates[`drivers/${driverId}/verification_status`] = "rejected";
+    updates[`drivers/${driverId}/identity_verification_status`] = "rejected";
+    updates[`drivers/${driverId}/is_verified`] = false;
+    updates[`drivers/${driverId}/nexride_verified`] = false;
+    updates[`users/${driverId}/kyc_status/kyc_approved`] = false;
+    updates[`users/${driverId}/kyc_status/kyc_admin_override`] = false;
+    updates[`users/${driverId}/kyc_status/submission_status`] = "rejected";
+    updates[`users/${driverId}/kyc_status/rejection_reason`] = note || null;
+    updates[`users/${driverId}/kyc_status/updated_at`] = now;
+  } else {
+    updates[`drivers/${driverId}/verification_status`] = "resubmission_required";
+    updates[`drivers/${driverId}/identity_verification_status`] = "resubmission_required";
+    updates[`drivers/${driverId}/is_verified`] = false;
+    updates[`drivers/${driverId}/nexride_verified`] = false;
+    updates[`users/${driverId}/kyc_status/kyc_approved`] = false;
+    updates[`users/${driverId}/kyc_status/kyc_admin_override`] = false;
+    updates[`users/${driverId}/kyc_status/submission_status`] = "resubmission_required";
+    updates[`users/${driverId}/kyc_status/rejection_reason`] = note || null;
+    updates[`users/${driverId}/kyc_status/updated_at`] = now;
   }
 
   await db.ref().update(updates);
@@ -318,15 +441,62 @@ async function adminGetAppPricingConfig(_data, context, db) {
   const deny = await adminPerms.enforceCallable(db, context, "adminGetAppPricingConfig");
   if (deny) return deny;
 
+  const fs = admin.firestore();
   const [pricingSnap, citySnap, dispatchSnap] = await Promise.all([
     db.ref("app_config/pricing").get(),
     db.ref("app_config/city_enablement").get(),
     db.ref("app_config/nexride_dispatch").get(),
   ]);
 
+  const pricingRaw = pricingSnap.val() && typeof pricingSnap.val() === "object" ? pricingSnap.val() : {};
+  const merged = await mergePricingCitiesWithOperationalRegistry(fs, pricingRaw);
+  const { resolveSubscriptionDisplayNgn } = require("./settings_config_registry");
+  const subscriptionResolved = resolveSubscriptionDisplayNgn(
+    merged.weeklySubscriptionNgn,
+    merged.monthlySubscriptionNgn,
+  );
+  const pricing = {
+    ...pricingRaw,
+    cities: merged.cities,
+    commissionRate: merged.commissionRate,
+    commission_rate: merged.commissionRate,
+    rides: merged.rides,
+    dispatch: merged.dispatch,
+    ...bookingFeePolicyResponseAliases(merged.rides),
+    dispatchBookingFeeNgn: merged.dispatch.bookingFeeNgn,
+    dispatch_booking_fee_ngn: merged.dispatch.bookingFeeNgn,
+    dispatchBookingFeeMode: merged.dispatch.bookingFeeMode,
+    dispatch_booking_fee_mode: merged.dispatch.bookingFeeMode,
+    dispatchBookingFeePercent: merged.dispatch.bookingFeePercent,
+    dispatch_booking_fee_percent: merged.dispatch.bookingFeePercent,
+    dispatchBookingFeeMinNgn: merged.dispatch.bookingFeeMinNgn,
+    dispatch_booking_fee_min_ngn: merged.dispatch.bookingFeeMinNgn,
+    dispatchBookingFeeMaxNgn: merged.dispatch.bookingFeeMaxNgn,
+    dispatch_booking_fee_max_ngn: merged.dispatch.bookingFeeMaxNgn,
+    weeklySubscriptionNgn: subscriptionResolved.weeklySubscriptionNgn,
+    monthlySubscriptionNgn: subscriptionResolved.monthlySubscriptionNgn,
+    weeklySubscriptionNgnRaw: subscriptionResolved.weeklySubscriptionNgnRaw,
+    monthlySubscriptionNgnRaw: subscriptionResolved.monthlySubscriptionNgnRaw,
+    weekly_subscription_ngn: subscriptionResolved.weekly_subscription_ngn,
+    monthly_subscription_ngn: subscriptionResolved.monthly_subscription_ngn,
+    weekly_subscription_ngn_raw: subscriptionResolved.weekly_subscription_ngn_raw,
+    monthly_subscription_ngn_raw: subscriptionResolved.monthly_subscription_ngn_raw,
+    weekly_subscription_from_rtdb: subscriptionResolved.weekly_subscription_from_rtdb,
+    monthly_subscription_from_rtdb: subscriptionResolved.monthly_subscription_from_rtdb,
+    fleetOwnerCommissionRate: merged.fleetOwnerCommissionRate,
+    fleet_owner_commission_rate: merged.fleetOwnerCommissionRate,
+    fleetWeeklySubscriptionNgn: merged.fleetWeeklySubscriptionNgn,
+    fleet_weekly_subscription_ngn: merged.fleetWeeklySubscriptionNgn,
+    fleetMonthlySubscriptionNgn: merged.fleetMonthlySubscriptionNgn,
+    fleet_monthly_subscription_ngn: merged.fleetMonthlySubscriptionNgn,
+    updatedAt: merged.updatedAt || pricingRaw.updatedAt,
+    updatedBy: merged.updatedBy || pricingRaw.updatedBy,
+  };
+
   return {
     success: true,
-    pricing: pricingSnap.val() && typeof pricingSnap.val() === "object" ? pricingSnap.val() : {},
+    pricing,
+    rollout_registry_region_count: merged.rollout_registry_region_count ?? 0,
     city_enablement:
       citySnap.val() && typeof citySnap.val() === "object" ? citySnap.val() : {},
     nexride_dispatch:
@@ -342,9 +512,25 @@ async function getAppPricingConfig(_data, context, db) {
     return { success: false, reason: "unauthorized" };
   }
   const snap = await db.ref("app_config/pricing").get();
+  const pricingRaw = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
+  const fs = admin.firestore();
+  const merged = await mergePricingCitiesWithOperationalRegistry(fs, pricingRaw);
+  const normalized = normalizePricingConfig({ ...pricingRaw, ...merged });
   return {
     success: true,
-    pricing: snap.val() && typeof snap.val() === "object" ? snap.val() : {},
+    pricing: {
+      ...pricingRaw,
+      cities: merged.cities,
+      commissionRate: normalized.commissionRate,
+      rides: normalized.rides,
+      dispatch: normalized.dispatch,
+      ...bookingFeePolicyResponseAliases(normalized.rides),
+      dispatchBookingFeeNgn: normalized.dispatch.bookingFeeNgn,
+      dispatchBookingFeeMode: normalized.dispatch.bookingFeeMode,
+      dispatchBookingFeePercent: normalized.dispatch.bookingFeePercent,
+      dispatchBookingFeeMinNgn: normalized.dispatch.bookingFeeMinNgn,
+      dispatchBookingFeeMaxNgn: normalized.dispatch.bookingFeeMaxNgn,
+    },
   };
 }
 
@@ -357,46 +543,120 @@ async function adminUpdateAppPricingConfig(data, context, db) {
 
   const cities = Array.isArray(data?.cities) ? data.cities : [];
   const commissionRate = Number(data?.commissionRate ?? data?.commission_rate ?? 0);
+  const ridesBooking = readBookingFeePolicyInput(data, "rides");
+  const dispatchBooking = readBookingFeePolicyInput(data, "dispatch");
   const weeklySubscriptionNgn = Number(
     data?.weeklySubscriptionNgn ?? data?.weekly_subscription_ngn ?? 0,
   );
   const monthlySubscriptionNgn = Number(
     data?.monthlySubscriptionNgn ?? data?.monthly_subscription_ngn ?? 0,
   );
+  const fleetOwnerCommissionRate = Number(
+    data?.fleetOwnerCommissionRate ?? data?.fleet_owner_commission_rate ?? commissionRate,
+  );
+  const fleetWeeklySubscriptionNgn = Number(
+    data?.fleetWeeklySubscriptionNgn ?? data?.fleet_weekly_subscription_ngn ?? weeklySubscriptionNgn,
+  );
+  const fleetMonthlySubscriptionNgn = Number(
+    data?.fleetMonthlySubscriptionNgn ?? data?.fleet_monthly_subscription_ngn ?? monthlySubscriptionNgn,
+  );
   if (!cities.length) {
     return { success: false, reason: "invalid_cities" };
   }
-
+  if (!Number.isFinite(commissionRate) || commissionRate < 0 || commissionRate > 1) {
+    return { success: false, reason: "invalid_commission_rate" };
+  }
+  const ridesValidation = validateBookingFeePolicy(ridesBooking, "ride");
+  if (!ridesValidation.ok) return ridesValidation;
+  const dispatchValidation = validateBookingFeePolicy(dispatchBooking, "dispatch");
+  if (!dispatchValidation.ok) return dispatchValidation;
+  if (
+    !Number.isFinite(fleetOwnerCommissionRate) ||
+    fleetOwnerCommissionRate < 0 ||
+    fleetOwnerCommissionRate > 1
+  ) {
+    return { success: false, reason: "invalid_fleet_owner_commission_rate" };
+  }
   const normalizedCities = {};
   const cityEnablement = {};
   for (const row of cities) {
     if (!row || typeof row !== "object") continue;
+    const regionId = trim(row.region_id ?? row.regionId ?? "", 80);
     const city = trim(row.city ?? row.name, 120);
-    if (!city) continue;
-    const slug = pricingCityStorageKey(city);
+    if (!city && !regionId) continue;
+    const slug = regionId || pricingCityStorageKey(city);
     normalizedCities[slug] = {
-      city,
+      city: city || regionId,
+      region_id: regionId || slug,
       baseFareNgn: Number(row.baseFareNgn ?? row.base_fare_ngn ?? 0),
       perKmNgn: Number(row.perKmNgn ?? row.per_km_ngn ?? 0),
       perMinuteNgn: Number(row.perMinuteNgn ?? row.per_minute_ngn ?? 0),
       minimumFareNgn: Number(row.minimumFareNgn ?? row.minimum_fare_ngn ?? 0),
+      deliveryBaseFareNgn: Number(row.deliveryBaseFareNgn ?? row.delivery_base_fare_ngn ?? 0),
+      deliveryPerKmNgn: Number(row.deliveryPerKmNgn ?? row.delivery_per_km_ngn ?? 0),
+      deliveryPerMinuteNgn: Number(row.deliveryPerMinuteNgn ?? row.delivery_per_minute_ngn ?? 0),
+      deliveryMinimumFareNgn: Number(row.deliveryMinimumFareNgn ?? row.delivery_minimum_fare_ngn ?? 0),
       enabled: row.enabled !== false,
     };
     cityEnablement[slug] = normalizedCities[slug].enabled;
   }
 
   const now = nowMs();
+  const actorUid = normUid(context.auth.uid);
+
+  const priorSnap = await db.ref("app_config/pricing").get();
+  const priorPricing =
+    priorSnap.val() && typeof priorSnap.val() === "object" ? priorSnap.val() : {};
+  const historyRef = db.ref("pricing_history").push();
+  const historyId = historyRef.key;
+  if (historyId) {
+    await historyRef.set({
+      changed_by: actorUid,
+      changed_at: now,
+      old_values: priorPricing,
+      new_values: {
+        cities: normalizedCities,
+        commissionRate,
+        fleetOwnerCommissionRate,
+        rides: ridesBooking,
+        dispatch: dispatchBooking,
+        weeklySubscriptionNgn,
+        monthlySubscriptionNgn,
+        fleetWeeklySubscriptionNgn,
+        fleetMonthlySubscriptionNgn,
+        updatedAt: now,
+        updatedBy: actorUid,
+      },
+    });
+  }
+
   const pricingSnapshot = {
     commissionRate,
+    fleetOwnerCommissionRate,
+    rides: ridesBooking,
+    dispatch: dispatchBooking,
+    ...bookingFeePolicyResponseAliases(ridesBooking),
     weeklySubscriptionNgn,
     monthlySubscriptionNgn,
+    fleetWeeklySubscriptionNgn,
+    fleetMonthlySubscriptionNgn,
     updatedAt: now,
   };
 
   await db.ref().update({
     "app_config/pricing": {
       cities: normalizedCities,
-      ...pricingSnapshot,
+      commissionRate,
+      fleetOwnerCommissionRate,
+      rides: ridesBooking,
+      dispatch: dispatchBooking,
+      ...bookingFeePolicyResponseAliases(ridesBooking),
+      weeklySubscriptionNgn,
+      monthlySubscriptionNgn,
+      fleetWeeklySubscriptionNgn,
+      fleetMonthlySubscriptionNgn,
+      updatedAt: now,
+      updatedBy: actorUid,
     },
     "app_config/city_enablement": cityEnablement,
   });
@@ -454,6 +714,9 @@ async function adminUpdateAppPricingConfig(data, context, db) {
       city_count: Object.keys(normalizedCities).length,
       drivers_processed: processed,
       commission_rate: commissionRate,
+      rides_booking_fee: ridesBooking,
+      dispatch_booking_fee: dispatchBooking,
+      fleet_owner_commission_rate: fleetOwnerCommissionRate,
     },
     reason: null,
     source: "admin_business_mutations.adminUpdateAppPricingConfig",

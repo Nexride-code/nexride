@@ -12,7 +12,13 @@ const {
 const admin = require("firebase-admin");
 const bankTransferVa = require("./bank_transfer_va");
 const driverFlutterwavePayments = require("./driver_flutterwave_payments");
-const { flutterwavePublicKey, flutterwaveSecretForVerify, flutterwaveSecretBindingDebug } = require("./params");
+const {
+  flutterwavePublicKey,
+  flutterwaveSecretForVerify,
+  flutterwaveWebhookSecretForVerify,
+  flutterwaveSecretBindingDebug,
+} = require("./params");
+const { expectedFlutterwaveChargeNgn, roundNgn } = require("./payment_charge_expectations");
 const {
   fanOutDriverOffersIfEligible,
   releaseOpenRideForBankTransferFailure,
@@ -20,6 +26,7 @@ const {
   coordsFromPickup,
   coordsInNgBox,
   canonicalDispatchMarket,
+  PAYMENT_STATUS_PAID_VERIFIED,
 } = require("./ride_callables");
 const {
   fanOutDeliveryOffersAfterVerifiedPayment,
@@ -29,6 +36,7 @@ const { syncRideTrackPublic } = require("./track_public");
 const { buildFlutterwaveRedirectUrl } = require("./payment_redirect");
 const { logger } = require("firebase-functions");
 const payDiag = require("./payment_diagnostics_store");
+const { providerPayloadFieldsForRtdb } = require("./rtdb_safe_payload");
 const DEFAULT_FLUTTERWAVE_REDIRECT_URL = buildFlutterwaveRedirectUrl({
   appContext: "rider",
   flow: "rider_payment",
@@ -195,16 +203,12 @@ function buildRideDispatchWebhookFwStrictExpect({
     if (Number.isFinite(a) && a > 0) minAmount = a;
   }
   if (ride && typeof ride === "object") {
-    const total = Number(ride.total_ngn ?? 0);
-    const f = Number(ride.fare ?? ride.total_delivery_fee ?? 0);
-    const best = Number.isFinite(total) && total > 0 ? total : f;
-    if (minAmount == null && Number.isFinite(best) && best > 0) minAmount = best;
+    const charge = expectedFlutterwaveChargeNgn(ride);
+    if (minAmount == null && charge > 0) minAmount = charge;
   }
   if (minAmount == null && deliveryRecord) {
-    const total = Number(deliveryRecord.total_ngn ?? 0);
-    const f = Number(deliveryRecord.fare ?? 0);
-    const best = Number.isFinite(total) && total > 0 ? total : f;
-    if (Number.isFinite(best) && best > 0) minAmount = best;
+    const charge = expectedFlutterwaveChargeNgn(deliveryRecord);
+    if (charge > 0) minAmount = charge;
   }
   if (minAmount == null && Number.isFinite(hookAmount) && hookAmount > 0) {
     minAmount = hookAmount;
@@ -280,7 +284,7 @@ async function mirrorPaymentRecords(db, {
     row.webhook_applied = webhookApplied;
   }
   if (payload && typeof payload === "object") {
-    row.provider_payload = payload;
+    Object.assign(row, providerPayloadFieldsForRtdb(payload));
   }
   const updates = {
     [`payments/${key}`]: row,
@@ -327,7 +331,9 @@ async function initiateFlutterwavePayment(data, context, db) {
       return { success: false, reason: "forbidden" };
     }
   }
+  const { loadAppPricingConfig } = require("./app_config_pricing");
   const { computeRiderPricing } = require("./pricing_calculator");
+  const pricingConfig = await loadAppPricingConfig(db);
   let feeBreakdown = null;
   let platformFeeNgn = null;
   if (ride) {
@@ -339,7 +345,10 @@ async function initiateFlutterwavePayment(data, context, db) {
     } else {
       const fare = Number(ride.fare ?? 0);
       if (fare > 0) {
-        const pricing = computeRiderPricing({ flow: "ride_booking", trip_fare_ngn: fare });
+        const pricing = computeRiderPricing(
+          { flow: "ride_booking", trip_fare_ngn: fare },
+          pricingConfig,
+        );
         amount = pricing.total_ngn;
         feeBreakdown = pricing.fee_breakdown;
         platformFeeNgn = pricing.platform_fee_ngn;
@@ -354,7 +363,10 @@ async function initiateFlutterwavePayment(data, context, db) {
     } else {
       const fare = Number(delivery.fare ?? 0);
       if (fare > 0) {
-        const pricing = computeRiderPricing({ flow: "dispatch_request", trip_fare_ngn: fare });
+        const pricing = computeRiderPricing(
+          { flow: "dispatch_request", trip_fare_ngn: fare },
+          pricingConfig,
+        );
         amount = pricing.total_ngn;
         feeBreakdown = pricing.fee_breakdown;
         platformFeeNgn = pricing.platform_fee_ngn;
@@ -523,8 +535,10 @@ async function initiateFlutterwaveRideIntent(data, context, db) {
   if (fare > riderGates.max_fare_ngn) {
     return { success: false, reason: "fare_above_limit" };
   }
+  const { loadAppPricingConfig } = require("./app_config_pricing");
   const { computeRiderPricing } = require("./pricing_calculator");
-  const pricing = computeRiderPricing({ flow: "ride_booking", trip_fare_ngn: fare });
+  const pricingConfig = await loadAppPricingConfig(db);
+  const pricing = computeRiderPricing({ flow: "ride_booking", trip_fare_ngn: fare }, pricingConfig);
   const chargeAmount = pricing.total_ngn;
   const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
   const distanceKm = Number(data?.distance_km ?? data?.distanceKm ?? 0) || 0;
@@ -931,7 +945,9 @@ async function verifyFlutterwaveRideIntent(db, reference, uid) {
     }
   }
   const intent = pt.ride_intent;
-  const fare = Number(intent.fare ?? pt.amount ?? 0);
+  const chargeAmount = roundNgn(
+    pt.amount ?? intent.total_ngn ?? intent.charge_amount_ngn ?? intent.fare ?? 0,
+  );
   const expectCur = String(intent.currency ?? pt.currency ?? "NGN").trim().toUpperCase() || "NGN";
   const expectedTx = String(pt.tx_ref ?? ref).trim();
   const v = await verifyFlutterwavePaymentStrict({
@@ -940,7 +956,8 @@ async function verifyFlutterwaveRideIntent(db, reference, uid) {
     expect: {
       expectedTxRef: expectedTx || undefined,
       expectedCurrency: expectCur,
-      minAmount: Number.isFinite(fare) && fare > 0 ? fare : undefined,
+      exactAmount: chargeAmount > 0 ? chargeAmount : undefined,
+      minAmount: chargeAmount > 0 ? chargeAmount : undefined,
     },
   });
   const payKey = String(v.flwTransactionId || ref || "").trim();
@@ -1058,20 +1075,25 @@ async function registerBankTransferPayment(data, context, db) {
   const lastName =
     name.split(/\s+/).slice(1).join(" ").trim().slice(0, 80) || "Customer";
 
+  const { loadAppPricingConfig } = require("./app_config_pricing");
+  const { computeRiderPricing } = require("./pricing_calculator");
+  const pricingConfig = await loadAppPricingConfig(db);
   const resolveTotals = async (flow, slice) => {
     const currency = String(slice.currency ?? "NGN")
       .trim()
       .toUpperCase() || "NGN";
-    const { computeRiderPricing } = require("./pricing_calculator");
     let totalNgn = Number(slice.total_ngn ?? 0);
     let feeBreakdown = slice.fee_breakdown ?? null;
     const fare = Number(slice.fare ?? slice.total_delivery_fee ?? 0);
     if (!Number.isFinite(totalNgn) || totalNgn <= 0) {
       if (Number.isFinite(fare) && fare > 0) {
-        const pricing = computeRiderPricing({
-          flow: flow === "dispatch" ? "dispatch_request" : "ride_booking",
-          trip_fare_ngn: fare,
-        });
+        const pricing = computeRiderPricing(
+          {
+            flow: flow === "dispatch" ? "dispatch_request" : "ride_booking",
+            trip_fare_ngn: fare,
+          },
+          pricingConfig,
+        );
         totalNgn = pricing.total_ngn;
         feeBreakdown = pricing.fee_breakdown;
       }
@@ -1376,16 +1398,6 @@ async function registerBankTransferPayment(data, context, db) {
     total_ngn: t2.totalNgn,
     updated_at: now2,
   });
-  await fanOutDeliveryOffersIfEligible(db, deliveryId, {
-    ...del,
-    payment_reference: created.tx_ref,
-    customer_transaction_reference: created.tx_ref,
-    payment_status: "pending_transfer",
-    payment_method: "bank_transfer",
-    bank_transfer_automated: true,
-    payment_recipient: "nexride",
-  });
-
   return {
     success: true,
     reason: "va_registered",
@@ -1465,14 +1477,15 @@ async function verifyFlutterwavePayment(data, context, db) {
     row.customer_transaction_reference ?? row.payment_reference ?? reference,
   ).trim();
   const expectCur = String(row.currency ?? "NGN").trim().toUpperCase() || "NGN";
-  const minFare = Number(row.fare ?? row.total_delivery_fee ?? 0);
+  const minCharge = expectedFlutterwaveChargeNgn(row);
   const v = await verifyFlutterwavePaymentStrict({
     transactionId: /^\d+$/.test(reference) ? reference : "",
     txRef: reference,
     expect: {
       expectedTxRef: expectedTx || undefined,
       expectedCurrency: expectCur,
-      minAmount: Number.isFinite(minFare) && minFare > 0 ? minFare : undefined,
+      exactAmount: minCharge > 0 ? minCharge : undefined,
+      minAmount: minCharge > 0 ? minCharge : undefined,
     },
   });
   const now = nowMs();
@@ -1529,7 +1542,8 @@ async function verifyFlutterwavePayment(data, context, db) {
     webhookBody: { event: "callable_verify", data: v.payload?.data },
   });
   await entityRef.update({
-    payment_status: "verified",
+    payment_status: PAYMENT_STATUS_PAID_VERIFIED,
+    payment_verified: true,
     payment_verified_at: now,
     payment_provider: "flutterwave",
     payment_transaction_id: payKey,
@@ -1542,8 +1556,64 @@ async function verifyFlutterwavePayment(data, context, db) {
     await syncRideTrackPublic(db, rideId);
   } else {
     const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val() || {};
-    await fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, freshDel);
+    console.log("DELIVERY_PAYMENT_VERIFIED", `deliveryId=${deliveryId}`, "source=verifyFlutterwavePayment");
+    try {
+      const waitFee = require("./delivery_wait_fee");
+      await waitFee.markDeliveryWaitFeePaidOnPaymentVerified(db, deliveryId, freshDel);
+      const customerId = normUid(freshDel.customer_id ?? freshDel.customerId);
+      const carriedForward = Number(freshDel.carried_forward_wait_fee_ngn) || 0;
+      if (carriedForward > 0 || freshDel.outstanding_wait_fee_included === true) {
+        await waitFee.clearCustomerOutstandingDeliveryWaitFee(db, customerId, {
+          source: "delivery_payment_verified",
+        });
+      }
+    } catch (waitPayErr) {
+      console.log(
+        "DELIVERY_WAIT_FEE_PAYMENT_HOOK_FAIL",
+        `deliveryId=${deliveryId}`,
+        waitPayErr?.message ?? waitPayErr,
+      );
+    }
+    const { canonicalAssignedDeliveryDriverId } = require("./delivery_callables");
+    const assignedDriver = canonicalAssignedDeliveryDriverId(freshDel);
+    if (assignedDriver) {
+      try {
+        await sendPushToUser(db, assignedDriver, {
+          notification: {
+            title: "Payment verified",
+            body: "Rider payment confirmed. You can start the delivery.",
+          },
+          data: { type: "delivery_payment_verified", delivery_id: deliveryId },
+        });
+      } catch (pushErr) {
+        console.log(
+          "DELIVERY_PAYMENT_VERIFY_PUSH_FAIL",
+          `deliveryId=${deliveryId}`,
+          String(pushErr?.message || pushErr),
+        );
+      }
+    } else {
+      await fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, freshDel);
+    }
   }
+
+  try {
+    const walletSettlement = require("./payment_wallet_settlement");
+    await walletSettlement.applyWalletSettlementsAfterAuthoritativePayment(db, {
+      rideId: rideId || null,
+      deliveryId: deliveryId || null,
+      source: "verify_flutterwave_payment",
+      requireCompleted: false,
+    });
+  } catch (walletSettleErr) {
+    console.log(
+      "WALLET_SETTLEMENT_FAIL",
+      `rideId=${rideId || ""}`,
+      `deliveryId=${deliveryId || ""}`,
+      walletSettleErr?.message ?? walletSettleErr,
+    );
+  }
+
   return { success: true, reason: "verified", amount: v.amount, transaction_id: payKey };
 }
 
@@ -1580,8 +1650,10 @@ async function persistVerifiedFlutterwaveCharge(db, {
     verified: true,
     webhook_applied: true,
     provider_status: "successful",
-    provider_payload: webhookBody && typeof webhookBody === "object" ? webhookBody : {},
     updated_at: now,
+    ...providerPayloadFieldsForRtdb(
+      webhookBody && typeof webhookBody === "object" ? webhookBody : {},
+    ),
   };
   const updates = {
     [`payments/${tId}`]: row,
@@ -1627,7 +1699,7 @@ async function handleFlutterwaveWebhook(req, res, db) {
   }
 
   const signature = String(req.headers["verif-hash"] ?? req.headers["verif_hash"] ?? "").trim();
-  const expected = String(process.env.FLUTTERWAVE_WEBHOOK_SECRET || "").trim();
+  const expected = flutterwaveWebhookSecretForVerify();
 
   if (!expected || signature !== expected) {
     console.log("WEBHOOK_HASH_FAIL");
@@ -1801,12 +1873,83 @@ async function handleFlutterwaveWebhook(req, res, db) {
     }
   }
 
+  if (pt && typeof pt === "object" && String(pt.purpose || "").trim() === "fleet_wallet_topup") {
+    const expectedCurrency = String(pt.currency || hookCurrency || "NGN").trim().toUpperCase() || "NGN";
+    const refForVerify = String(txRef || "").trim();
+    const minAmt = Number(pt.amount ?? 0);
+    const expectOpts = { expectedTxRef: refForVerify || undefined, expectedCurrency };
+    if (Number.isFinite(minAmt) && minAmt > 0) {
+      expectOpts.minAmount = minAmt;
+    }
+    const vFleet = await verifyFlutterwavePaymentStrict({
+      transactionId,
+      txRef,
+      expect: expectOpts,
+    });
+    if (!vFleet.ok) {
+      res.status(200).send("verify-failed");
+      return;
+    }
+    const payTidFleet = String(vFleet.flwTransactionId || transactionId || "").trim();
+    if (!payTidFleet) {
+      res.status(200).send("ignored-no-pay-id");
+      return;
+    }
+    const claimRefFleet = db.ref(`webhook_applied/flutterwave/${payTidFleet}`);
+    const trFleet = await claimRefFleet.transaction((cur) =>
+      nextFlutterwavePayTidSettlementPayload(cur, { applied_at: nowMs(), purpose: "fleet_wallet_topup" }),
+    );
+    if (!trFleet.committed) {
+      res.status(200).send("ok-duplicate");
+      return;
+    }
+    try {
+      const fleetWallet = require("./fleet_wallet");
+      const fsFleet = admin.firestore();
+      const refFinal = String(vFleet.tx_ref || txRef || "").trim();
+      const fin = await fleetWallet.finalizeFleetFlutterwaveTopUpVerified(db, fsFleet, {
+        payTid: payTidFleet,
+        txRef: refFinal,
+        verifiedAmount: vFleet.amount,
+        currency: vFleet.currency || expectedCurrency,
+        webhookBody: body,
+      });
+      if (!fin.success) {
+        throw new Error(fin.reason || "finalize_failed");
+      }
+      if (webhookDedupeKey) {
+        await db.ref(`webhook_applied/flutterwave_webhook/${webhookDedupeKey}`).set({
+          applied_at: nowMs(),
+          flutterwave_transaction_id: payTidFleet,
+          tx_ref: String(vFleet.tx_ref || txRef || "").trim() || null,
+          purpose: "fleet_wallet_topup",
+        });
+      }
+      res.status(200).send("ok");
+      return;
+    } catch (err) {
+      try {
+        await claimRefFleet.remove();
+      } catch (_) {
+        /* ignore */
+      }
+      res.status(500).send("apply-error");
+      return;
+    }
+  }
+
   const driverPurpose =
     pt && typeof pt === "object" ? String(pt.purpose || "").trim() : "";
   if (
     driverPurpose === driverFlutterwavePayments.PURPOSE_SUBSCRIPTION ||
     driverPurpose === driverFlutterwavePayments.PURPOSE_WALLET
   ) {
+    console.log(
+      "DRIVER_WALLET_TOPUP_WEBHOOK_RECEIVED",
+      `tx_ref=${txRef || ""}`,
+      `purpose=${driverPurpose}`,
+      `transaction_id=${transactionId || ""}`,
+    );
     const expectedCurrency = "NGN";
     const refForVerify = String(txRef || "").trim();
     const minAmt = Number(pt.amount ?? 0);
@@ -1949,6 +2092,18 @@ async function handleFlutterwaveWebhook(req, res, db) {
     deliveryId = String(pt.delivery_id ?? "").trim();
   }
 
+  const ptPurpose = pt && typeof pt === "object" ? String(pt.purpose || "").trim() : "";
+  if (
+    ptPurpose === driverFlutterwavePayments.PURPOSE_WALLET ||
+    ptPurpose === driverFlutterwavePayments.PURPOSE_SUBSCRIPTION ||
+    ptPurpose === "merchant_wallet_topup" ||
+    ptPurpose === "fleet_wallet_topup"
+  ) {
+    console.log("PAYMENT_WEBHOOK_WRONG_PURPOSE", `purpose=${ptPurpose}`, `tx_ref=${txRef || ""}`);
+    res.status(200).send("ignored-wrong-purpose");
+    return;
+  }
+
   const rideSnap = rideId ? await db.ref(`ride_requests/${rideId}`).get() : null;
   const ride = rideSnap ? rideSnap.val() : null;
   const deliverySnap = deliveryId ? await db.ref(`delivery_requests/${deliveryId}`).get() : null;
@@ -2069,7 +2224,8 @@ async function handleFlutterwaveWebhook(req, res, db) {
 
     if (rideId) {
       await db.ref(`ride_requests/${rideId}`).update({
-        payment_status: "verified",
+        payment_status: PAYMENT_STATUS_PAID_VERIFIED,
+        payment_verified: true,
         payment_provider: "flutterwave",
         payment_transaction_id: payTid,
         payment_verified_at: now,
@@ -2079,7 +2235,8 @@ async function handleFlutterwaveWebhook(req, res, db) {
       const activeSnap = await db.ref(`active_trips/${rideId}`).get();
       if (activeSnap.exists()) {
         await db.ref(`active_trips/${rideId}`).update({
-          payment_status: "verified",
+          payment_status: PAYMENT_STATUS_PAID_VERIFIED,
+          payment_verified: true,
           payment_provider: "flutterwave",
           payment_transaction_id: payTid,
           paid_at: now,
@@ -2092,7 +2249,8 @@ async function handleFlutterwaveWebhook(req, res, db) {
     }
     if (deliveryId) {
       await db.ref(`delivery_requests/${deliveryId}`).update({
-        payment_status: "verified",
+        payment_status: PAYMENT_STATUS_PAID_VERIFIED,
+        payment_verified: true,
         payment_provider: "flutterwave",
         payment_transaction_id: payTid,
         payment_verified_at: now,
@@ -2100,7 +2258,34 @@ async function handleFlutterwaveWebhook(req, res, db) {
         updated_at: now,
       });
       const freshDel = (await db.ref(`delivery_requests/${deliveryId}`).get()).val();
-      await fanOutDeliveryOffersAfterVerifiedPayment(db, deliveryId, freshDel || deliveryRecord || {});
+      console.log("DELIVERY_PAYMENT_VERIFIED", `deliveryId=${deliveryId}`, "source=webhook");
+      const { canonicalAssignedDeliveryDriverId } = require("./delivery_callables");
+      const assignedDriver = canonicalAssignedDeliveryDriverId(
+        freshDel || deliveryRecord || {},
+      );
+      if (assignedDriver) {
+        try {
+          await sendPushToUser(db, assignedDriver, {
+            notification: {
+              title: "Payment verified",
+              body: "Rider payment confirmed. You can start the delivery.",
+            },
+            data: { type: "delivery_payment_verified", delivery_id: deliveryId },
+          });
+        } catch (pushErr) {
+          console.log(
+            "DELIVERY_PAYMENT_VERIFY_PUSH_FAIL",
+            `deliveryId=${deliveryId}`,
+            String(pushErr?.message || pushErr),
+          );
+        }
+      } else {
+        await fanOutDeliveryOffersAfterVerifiedPayment(
+          db,
+          deliveryId,
+          freshDel || deliveryRecord || {},
+        );
+      }
     }
 
     if (pt && String(pt.provider || "").trim() === "flutterwave_va" && finalTxRef) {
@@ -2118,6 +2303,23 @@ async function handleFlutterwaveWebhook(req, res, db) {
         ride_id: rideId || null,
         delivery_id: deliveryId || null,
       });
+    }
+
+    try {
+      const walletSettlement = require("./payment_wallet_settlement");
+      await walletSettlement.applyWalletSettlementsAfterAuthoritativePayment(db, {
+        rideId: rideId || null,
+        deliveryId: deliveryId || null,
+        source: "flutterwave_webhook",
+        requireCompleted: false,
+      });
+    } catch (walletSettleErr) {
+      console.log(
+        "WALLET_SETTLEMENT_FAIL",
+        `rideId=${rideId || ""}`,
+        `deliveryId=${deliveryId || ""}`,
+        walletSettleErr?.message ?? walletSettleErr,
+      );
     }
 
     console.log("PAYMENT_APPLIED", payTid);

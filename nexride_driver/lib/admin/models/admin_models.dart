@@ -64,6 +64,11 @@ class AdminDashboardMetrics {
     required this.totalGrossBookings,
     required this.totalCommissionsEarned,
     required this.subscriptionRevenue,
+    this.platformWalletBalance = 0,
+    this.totalBookingFeeRevenue = 0,
+    this.platformTotalWithdrawn = 0,
+    this.pendingPlatformWithdrawals = 0,
+    this.pendingPlatformWithdrawalsReserved = 0,
   });
 
   final int totalRiders;
@@ -86,6 +91,11 @@ class AdminDashboardMetrics {
   final double totalGrossBookings;
   final double totalCommissionsEarned;
   final double subscriptionRevenue;
+  final double platformWalletBalance;
+  final double totalBookingFeeRevenue;
+  final double platformTotalWithdrawn;
+  final int pendingPlatformWithdrawals;
+  final double pendingPlatformWithdrawalsReserved;
 }
 
 class AdminTripSummary {
@@ -474,7 +484,7 @@ class AdminWithdrawalRecord {
   });
 
   final String id;
-  /// `driver` or `merchant` (withdraw_requests.entity_type).
+  /// `driver`, `merchant`, or `fleet` (withdraw_requests.entity_type).
   final String entityType;
   final String driverId;
   final String merchantId;
@@ -494,7 +504,7 @@ class AdminWithdrawalRecord {
   // Slice 1 enrichment (server-derived; empty when unavailable).
   /// car_driver | independent_dispatch | business_managed_biker | merchant | unknown_driver
   final String userType;
-  /// driver_wallet | merchant_wallet | fleet_business_wallet_future
+  /// driver_wallet | merchant_wallet | fleet_business_wallet
   final String walletSource;
   final String serviceType;
   final String ownershipMode;
@@ -504,6 +514,17 @@ class AdminWithdrawalRecord {
   final Map<String, dynamic> rawData;
 
   bool get isPending => status.trim().toLowerCase() == 'pending';
+
+  bool get isProcessing => status.trim().toLowerCase() == 'processing';
+
+  bool get isReviewing => status.trim().toLowerCase() == 'reviewing';
+
+  bool get canPayViaFlutterwave => isPending;
+
+  bool get isFlutterwaveProcessing =>
+      isProcessing &&
+      (rawData['payout_provider']?.toString() == 'flutterwave' ||
+          rawData['flutterwave_transfer_id'] != null);
 
   factory AdminWithdrawalRecord.fromAdminListPageEntry(
     String id,
@@ -518,12 +539,13 @@ class AdminWithdrawalRecord {
         (raw['entity_type']?.toString() ?? raw['entityType']?.toString() ?? 'driver')
             .trim()
             .toLowerCase();
+    String str(dynamic v) => (v?.toString() ?? '').trim();
+    final String fleetBusinessId = str(raw['fleet_business_id'] ?? raw['fleet_id']);
     final String bank = (raw['bank_name']?.toString() ?? '').trim();
     final String acct = (raw['account_number']?.toString() ?? '').trim();
     final String holder = (raw['account_holder_name']?.toString() ?? '').trim();
     final bool hasDest = raw['has_destination'] == true ||
         (bank.isNotEmpty && acct.isNotEmpty && holder.isNotEmpty);
-    String str(dynamic v) => (v?.toString() ?? '').trim();
 
     return AdminWithdrawalRecord(
       id: id,
@@ -531,22 +553,31 @@ class AdminWithdrawalRecord {
       driverId: raw['driver_id']?.toString() ?? '',
       merchantId: raw['merchant_id']?.toString() ?? '',
       driverName: raw['driver_name']?.toString() ?? '',
-      amount: (raw['amount'] as num?)?.toDouble() ?? 0,
-      status: (raw['status']?.toString() ?? 'pending').toLowerCase(),
+      amount: (raw['amount_ngn'] as num?)?.toDouble() ??
+          (raw['amount'] as num?)?.toDouble() ??
+          0,
+      status: (raw['status']?.toString() ?? '').trim().isEmpty
+          ? 'unknown'
+          : (raw['status']?.toString() ?? '').trim().toLowerCase(),
       requestDate: fromMs(raw['requestedAt'] ?? raw['requested_at']),
       processedDate: fromMs(raw['updated_at'] ?? raw['updatedAt']),
       bankName: bank,
-      bankCode: str(raw['bank_code']),
+      bankCode: str(raw['account_bank']).isNotEmpty
+          ? str(raw['account_bank'])
+          : str(raw['bank_code']),
       accountName: holder,
       accountNumber: acct,
-      hasPayoutDestination: entity == 'merchant' ? true : hasDest,
+      hasPayoutDestination:
+          entity == 'merchant' || entity == 'fleet' ? true : hasDest,
       payoutReference: '',
       notes: '',
       userType: str(raw['user_type']),
       walletSource: str(raw['wallet_source']),
       serviceType: str(raw['service_type']),
       ownershipMode: str(raw['ownership_mode']),
-      businessId: str(raw['business_id']),
+      businessId: str(raw['business_id']).isNotEmpty
+          ? str(raw['business_id'])
+          : fleetBusinessId,
       dispatchVehicleType: str(raw['dispatch_vehicle_type']),
       sourcePaths: const <String>[],
       rawData: Map<String, dynamic>.from(raw),
@@ -697,6 +728,47 @@ class AdminSupportTicketListItem {
   final int updatedAtMs;
   final int createdAtMs;
   final Map<String, dynamic> raw;
+
+  String get assignedToUid =>
+      raw['assignedToUid']?.toString().trim().isNotEmpty == true
+          ? raw['assignedToUid'].toString().trim()
+          : raw['assignedToStaffId']?.toString().trim() ?? '';
+
+  String get assignedToName {
+    final primary = raw['assignedToName']?.toString().trim() ?? '';
+    if (primary.isNotEmpty) return primary;
+    final legacy = raw['assignedToStaffName']?.toString().trim() ?? '';
+    return legacy.isNotEmpty ? legacy : 'Unassigned';
+  }
+
+  String get assignedRole => raw['assignedRole']?.toString().trim() ?? '';
+
+  bool get isAssigned => assignedToUid.isNotEmpty;
+}
+
+class AdminSupportStaffMember {
+  const AdminSupportStaffMember({
+    required this.uid,
+    required this.displayName,
+    required this.role,
+    this.email = '',
+  });
+
+  final String uid;
+  final String displayName;
+  final String role;
+  final String email;
+
+  factory AdminSupportStaffMember.fromMap(String uid, Map<String, dynamic> row) {
+    return AdminSupportStaffMember(
+      uid: uid,
+      displayName: row['displayName']?.toString().trim().isNotEmpty == true
+          ? row['displayName'].toString().trim()
+          : uid,
+      role: row['role']?.toString().trim() ?? 'support_agent',
+      email: row['email']?.toString().trim() ?? '',
+    );
+  }
 }
 
 class AdminSupportTicketsPageResult {
@@ -830,6 +902,8 @@ class AdminCityPricing {
     required this.perMinuteNgn,
     required this.minimumFareNgn,
     required this.enabled,
+    this.regionId,
+    this.rolloutRegionEnabled = true,
   });
 
   final String city;
@@ -838,26 +912,94 @@ class AdminCityPricing {
   final int perMinuteNgn;
   final int minimumFareNgn;
   final bool enabled;
+  /// Firestore `delivery_regions/{regionId}` — operational registry slug.
+  final String? regionId;
+  /// Region enabled flag from Service Areas (read-only in pricing UI).
+  final bool rolloutRegionEnabled;
 }
 
 class AdminPricingConfig {
   const AdminPricingConfig({
     required this.cities,
     required this.commissionRate,
+    required this.fleetOwnerCommissionRate,
+    required this.bookingFeeNgn,
+    required this.bookingFeeMode,
+    required this.bookingFeePercent,
+    required this.bookingFeeMinNgn,
+    this.bookingFeeMaxNgn,
+    required this.dispatchBookingFeeNgn,
+    required this.dispatchBookingFeeMode,
+    required this.dispatchBookingFeePercent,
+    required this.dispatchBookingFeeMinNgn,
+    this.dispatchBookingFeeMaxNgn,
     required this.weeklySubscriptionNgn,
     required this.monthlySubscriptionNgn,
+    required this.fleetWeeklySubscriptionNgn,
+    required this.fleetMonthlySubscriptionNgn,
     required this.loadedFromBackend,
     required this.lastUpdated,
+    this.updatedBy,
     required this.rawData,
   });
 
   final List<AdminCityPricing> cities;
   final double commissionRate;
+  final double fleetOwnerCommissionRate;
+  final int bookingFeeNgn;
+  final String bookingFeeMode;
+  final double bookingFeePercent;
+  final int bookingFeeMinNgn;
+  final int? bookingFeeMaxNgn;
+  final int dispatchBookingFeeNgn;
+  final String dispatchBookingFeeMode;
+  final double dispatchBookingFeePercent;
+  final int dispatchBookingFeeMinNgn;
+  final int? dispatchBookingFeeMaxNgn;
   final int weeklySubscriptionNgn;
   final int monthlySubscriptionNgn;
+  final int fleetWeeklySubscriptionNgn;
+  final int fleetMonthlySubscriptionNgn;
   final bool loadedFromBackend;
   final DateTime? lastUpdated;
+  final String? updatedBy;
   final Map<String, dynamic> rawData;
+
+  String get bookingFeeSummary => _bookingFeeSummaryFor(
+        mode: bookingFeeMode,
+        fixedNgn: bookingFeeNgn,
+        percent: bookingFeePercent,
+        minNgn: bookingFeeMinNgn,
+        maxNgn: bookingFeeMaxNgn,
+      );
+
+  String get dispatchBookingFeeSummary => _bookingFeeSummaryFor(
+        mode: dispatchBookingFeeMode,
+        fixedNgn: dispatchBookingFeeNgn,
+        percent: dispatchBookingFeePercent,
+        minNgn: dispatchBookingFeeMinNgn,
+        maxNgn: dispatchBookingFeeMaxNgn,
+      );
+
+  static String _bookingFeeSummaryFor({
+    required String mode,
+    required int fixedNgn,
+    required double percent,
+    required int minNgn,
+    required int? maxNgn,
+  }) {
+    switch (mode) {
+      case 'percentage':
+        final maxSuffix = maxNgn != null ? ' · max ₦$maxNgn' : '';
+        return '${percent.toStringAsFixed(1)}% · min ₦$minNgn$maxSuffix';
+      case 'max_fixed_or_percentage':
+        final maxSuffix = maxNgn != null ? ' · max ₦$maxNgn' : '';
+        return 'max(₦$fixedNgn, ${percent.toStringAsFixed(1)}%, min ₦$minNgn)$maxSuffix';
+      case 'fixed':
+      default:
+        return '₦$fixedNgn fixed';
+    }
+  }
 }
 
 class AdminOperationalSettings {
@@ -869,6 +1011,10 @@ class AdminOperationalSettings {
     required this.offRouteToleranceMeters,
     required this.adminEmail,
     required this.rawData,
+    this.requireBvnVerification = false,
+    this.driverWithdrawalFeeNgn = 50,
+    this.merchantWithdrawalFeeNgn = 50,
+    this.fleetWithdrawalFeeNgn = 50,
   });
 
   final String withdrawalNoticeText;
@@ -878,6 +1024,29 @@ class AdminOperationalSettings {
   final int offRouteToleranceMeters;
   final String adminEmail;
   final Map<String, dynamic> rawData;
+  final bool requireBvnVerification;
+  final int driverWithdrawalFeeNgn;
+  final int merchantWithdrawalFeeNgn;
+  final int fleetWithdrawalFeeNgn;
+}
+
+/// Callable-backed settings bundle for `/admin/settings`.
+class AdminSettingsBundle {
+  const AdminSettingsBundle({
+    required this.settings,
+    required this.pricingSummary,
+    required this.cityEnablement,
+    this.lastUpdated,
+    this.updatedBy,
+    this.historyId,
+  });
+
+  final AdminOperationalSettings settings;
+  final AdminPricingConfig pricingSummary;
+  final Map<String, bool> cityEnablement;
+  final DateTime? lastUpdated;
+  final String? updatedBy;
+  final String? historyId;
 }
 
 /// **Legacy monolith** — aggregates dashboard lists, pricing, subscriptions, and

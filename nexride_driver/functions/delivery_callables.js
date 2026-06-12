@@ -23,6 +23,8 @@ const ride = require("./ride_callables");
 const riderFirestoreIdentity = require("./rider_firestore_identity");
 const { sendPushToUser } = require("./push_notifications");
 const deliveryRegions = require("./ecosystem/delivery_regions");
+const { syncDeliveryTrackPublic } = require("./track_public");
+const fleetAccountability = require("./fleet_driver_accountability");
 
 const MAX_FARE_NGN_DEFAULT = 25_000_000;
 const MIN_LAT_NG = 4.2;
@@ -58,6 +60,8 @@ const DELIVERY_ACCEPT_TX_MAX_ATTEMPTS = 8;
 const DELIVERY_GEO_GATE_RADIUS_M = 150;
 /** Driver search / offer accept window from create or verified-payment fan-out. */
 const DELIVERY_SEARCH_TTL_MS = 180_000;
+/** Model B: rider must pay within this window after driver accept (assigned, unpaid). */
+const DELIVERY_UNPAID_PAYMENT_TTL_MS = 30 * 60 * 1000;
 
 const DELIVERY_CATEGORIES = new Set(["parcel", "food", "document", "grocery", "other"]);
 
@@ -165,13 +169,348 @@ function deliveryHasVerifiedOnlinePayment(row) {
   if (!row || typeof row !== "object") return false;
   const ps = String(row.payment_status ?? "").trim().toLowerCase();
   const ptid = String(row.payment_transaction_id ?? row.flw_tx_id ?? "").trim();
-  return ps === "verified" && Boolean(ptid);
+  if (ps === "paid_verified" && Boolean(ptid)) {
+    return row.payment_verified === true;
+  }
+  return ps === "verified" && Boolean(ptid) && row.payment_verified === true;
 }
 
+/** Model B: fan-out while payment is still pending (searching, unassigned). */
+function deliveryFanoutEligibleModelB(row) {
+  if (!row || typeof row !== "object") {
+    return false;
+  }
+  const ds = normalizeDeliveryState(row.delivery_state);
+  if (ds !== DELIVERY_STATE.searching) {
+    return false;
+  }
+  if (canonicalAssignedDeliveryDriverId(row)) {
+    return false;
+  }
+  return Boolean(normUid(row.customer_id));
+}
+
+/** Driver progress (start/complete) requires settled payment — accept alone does not. */
 function paymentAllowsDispatchDelivery(row) {
-  // P0-1: dispatch offers and driver accept require settled online payment only.
-  // Fan-out after verify/webhook/admin-approve uses the same gate.
   return deliveryHasVerifiedOnlinePayment(row);
+}
+
+const DELIVERY_PROGRESS_REQUIRES_PAYMENT = new Set([
+  DELIVERY_STATE.driver_arriving_pickup,
+  DELIVERY_STATE.picked_up,
+  DELIVERY_STATE.on_delivery,
+  DELIVERY_STATE.arrived_dropoff,
+  DELIVERY_STATE.completed,
+]);
+
+function deliveryProgressRequiresVerifiedPayment(currentState, nextState) {
+  const cur = normalizeDeliveryState(currentState);
+  const next = normalizeDeliveryState(nextState);
+  if (next === DELIVERY_STATE.cancelled) {
+    return false;
+  }
+  if (!DELIVERY_PROGRESS_REQUIRES_PAYMENT.has(next)) {
+    return false;
+  }
+  return cur === DELIVERY_STATE.driver_assigned || DELIVERY_PROGRESS_REQUIRES_PAYMENT.has(cur);
+}
+
+function hasDeliveryProofPhoto(row) {
+  if (!row || typeof row !== "object") {
+    return false;
+  }
+  const url = String(
+    row.delivery_proof_photo_url ??
+      row.deliveryProofPhotoUrl ??
+      row.delivery_proof_url ??
+      "",
+  ).trim();
+  return url.startsWith("https://");
+}
+
+function trimStr(v, max = 200) {
+  return String(v ?? "").trim().slice(0, max);
+}
+
+function deliveryRatingPath(deliveryId, roleKey) {
+  return `delivery_ratings/${normUid(deliveryId)}/${roleKey}`;
+}
+
+function normDeliveryCustomerId(row) {
+  if (!row || typeof row !== "object") {
+    return "";
+  }
+  return normUid(
+    row.customer_id ??
+      row.customerId ??
+      row.rider_id ??
+      row.riderId ??
+      row.sender_id ??
+      row.senderId,
+  );
+}
+
+function hasPickupProofPhoto(row) {
+  if (!row || typeof row !== "object") {
+    return false;
+  }
+  const url = String(row.pickup_proof_photo_url ?? row.pickupProofPhotoUrl ?? "").trim();
+  return url.startsWith("https://");
+}
+
+async function buildDeliveryDriverContactPatch(db, driverId) {
+  const d = normUid(driverId);
+  if (!d) {
+    return {};
+  }
+  const [drvSnap, userSnap] = await Promise.all([
+    db.ref(`drivers/${d}`).get(),
+    db.ref(`users/${d}`).get(),
+  ]);
+  const drv = drvSnap.val() && typeof drvSnap.val() === "object" ? drvSnap.val() : {};
+  const user = userSnap.val() && typeof userSnap.val() === "object" ? userSnap.val() : {};
+  const first = trimStr(
+    drv.first_name ?? drv.firstName ?? user.first_name ?? user.firstName,
+    64,
+  );
+  const last = trimStr(
+    drv.last_name ?? drv.lastName ?? user.last_name ?? user.lastName,
+    64,
+  );
+  const display = trimStr(
+    drv.display_name ?? drv.displayName ?? user.display_name ?? user.displayName ?? user.name,
+    120,
+  );
+  const name =
+    display ||
+    [first, last].filter((x) => x.length > 0).join(" ") ||
+    trimStr(drv.name ?? drv.driver_name, 120);
+  const phone = trimStr(
+    drv.phone ??
+      drv.phone_number ??
+      drv.driver_phone ??
+      user.phone ??
+      user.phone_number,
+    32,
+  );
+  const vehicleLabel = trimStr(
+    drv.dispatch_vehicle_type ??
+      drv.dispatchVehicleType ??
+      drv.vehicle_type ??
+      drv.car ??
+      drv.vehicle_label,
+    64,
+  );
+  const plate = trimStr(
+    drv.plate ?? drv.plate_number ?? drv.vehicle_plate ?? drv.vehiclePlate,
+    32,
+  );
+  const photoRaw = trimStr(
+    drv.photo_url ?? drv.profile_photo_url ?? user.photo_url ?? user.profile_photo_url,
+    512,
+  );
+  const patch = {
+    assigned_driver_id: d,
+    driver_name: name || null,
+    assigned_driver_name: name || null,
+    driver_phone: phone || null,
+    assigned_driver_phone: phone || null,
+    assigned_driver_vehicle: vehicleLabel || null,
+    vehicle_label: vehicleLabel || null,
+    vehicle_plate: plate || null,
+    car: vehicleLabel || null,
+    plate: plate || null,
+    driver_photo_url: photoRaw.startsWith("https://") ? photoRaw : null,
+    assigned_driver_photo_url: photoRaw.startsWith("https://") ? photoRaw : null,
+  };
+  try {
+    const fs = admin.firestore();
+    const fleetPatch = await fleetAccountability.buildFleetDeliveryTrustPatch(db, fs, d, drv);
+    Object.assign(patch, fleetPatch);
+  } catch (fleetPatchErr) {
+    console.log(
+      "DELIVERY_FLEET_TRUST_PATCH_FAIL",
+      `driverId=${d}`,
+      String(fleetPatchErr?.message || fleetPatchErr),
+    );
+  }
+  if (!name && !phone) {
+    console.log("DELIVERY_CALL_INFO_MISSING", `driverId=${d}`);
+  } else {
+    console.log(
+      "DELIVERY_DRIVER_CONTACT_ATTACHED",
+      `driverId=${d}`,
+      `hasName=${Boolean(name)}`,
+      `hasPhone=${Boolean(phone)}`,
+    );
+  }
+  return patch;
+}
+
+async function buildDeliveryCustomerContactPatch(db, customerId) {
+  const c = normUid(customerId);
+  if (!c) {
+    return {};
+  }
+  const userSnap = await db.ref(`users/${c}`).get();
+  const user = userSnap.val() && typeof userSnap.val() === "object" ? userSnap.val() : {};
+  const name = trimStr(
+    user.display_name ?? user.displayName ?? user.name ?? user.full_name,
+    120,
+  );
+  const phone = trimStr(user.phone ?? user.phone_number ?? user.mobile, 32);
+  return {
+    customer_name: name || null,
+    rider_name: name || null,
+    sender_name: name || null,
+    customer_phone: phone || null,
+    rider_phone: phone || null,
+    sender_phone: phone || null,
+  };
+}
+
+function evaluateDeliveryCancelDecision(row, uid, opts = {}) {
+  const u = normUid(uid);
+  const customerId = normDeliveryCustomerId(row);
+  const driverId = canonicalAssignedDeliveryDriverId(row);
+  const isCustomer = customerId === u;
+  const isDriver = driverId === u;
+  const ds = normalizeDeliveryState(row.delivery_state);
+  const paid = deliveryHasVerifiedOnlinePayment(row);
+  const cancelReason = String(opts.cancelReason ?? opts.cancel_reason ?? "").trim();
+  const requestOnly =
+    opts.requestOnly === true ||
+    cancelReason === "request_cancel" ||
+    cancelReason === "cancellation_requested";
+
+  if (TERMINAL_DELIVERY.has(ds)) {
+    return { allowed: false, reason: "already_terminal" };
+  }
+  if (!isCustomer && !isDriver) {
+    return { allowed: false, reason: "forbidden" };
+  }
+
+  if (isCustomer) {
+    if (ds === DELIVERY_STATE.searching) {
+      return {
+        allowed: true,
+        mode: "cancel",
+        cancel_reason: "cancelled_by_rider_searching",
+        policy: "delivery_cancelled_searching",
+        log: "DELIVERY_CANCEL_ALLOWED_SEARCHING",
+      };
+    }
+    if (ds === DELIVERY_STATE.driver_assigned && !paid) {
+      return {
+        allowed: true,
+        mode: "cancel",
+        cancel_reason: "cancelled_by_rider_unpaid",
+        policy: "delivery_cancelled_unpaid",
+        log: "DELIVERY_CANCEL_ALLOWED_UNPAID",
+      };
+    }
+    if (
+      (ds === DELIVERY_STATE.driver_assigned ||
+        ds === DELIVERY_STATE.driver_arriving_pickup) &&
+      paid
+    ) {
+      return {
+        allowed: true,
+        mode: "cancel",
+        cancel_reason: "cancelled_before_pickup_paid",
+        policy: "delivery_cancelled_before_pickup_paid",
+        refund_status: "pending_review",
+        log: "DELIVERY_CANCEL_ALLOWED_BEFORE_PICKUP",
+      };
+    }
+    if (
+      ds === DELIVERY_STATE.picked_up ||
+      ds === DELIVERY_STATE.on_delivery ||
+      ds === DELIVERY_STATE.arrived_dropoff
+    ) {
+      if (requestOnly) {
+        return {
+          allowed: true,
+          mode: "request",
+          policy: "delivery_cancel_requested",
+          log: "DELIVERY_CANCEL_REQUESTED",
+        };
+      }
+      return {
+        allowed: false,
+        reason: "delivery_cancel_not_allowed_after_pickup",
+        log: "DELIVERY_CANCEL_BLOCKED_AFTER_PICKUP",
+      };
+    }
+    return { allowed: false, reason: "cannot_cancel_at_stage" };
+  }
+
+  if (isDriver) {
+    if (ds === DELIVERY_STATE.searching) {
+      return { allowed: false, reason: "not_assigned" };
+    }
+    if (
+      ds === DELIVERY_STATE.picked_up ||
+      ds === DELIVERY_STATE.on_delivery ||
+      ds === DELIVERY_STATE.arrived_dropoff
+    ) {
+      return {
+        allowed: false,
+        reason: "delivery_cancel_requires_support",
+        log: "DELIVERY_CANCEL_BLOCKED_AFTER_PICKUP",
+      };
+    }
+    if (
+      row.cancellation_requested_at &&
+      (cancelReason === "driver_accept_cancel" || cancelReason === "mutual_cancel")
+    ) {
+      return {
+        allowed: true,
+        mode: "cancel",
+        cancel_reason: "cancelled_mutual_after_request",
+        policy: "delivery_cancel_mutual",
+        log: "DELIVERY_CANCEL_MUTUAL_REQUIRED",
+      };
+    }
+    return {
+      allowed: true,
+      mode: "cancel",
+      cancel_reason: cancelReason || "cancelled_by_driver",
+      policy: "delivery_cancelled_by_driver",
+      log: "DELIVERY_DRIVER_RELEASED_AFTER_CANCEL",
+    };
+  }
+
+  return { allowed: false, reason: "forbidden" };
+}
+
+async function assertDeliveryChatParticipant(db, deliveryId, uid) {
+  const rid = normUid(deliveryId);
+  const u = normUid(uid);
+  if (!rid || !u) {
+    return { ok: false, reason: "invalid_input" };
+  }
+  const snap = await db.ref(`delivery_requests/${rid}`).get();
+  const row = snap.val();
+  if (!row || typeof row !== "object") {
+    return { ok: false, reason: "delivery_missing" };
+  }
+  const customerId = normDeliveryCustomerId(row);
+  const driverId = canonicalAssignedDeliveryDriverId(row);
+  if (u === customerId) {
+    return { ok: true, role: "rider", row };
+  }
+  if (u === driverId) {
+    return { ok: true, role: "driver", row };
+  }
+  console.log(
+    "DELIVERY_CHAT_ACCESS_DENIED",
+    `deliveryId=${rid}`,
+    `uid=${u}`,
+    `customerId=${customerId}`,
+    `driverId=${driverId || "none"}`,
+  );
+  return { ok: false, reason: "forbidden" };
 }
 
 /**
@@ -543,9 +882,14 @@ async function clearDeliveryFanoutAndOffers(db, deliveryId, winnerDriverId = "")
 function buildDeliveryOfferPayload(deliveryId, customerId, market, row, now, expiresAt) {
   const mirror = deliveryUiMirrorFields(row.delivery_state, row.driver_id);
   const pickupObj = row.pickup && typeof row.pickup === "object" ? row.pickup : {};
+  const dropoffObj = row.dropoff && typeof row.dropoff === "object" ? row.dropoff : {};
   const pickupAddr =
     typeof pickupObj.address === "string" && pickupObj.address.trim()
       ? pickupObj.address.trim()
+      : "";
+  const dropoffAddr =
+    typeof dropoffObj.address === "string" && dropoffObj.address.trim()
+      ? dropoffObj.address.trim()
       : "";
   return {
     __nexride_request_kind: "delivery",
@@ -558,7 +902,10 @@ function buildDeliveryOfferPayload(deliveryId, customerId, market, row, now, exp
     market_pool: market,
     pickup: row.pickup,
     dropoff: row.dropoff,
+    destination: row.dropoff,
     pickup_address: pickupAddr || null,
+    dropoff_address: dropoffAddr || null,
+    destination_address: dropoffAddr || null,
     fare: row.fare,
     currency: row.currency,
     distance_km: row.distance_km,
@@ -584,6 +931,40 @@ function buildDeliveryOfferPayload(deliveryId, customerId, market, row, now, exp
   };
 }
 
+function driverCanReceiveDispatchDeliveryOffers(profile) {
+  if (!profile || typeof profile !== "object") {
+    return false;
+  }
+  const activeSvc = profile.active_services;
+  if (
+    Array.isArray(activeSvc) &&
+    activeSvc.some((x) => String(x).trim().toLowerCase() === "dispatch_delivery")
+  ) {
+    return true;
+  }
+  const ownership = String(profile.ownership_mode ?? profile.ownershipMode ?? "")
+    .trim()
+    .toLowerCase();
+  if (ownership === "business_managed") {
+    const dvt = String(
+      profile.dispatch_vehicle_type ?? profile.dispatchVehicleType ?? "",
+    )
+      .trim()
+      .toLowerCase();
+    if (dvt === "bike" || dvt === "van" || dvt === "car") {
+      return true;
+    }
+  }
+  const legacy = profile.driver_service_types ?? profile.driverServiceTypes;
+  if (
+    Array.isArray(legacy) &&
+    legacy.some((x) => String(x).trim().toLowerCase() === "dispatch_driver")
+  ) {
+    return true;
+  }
+  return false;
+}
+
 async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
   const rid = normUid(deliveryId);
   const customerId = normUid(row.customer_id);
@@ -592,10 +973,11 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
     console.log("DELIVERY_FANOUT_ABORT", `deliveryId=${rid}`, "reason=bad_ids_or_market");
     return;
   }
-  if (!paymentAllowsDispatchDelivery(row)) {
-    console.log("DELIVERY_FANOUT_ABORT", `deliveryId=${rid}`, "reason=payment_blocked");
+  if (!deliveryFanoutEligibleModelB(row)) {
+    console.log("DELIVERY_FANOUT_ABORT", `deliveryId=${rid}`, "reason=not_eligible_model_b");
     return;
   }
+  console.log("DELIVERY_FANOUT_BEFORE_PAYMENT", `deliveryId=${rid}`, `market=${market}`);
   console.log("DELIVERY_FANOUT_START", `deliveryId=${rid}`, `market=${market}`);
 
   const gates = await loadDispatchGates(db);
@@ -616,12 +998,23 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
   for (const [driverId, profile] of entries) {
     const d = normUid(driverId);
     if (!d || !profile || typeof profile !== "object") continue;
-    const activeSvc = profile.active_services;
-    const canDelivery =
-      Array.isArray(activeSvc) &&
-      activeSvc.some((x) => String(x).trim().toLowerCase() === "dispatch_delivery");
+    console.log(
+      "DELIVERY_DRIVER_CANDIDATE",
+      `deliveryId=${rid}`,
+      `uid=${d}`,
+      `market=${market}`,
+      `dispatch_market=${trimStr(profile.dispatch_market ?? profile.market_pool, 64)}`,
+      `ownership=${trimStr(profile.ownership_mode ?? profile.ownershipMode, 64)}`,
+      `vehicle=${trimStr(profile.dispatch_vehicle_type ?? profile.dispatchVehicleType, 64)}`,
+    );
+    const canDelivery = driverCanReceiveDispatchDeliveryOffers(profile);
     if (!canDelivery) {
-      console.log("DELIVERY_DRIVER_FILTERED", `uid=${d}`, "reason=no_dispatch_delivery_service");
+      console.log(
+        "DELIVERY_DRIVER_FILTERED_OUT",
+        `deliveryId=${rid}`,
+        `uid=${d}`,
+        "reason=no_dispatch_delivery_service",
+      );
       continue;
     }
     const el = evaluateDriverForOffer(profile, gates, {
@@ -631,14 +1024,20 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
       market,
     });
     if (!el.ok) {
-      console.log("DELIVERY_DRIVER_FILTERED", `uid=${d}`, `reason=${el.log || "gate"}`);
+      console.log(
+        "DELIVERY_DRIVER_FILTERED_OUT",
+        `deliveryId=${rid}`,
+        `uid=${d}`,
+        `reason=${el.log || "gate"}:${el.detail || ""}`,
+      );
       continue;
     }
     const geo = evaluateDriverGeoAndMode(profile, { ...row, market_pool: market, market }, now);
     logMatchLocationSource(logger, d, profile, { ...row, market_pool: market, market }, geo, now);
     if (!geo.ok) {
       console.log(
-        "DELIVERY_DRIVER_FILTERED",
+        "DELIVERY_DRIVER_FILTERED_OUT",
+        `deliveryId=${rid}`,
         `uid=${d}`,
         `reason=${geo.log || "geo"}:${geo.detail || ""}`,
       );
@@ -652,14 +1051,15 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
     );
     if (busyGuard.busy) {
       console.log(
-        "DELIVERY_DRIVER_FILTERED",
+        "DELIVERY_DRIVER_FILTERED_OUT",
+        `deliveryId=${rid}`,
         `uid=${d}`,
         "reason=driver_busy",
         `blockingTripId=${busyGuard.blockingTripId || ""}`,
       );
       continue;
     }
-    console.log("DELIVERY_DRIVER_ELIGIBLE", `uid=${d}`);
+    console.log("DELIVERY_DRIVER_ELIGIBLE", `deliveryId=${rid}`, `uid=${d}`);
     const payload = buildDeliveryOfferPayload(rid, customerId, market, row, now, expiresAt);
     const qPath = `delivery_offer_queue/${d}/${rid}`;
     try {
@@ -680,6 +1080,12 @@ async function fanOutDeliveryOffersIfEligible(db, deliveryId, row) {
         },
       });
       console.log("DELIVERY_OFFER_WRITE_SUCCESS", `path=${qPath}`);
+      console.log(
+        "DELIVERY_OFFER_WRITTEN",
+        `deliveryId=${rid}`,
+        `uid=${d}`,
+        `path=${qPath}`,
+      );
       offersWritten += 1;
     } catch (e) {
       const msg = e && typeof e === "object" && "message" in e ? String(e.message) : String(e);
@@ -725,6 +1131,8 @@ function canonicalAssignedDeliveryDriverId(row) {
   const fields = [
     "matched_driver_id",
     "matchedDriverId",
+    "assigned_driver_id",
+    "assignedDriverId",
     "accepted_driver_id",
     "acceptedDriverId",
     "delivery_driver_id",
@@ -776,16 +1184,29 @@ function deliveryAssignedOrTerminal(row) {
   return Boolean(canonicalAssignedDeliveryDriverId(row));
 }
 
+function deliveryUnpaidPaymentPastDeadline(row, now = nowMs()) {
+  if (!row || typeof row !== "object" || deliveryHasVerifiedOnlinePayment(row)) {
+    return false;
+  }
+  if (normalizeDeliveryState(row.delivery_state) !== DELIVERY_STATE.driver_assigned) {
+    return false;
+  }
+  const deadline = Number(row.payment_deadline_at ?? row.paymentDeadlineAt ?? 0) || 0;
+  return deadline > 0 && now >= deadline;
+}
+
 function buildDeliveryAcceptAssignmentPatch(driverId, now, opts = {}) {
   const d = normUid(driverId);
   const mirror = deliveryUiMirrorFields(DELIVERY_STATE.driver_assigned, d);
-  return {
+  const patch = {
     delivery_state: DELIVERY_STATE.driver_assigned,
     delivery_driver_id: d,
     driver_id: d,
     driverId: d,
     matched_driver_id: d,
     matchedDriverId: d,
+    assigned_driver_id: d,
+    assignedDriverId: d,
     accepted_driver_id: d,
     acceptedDriverId: d,
     accepted_by: d,
@@ -802,6 +1223,10 @@ function buildDeliveryAcceptAssignmentPatch(driverId, now, opts = {}) {
       accepted_at_ms: now,
     },
   };
+  if (opts.paymentPending) {
+    patch.payment_deadline_at = now + DELIVERY_UNPAID_PAYMENT_TTL_MS;
+  }
+  return patch;
 }
 
 async function acquireDeliveryMatchLockOrReject(deliveryRef, deliveryId, driverId, now) {
@@ -857,16 +1282,17 @@ function evaluateDeliveryAcceptTransactionDecision(current, driverId, { now = no
   if (ds !== DELIVERY_STATE.searching) {
     return { action: "abort", reason: "status_not_open" };
   }
-  if (!paymentAllowsDispatchDelivery(current)) {
-    return { action: "abort", reason: "payment_not_verified" };
-  }
   const exp = Number(current.expires_at ?? current.request_expires_at ?? 0) || 0;
   if (exp > 0 && now > exp + 30_000) {
     return { action: "abort", reason: "offer_expired" };
   }
+  const paymentPending = !deliveryHasVerifiedOnlinePayment(current);
   return {
     action: "commit",
-    patch: buildDeliveryAcceptAssignmentPatch(d, now, { useServerTimestamp: false }),
+    patch: buildDeliveryAcceptAssignmentPatch(d, now, {
+      useServerTimestamp: false,
+      paymentPending,
+    }),
   };
 }
 
@@ -887,6 +1313,29 @@ async function setActiveDeliveryPointers(db, deliveryId, customerId, driverId, r
   const merchantId = normUid(row.merchant_id ?? row.merchantId);
   const now = nowMs();
   const ds = normalizeDeliveryState(row.delivery_state);
+  if (TERMINAL_DELIVERY.has(ds)) {
+    return clearDeliveryActivePointers(db, {
+      deliveryId: rid,
+      customerId: c,
+      driverId: d,
+      merchantId,
+      source: "setActiveDeliveryPointers_terminal",
+    });
+  }
+  if (!d) {
+    const u = {};
+    if (rid) {
+      u[`active_deliveries/${rid}`] = null;
+    }
+    if (c) {
+      u[`user_active_delivery/${c}`] = null;
+      u[`customer_active_delivery/${c}`] = null;
+    }
+    if (Object.keys(u).length) {
+      await db.ref().update(u);
+    }
+    return { cleared: Object.keys(u).length };
+  }
   const summary = {
     delivery_id: rid,
     customer_id: c,
@@ -916,10 +1365,20 @@ async function setActiveDeliveryPointers(db, deliveryId, customerId, driverId, r
     updated_at: now,
   };
   u[`driver_active_delivery/${d}`] = { delivery_id: rid, updated_at: now };
+  u[`drivers/${d}/active_delivery_id`] = rid;
+  u[`drivers/${d}/updated_at`] = now;
   if (merchantId) {
     u[`merchant_active_delivery/${merchantId}`] = { delivery_id: rid, updated_at: now };
   }
   await db.ref().update(u);
+  if (d) {
+    console.log(
+      "DELIVERY_LOCK_CREATED",
+      `driverId=${d}`,
+      `deliveryId=${rid}`,
+      `customerId=${c}`,
+    );
+  }
 }
 
 /**
@@ -928,12 +1387,13 @@ async function setActiveDeliveryPointers(db, deliveryId, customerId, driverId, r
  */
 async function clearDeliveryActivePointers(
   db,
-  { deliveryId, customerId, driverId, merchantId } = {},
+  { deliveryId, customerId, driverId, merchantId, source = "delivery_cancel" } = {},
 ) {
   const rid = normUid(deliveryId);
   const c = normUid(customerId);
   const d = normUid(driverId);
   const m = normUid(merchantId);
+  const now = nowMs();
   const updates = {};
   if (rid) {
     updates[`active_deliveries/${rid}`] = null;
@@ -944,14 +1404,84 @@ async function clearDeliveryActivePointers(
   }
   if (d) {
     updates[`driver_active_delivery/${d}`] = null;
+    updates[`drivers/${d}/active_delivery_id`] = null;
+    updates[`drivers/${d}/updated_at`] = now;
+    updates[`driver_offer_queue/${d}/${rid}`] = null;
+    updates[`ride_offer_fanout/${rid}/${d}`] = null;
   }
   if (m) {
     updates[`merchant_active_delivery/${m}`] = null;
+  }
+  if (rid) {
+    try {
+      const fanoutSnap = await db.ref(`delivery_offer_fanout/${rid}`).get();
+      const fanout = fanoutSnap.val();
+      if (fanout && typeof fanout === "object") {
+        for (const otherDriverId of Object.keys(fanout)) {
+          const od = normUid(otherDriverId);
+          if (!od) continue;
+          updates[`delivery_offer_queue/${od}/${rid}`] = null;
+          updates[`delivery_offer_fanout/${rid}/${od}`] = null;
+        }
+      }
+    } catch (_) {
+      /* best-effort fanout cleanup */
+    }
   }
   if (Object.keys(updates).length === 0) {
     return { cleared: 0 };
   }
   await db.ref().update(updates);
+  if (c) {
+    const sourceKey = String(source || "delivery_cancel").trim().toLowerCase();
+    const isCancelSource =
+      sourceKey.includes("cancel") ||
+      sourceKey === "delivery_expired" ||
+      sourceKey === "canceldeliveryrequest";
+    if (isCancelSource) {
+      console.log(
+        "RIDER_READY_FOR_DELIVERY_AFTER_CANCEL",
+        `customerId=${c}`,
+        `deliveryId=${rid || "unknown"}`,
+        `source=${source}`,
+      );
+    }
+  }
+  if (d) {
+    const sourceKey = String(source || "delivery_cancel").trim().toLowerCase();
+    const isCancelSource =
+      sourceKey.includes("cancel") ||
+      sourceKey === "delivery_expired" ||
+      sourceKey === "canceldeliveryrequest";
+    const isCompleteSource = sourceKey.includes("complete");
+    console.log(
+      "DELIVERY_LOCK_CLEARED",
+      `driverId=${d}`,
+      `deliveryId=${rid || "unknown"}`,
+      `source=${source}`,
+    );
+    if (isCancelSource) {
+      console.log(
+        "DELIVERY_CANCEL_RELEASE_DRIVER",
+        `deliveryId=${rid || "unknown"}`,
+        `driverId=${d}`,
+        `source=${source}`,
+      );
+      console.log(
+        "DRIVER_READY_FOR_DELIVERY_AFTER_CANCEL",
+        `driverId=${d}`,
+        `deliveryId=${rid || "unknown"}`,
+      );
+    } else if (isCompleteSource) {
+      console.log(
+        "DRIVER_READY_FOR_RIDE_AFTER_DELIVERY",
+        `driverId=${d}`,
+        `deliveryId=${rid || "unknown"}`,
+      );
+    }
+    console.log("DRIVER_DELIVERY_LOCK_CLEARED", `driverId=${d}`, `deliveryId=${rid || "unknown"}`);
+    console.log("DRIVER_RIDE_SOCKET_UNTOUCHED", `driverId=${d}`);
+  }
   return { cleared: Object.keys(updates).length };
 }
 
@@ -971,6 +1501,17 @@ async function repairDeliveryActivePointers(db, deliveryId) {
   if (!driverId || !customerId) {
     return { ok: false, reason: "not_assigned" };
   }
+  const ds = normalizeDeliveryState(row.delivery_state);
+  if (TERMINAL_DELIVERY.has(ds)) {
+    await clearDeliveryActivePointers(db, {
+      deliveryId: rid,
+      customerId,
+      driverId,
+      merchantId: normUid(row.merchant_id ?? row.merchantId),
+      source: "repairDeliveryActivePointers_terminal",
+    });
+    return { ok: true, reason: "cleared_terminal" };
+  }
   await setActiveDeliveryPointers(db, rid, customerId, driverId, row);
   return { ok: true, reason: "repaired" };
 }
@@ -985,6 +1526,24 @@ async function createDeliveryRequest(data, context, db) {
   }
   const customerId = normUid(context.auth.uid);
   console.log("DELIVERY_CREATE_START", customerId);
+
+  const userLifecycle = require("./user_account_lifecycle");
+  const activeGate = require("./active_service_gate");
+  const serviceGate = await activeGate.assertActiveRequestServiceEnabled(db, "dispatch_delivery");
+  if (!serviceGate.ok) {
+    console.log("DELIVERY_CREATE_FAIL", customerId, serviceGate.reason || "service_disabled");
+    return {
+      success: false,
+      reason: serviceGate.reason || "service_disabled",
+      service_type: serviceGate.service_type,
+      message: serviceGate.message,
+    };
+  }
+  const accountGate = await userLifecycle.assertUserCanOperate(db, customerId, "rider");
+  if (!accountGate.ok) {
+    console.log("DELIVERY_CREATE_FAIL", customerId, accountGate.reason || "account_blocked");
+    return { success: false, reason: accountGate.reason || "account_blocked" };
+  }
 
   const bodyCustomer = normUid(data?.customer_id ?? data?.customerId ?? data?.rider_id);
   if (bodyCustomer && bodyCustomer !== customerId) {
@@ -1058,11 +1617,14 @@ async function createDeliveryRequest(data, context, db) {
   }
 
   const recipientName = String(data?.recipient_name ?? data?.recipientName ?? "").trim();
-  if (recipientName.length < 2) {
-    return { success: false, reason: "recipient_name_required" };
+  if (recipientName.length > 0 && recipientName.length < 2) {
+    return { success: false, reason: "recipient_name_invalid" };
   }
   const recipientPhone = String(data?.recipient_phone ?? data?.recipientPhone ?? "").trim();
-  if (recipientPhone.length < 8 || recipientPhone.length > 20) {
+  if (
+    recipientPhone.length > 0 &&
+    (recipientPhone.length < 8 || recipientPhone.length > 20)
+  ) {
     return { success: false, reason: "recipient_phone_invalid" };
   }
 
@@ -1074,27 +1636,36 @@ async function createDeliveryRequest(data, context, db) {
   }
 
   const fare = Number(data?.fare ?? 0);
-  if (!Number.isFinite(fare) || fare <= 0) {
-    return { success: false, reason: "invalid_fare" };
-  }
-  if (fare > riderGates.max_fare_ngn) {
-    return { success: false, reason: "fare_above_limit" };
-  }
+  const { validateAndFreezeEntityPricing } = require("./pricing_quote_flow");
+  const { readCustomerOutstandingDeliveryWaitFee } = require("./delivery_wait_fee");
+  const carriedForwardWaitFee = await readCustomerOutstandingDeliveryWaitFee(db, customerId);
+  const tripFareForPricing = fare + (carriedForwardWaitFee > 0 ? carriedForwardWaitFee : 0);
 
-  const { computeRiderPricing, assertClientTotalMatches } = require("./pricing_calculator");
-  const pricing = computeRiderPricing({
+  const pricingValidation = await validateAndFreezeEntityPricing(db, {
     flow: "dispatch_request",
-    trip_fare_ngn: fare,
+    market: String(data?.market ?? data?.city ?? "lagos").trim(),
+    fare: tripFareForPricing,
+    trip_fare_ngn: tripFareForPricing,
+    distance_km: Number(data?.distance_km ?? data?.distanceKm ?? 0) || 0,
+    eta_min: Number(data?.eta_min ?? data?.etaMin ?? data?.eta_minutes ?? 0) || 0,
+    total_ngn: data?.total_ngn ?? data?.totalNgn,
+    rider_id: customerId,
   });
-  const totalMismatch = assertClientTotalMatches(pricing, data?.total_ngn ?? data?.totalNgn);
-  if (!totalMismatch.ok) {
+  if (!pricingValidation.ok) {
     return {
       success: false,
-      reason: totalMismatch.reason,
-      reason_code: totalMismatch.reason_code,
-      message: totalMismatch.message,
-      retryable: totalMismatch.retryable,
+      reason: pricingValidation.reason,
+      reason_code: pricingValidation.reason_code,
+      message: pricingValidation.message,
+      retryable: pricingValidation.retryable,
+      expected_trip_fare_ngn: pricingValidation.expected_trip_fare_ngn,
+      expected_total_ngn: pricingValidation.expected_total_ngn,
     };
+  }
+  const pricing = pricingValidation.pricing;
+  const pricingSnapshot = pricingValidation.pricing_snapshot;
+  if (tripFareForPricing > riderGates.max_fare_ngn) {
+    return { success: false, reason: "fare_above_limit" };
   }
 
   const currency = String(data?.currency ?? "NGN").trim().toUpperCase() || "NGN";
@@ -1143,11 +1714,17 @@ async function createDeliveryRequest(data, context, db) {
     recipient_name: recipientName,
     recipient_phone: recipientPhone,
     category,
-    fare,
+    fare: tripFareForPricing,
+    base_fare_ngn: fare,
+    carried_forward_wait_fee_ngn: carriedForwardWaitFee > 0 ? carriedForwardWaitFee : 0,
+    outstanding_wait_fee_included: carriedForwardWaitFee > 0,
     platform_fee_ngn: pricing.platform_fee_ngn,
+    booking_fee_ngn: pricing.platform_fee_ngn,
     small_order_fee_ngn: pricing.small_order_fee_ngn,
     total_ngn: pricing.total_ngn,
     fee_breakdown: pricing.fee_breakdown,
+    pricing_snapshot: pricingSnapshot,
+    commission_rate: pricingSnapshot.commission_rate,
     currency,
     distance_km: distanceKm,
     eta_minutes: etaMin,
@@ -1175,6 +1752,34 @@ async function createDeliveryRequest(data, context, db) {
     updated_at: ts,
   });
 
+  if (pricingValidation.discount?.discount_id && pricingSnapshot?.discount_applied_ngn > 0) {
+    try {
+      const { consumeDiscount } = require("./user_discounts");
+      await consumeDiscount(db, customerId, pricingValidation.discount.discount_id, {
+        applied_amount_ngn: pricingSnapshot.discount_applied_ngn,
+        entity_type: "delivery",
+        entity_id: deliveryId,
+        actor_uid: customerId,
+        reason: "dispatch_delivery",
+      });
+    } catch (discountErr) {
+      console.log(
+        "DELIVERY_DISCOUNT_CONSUME_FAIL",
+        deliveryId,
+        pricingValidation.discount.discount_id,
+        discountErr?.message ?? discountErr,
+      );
+    }
+  }
+
+  console.log(
+    "DISPATCH_CREATE_CALL_RESPONSE",
+    `deliveryId=${deliveryId}`,
+    `success=true`,
+    `reason=created`,
+    `market=${market}`,
+    `payment_status=${paymentStatus}`,
+  );
   console.log("DELIVERY_CREATE_SUCCESS", deliveryId, market);
   await writeAudit(db, {
     type: "delivery_create",
@@ -1182,6 +1787,23 @@ async function createDeliveryRequest(data, context, db) {
     customer_id: customerId,
     actor_uid: customerId,
   });
+
+  console.log(
+    "DELIVERY_CREATED_PENDING_PAYMENT",
+    `deliveryId=${deliveryId}`,
+    `customerId=${customerId}`,
+    `market=${market}`,
+    `payment_status=${paymentStatus}`,
+  );
+  try {
+    await fanOutDeliveryOffersIfEligible(db, deliveryId, row);
+  } catch (fanoutErr) {
+    console.log(
+      "DELIVERY_FANOUT_FAIL",
+      `deliveryId=${deliveryId}`,
+      String(fanoutErr?.message || fanoutErr),
+    );
+  }
 
   return {
     success: true,
@@ -1238,9 +1860,6 @@ async function acceptDeliveryRequest(data, context, db) {
   if (!deliveryPoolOpenForAccept(pre)) {
     return { success: false, reason: "status_not_open" };
   }
-  if (!paymentAllowsDispatchDelivery(pre)) {
-    return { success: false, reason: "payment_not_verified" };
-  }
 
   const busyGuard = await resolveDeliveryBusyGuardForDriver(
     db,
@@ -1273,6 +1892,19 @@ async function acceptDeliveryRequest(data, context, db) {
   const el = evaluateDriverForOffer(drvProf, gates, { ...pre, service_type: "dispatch_delivery" });
   if (!el.ok) {
     return { success: false, reason: "driver_not_eligible" };
+  }
+  const fleetGate = await fleetAccountability.assertFleetLinkedDriverCanOperate(
+    db,
+    null,
+    driverId,
+    drvProf,
+  );
+  if (!fleetGate.ok) {
+    return {
+      success: false,
+      reason: fleetGate.reason || "fleet_suspended",
+      message: fleetGate.message || fleetAccountability.FLEET_SUSPENDED_MESSAGE,
+    };
   }
 
   const now = nowMs();
@@ -1339,15 +1971,67 @@ async function acceptDeliveryRequest(data, context, db) {
   }
 
   const next = finalRow && typeof finalRow === "object" ? finalRow : pre;
+  try {
+    const contactPatch = await buildDeliveryDriverContactPatch(db, driverId);
+    const customerPatch = await buildDeliveryCustomerContactPatch(db, customerId);
+    const mergedContact = { ...contactPatch, ...customerPatch };
+    if (Object.keys(mergedContact).length > 0) {
+      await ref.update({ ...mergedContact, updated_at: nowMs() });
+      Object.assign(next, mergedContact);
+    }
+  } catch (contactErr) {
+    console.log(
+      "DELIVERY_DRIVER_CONTACT_ATTACH_FAIL",
+      `deliveryId=${deliveryId}`,
+      contactErr?.message ?? contactErr,
+    );
+  }
+  try {
+    const { resolveDeliveryCommissionRateForDriver } = require("./app_config_pricing");
+    const commissionRate = await resolveDeliveryCommissionRateForDriver(db, driverId);
+    const priorSnap =
+      next.pricing_snapshot && typeof next.pricing_snapshot === "object"
+        ? next.pricing_snapshot
+        : {};
+    const commissionPatch = {
+      commission_rate: commissionRate,
+      pricing_snapshot: {
+        ...priorSnap,
+        commission_rate: commissionRate,
+        frozen: true,
+      },
+      updated_at: nowMs(),
+    };
+    await ref.update(commissionPatch);
+    Object.assign(next, commissionPatch);
+  } catch (commissionErr) {
+    console.log(
+      "DELIVERY_COMMISSION_RATE_PATCH_FAIL",
+      `deliveryId=${deliveryId}`,
+      `driverId=${driverId}`,
+      commissionErr?.message ?? commissionErr,
+    );
+  }
   await clearDeliveryFanoutAndOffers(db, deliveryId, driverId);
   await setActiveDeliveryPointers(db, deliveryId, customerId, driverId, next);
   await ensureDeliveryChatMeta(db, deliveryId, customerId, driverId, next);
 
   try {
+    const paymentPending = !deliveryHasVerifiedOnlinePayment(next);
+    if (paymentPending) {
+      console.log(
+        "DELIVERY_ACCEPTED_PENDING_PAYMENT",
+        `deliveryId=${deliveryId}`,
+        `driverId=${driverId}`,
+        `payment_status=${String(next.payment_status ?? "").trim()}`,
+      );
+    }
     await sendPushToUser(db, customerId, {
       notification: {
         title: "Driver assigned",
-        body: "A driver accepted your delivery request.",
+        body: paymentPending
+          ? "A biker accepted your delivery. Complete payment to continue."
+          : "A driver accepted your delivery request.",
       },
       data: {
         delivery_id: deliveryId,
@@ -1387,11 +2071,21 @@ async function acceptDeliveryRequest(data, context, db) {
   });
 
   console.log("DELIVERY_ACCEPT_SUCCESS", deliveryId, driverId);
+  console.log("DELIVERY_ACCEPTED", `deliveryId=${deliveryId}`, `driverId=${driverId}`);
+  try {
+    await syncDeliveryTrackPublic(db, deliveryId);
+  } catch (trackErr) {
+    console.log(
+      "DELIVERY_TRACK_PUBLIC_SYNC_FAIL",
+      `deliveryId=${deliveryId}`,
+      trackErr?.message ?? trackErr,
+    );
+  }
   return { success: true, reason: "accepted", accept_win_path: committed ? "transaction" : "direct" };
 }
 
 async function notifyDeliveryLifecyclePush(db, deliveryId, row, nextState) {
-  const customerId = normUid(row.customer_id);
+  const customerId = normDeliveryCustomerId(row);
   const driverId = canonicalAssignedDeliveryDriverId(row);
   const merchantId = normUid(row.merchant_id ?? row.merchantId);
   const ds = normalizeDeliveryState(nextState);
@@ -1474,6 +2168,8 @@ async function createDeliverySupportTicket(data, context, db) {
     return { success: true, idempotent: true, ticketId };
   }
   const now = nowMs();
+  const driverId = canonicalAssignedDeliveryDriverId(row) || null;
+  const fleetBusinessId = trimStr(row.fleet_business_id ?? row.fleetBusinessId, 128) || null;
   await ticketRef.set({
     ticket_id: ticketId,
     delivery_id: deliveryId,
@@ -1485,7 +2181,8 @@ async function createDeliverySupportTicket(data, context, db) {
     reporter_id: normUid(context.auth.uid),
     reporter_role: reporterRole,
     customer_id: normUid(row.customer_id),
-    driver_id: canonicalAssignedDeliveryDriverId(row) || null,
+    driver_id: driverId,
+    business_id: fleetBusinessId,
     merchant_id: normUid(row.merchant_id ?? row.merchantId) || null,
     payment_status: row.payment_status ?? null,
     delivery_state: normalizeDeliveryState(row.delivery_state),
@@ -1496,6 +2193,44 @@ async function createDeliverySupportTicket(data, context, db) {
     updated_at: now,
     chat_path: `delivery_chats/${deliveryId}/messages`,
   });
+  if (driverId) {
+    try {
+      const incidentRes = await fleetAccountability.recordFleetLinkedDeliveryIncident(
+        db,
+        admin.firestore(),
+        {
+          deliveryId,
+          driverId,
+          riderUid: normUid(context.auth.uid),
+          issueType: reason,
+          description: message,
+          actorUid: normUid(context.auth.uid),
+          ticketId,
+          severity: "normal",
+        },
+      );
+      if (incidentRes.success && incidentRes.fleet_owner_uid) {
+        await sendPushToUser(db, incidentRes.fleet_owner_uid, {
+          notification: {
+            title: "Delivery issue reported",
+            body: "A rider reported an issue on a fleet-linked delivery.",
+          },
+          data: {
+            type: "fleet_delivery_incident",
+            business_id: incidentRes.business_id,
+            delivery_id: deliveryId,
+            incident_id: incidentRes.incident_id,
+          },
+        });
+      }
+    } catch (incidentErr) {
+      console.log(
+        "FLEET_DELIVERY_INCIDENT_FAIL",
+        `deliveryId=${deliveryId}`,
+        String(incidentErr?.message || incidentErr),
+      );
+    }
+  }
   if (reportId) {
     await db.ref(`support_reports/deliveries/${deliveryId}/${reportId}`).update({
       support_ticket_id: ticketId,
@@ -1601,9 +2336,56 @@ async function updateDeliveryState(data, context, db) {
     }
   }
 
+  if (
+    deliveryProgressRequiresVerifiedPayment(current, nextState) ||
+    (nextState === DELIVERY_STATE.picked_up && current === DELIVERY_STATE.driver_arriving_pickup)
+  ) {
+    if (
+      nextState === DELIVERY_STATE.picked_up &&
+      current === DELIVERY_STATE.driver_arriving_pickup &&
+      !hasPickupProofPhoto(cur)
+    ) {
+      console.log(
+        "DELIVERY_PICKUP_PROOF_REQUIRED",
+        `deliveryId=${deliveryId}`,
+        `driverId=${driverId}`,
+      );
+      return { success: false, reason: "pickup_proof_required" };
+    }
+    if (deliveryProgressRequiresVerifiedPayment(current, nextState) &&
+      !deliveryHasVerifiedOnlinePayment(cur)) {
+      console.log(
+        "DELIVERY_PAYMENT_REQUIRED_TO_START",
+        `deliveryId=${deliveryId}`,
+        `driverId=${driverId}`,
+        `from=${current}`,
+        `to=${nextState}`,
+        `payment_status=${String(cur.payment_status ?? "").trim()}`,
+      );
+      return {
+        success: false,
+        reason: "payment_not_verified",
+        message: "Waiting for rider payment verification.",
+      };
+    }
+  }
+
   if (nextState === DELIVERY_STATE.completed) {
     if (!deliveryHasVerifiedOnlinePayment(cur)) {
+      console.log(
+        "DELIVERY_COMPLETE_BLOCKED_PAYMENT_NOT_VERIFIED",
+        `deliveryId=${deliveryId}`,
+        `driverId=${driverId}`,
+      );
       return { success: false, reason: "payment_not_verified" };
+    }
+    if (!hasDeliveryProofPhoto(cur)) {
+      console.log(
+        "DELIVERY_COMPLETE_BLOCKED_PROOF_REQUIRED",
+        `deliveryId=${deliveryId}`,
+        `driverId=${driverId}`,
+      );
+      return { success: false, reason: "delivery_proof_required" };
     }
   }
 
@@ -1626,6 +2408,41 @@ async function updateDeliveryState(data, context, db) {
 
   await ref.set(nextRow);
 
+  if (nextState === DELIVERY_STATE.completed) {
+    console.log(
+      "DELIVERY_COMPLETED_WITH_PROOF",
+      `deliveryId=${deliveryId}`,
+      `driverId=${driverId}`,
+    );
+    try {
+      const walletSettlement = require("./payment_wallet_settlement");
+      await walletSettlement.applyWalletSettlementsAfterAuthoritativePayment(db, {
+        deliveryId,
+        source: "delivery_completed",
+        requireCompleted: true,
+      });
+    } catch (settleErr) {
+      console.log(
+        "WALLET_SETTLEMENT_FAIL",
+        `deliveryId=${deliveryId}`,
+        settleErr?.message ?? settleErr,
+      );
+    }
+  }
+
+  if (nextState === DELIVERY_STATE.driver_arriving_pickup && current !== DELIVERY_STATE.driver_arriving_pickup) {
+    try {
+      const { startDeliveryWaitFeeWindow } = require("./delivery_wait_fee");
+      await startDeliveryWaitFeeWindow(db, deliveryId, cur);
+    } catch (waitErr) {
+      console.log(
+        "DELIVERY_WAIT_FEE_START_FAIL",
+        `deliveryId=${deliveryId}`,
+        waitErr?.message ?? waitErr,
+      );
+    }
+  }
+
   if (TERMINAL_DELIVERY.has(nextState)) {
     try {
       const { persistDeliveryTerminalHistory } = require("./trip_history_persistence");
@@ -1637,11 +2454,31 @@ async function updateDeliveryState(data, context, db) {
         histErr?.message ?? histErr,
       );
     }
+    const terminalSource =
+      nextState === DELIVERY_STATE.completed
+        ? "delivery_completed"
+        : "delivery_cancelled";
+    if (nextState === DELIVERY_STATE.cancelled) {
+      await clearDeliveryFanoutAndOffers(db, deliveryId, driverId);
+    }
+    try {
+      const { finalizeDeliveryWaitFeeOnTerminal } = require("./delivery_wait_fee");
+      const paid =
+        nextState === DELIVERY_STATE.completed && deliveryHasVerifiedOnlinePayment(nextRow);
+      await finalizeDeliveryWaitFeeOnTerminal(db, deliveryId, nextRow, { paid });
+    } catch (waitFinErr) {
+      console.log(
+        "DELIVERY_WAIT_FEE_FINALIZE_FAIL",
+        `deliveryId=${deliveryId}`,
+        waitFinErr?.message ?? waitFinErr,
+      );
+    }
     await clearDeliveryActivePointers(db, {
       deliveryId,
       customerId: normUid(cur.customer_id),
       driverId,
       merchantId: normUid(cur.merchant_id ?? cur.merchantId),
+      source: terminalSource,
     });
   } else {
     await db.ref().update({
@@ -1659,6 +2496,16 @@ async function updateDeliveryState(data, context, db) {
   });
 
   await notifyDeliveryLifecyclePush(db, deliveryId, nextRow, nextState);
+
+  try {
+    await syncDeliveryTrackPublic(db, deliveryId);
+  } catch (trackErr) {
+    console.log(
+      "DELIVERY_TRACK_PUBLIC_SYNC_FAIL",
+      `deliveryId=${deliveryId}`,
+      trackErr?.message ?? trackErr,
+    );
+  }
 
   return { success: true, delivery_state: nextState };
 }
@@ -1723,6 +2570,7 @@ async function expireDeliveryRequest(data, context, db) {
     customerId,
     driverId,
     merchantId,
+    source: "delivery_expired",
   });
   await writeAudit(db, {
     type: "delivery_expire",
@@ -1744,7 +2592,7 @@ async function cancelDeliveryRequest(data, context, db) {
   if (!row || typeof row !== "object") {
     return { success: false, reason: "delivery_missing" };
   }
-  const customerId = normUid(row.customer_id);
+  const customerId = normDeliveryCustomerId(row);
   const driverId = canonicalAssignedDeliveryDriverId(row);
   const isCustomer = customerId === uid;
   const isDriver = driverId === uid;
@@ -1755,41 +2603,117 @@ async function cancelDeliveryRequest(data, context, db) {
   if (TERMINAL_DELIVERY.has(ds)) {
     return { success: false, reason: "already_terminal" };
   }
-  if (isCustomer) {
-    const allowed =
-      ds === DELIVERY_STATE.searching ||
-      ds === DELIVERY_STATE.driver_assigned ||
-      ds === DELIVERY_STATE.driver_arriving_pickup;
-    if (!allowed) {
-      return { success: false, reason: "cannot_cancel_at_stage" };
-    }
-  } else if (ds === DELIVERY_STATE.searching) {
-    return { success: false, reason: "not_assigned" };
-  }
   const now = nowMs();
-  const mirror = deliveryUiMirrorFields(DELIVERY_STATE.cancelled, driverId || "");
-  const cancelReason = String(data?.cancel_reason ?? data?.cancelReason ?? "user_cancelled").slice(
+  const cancelReasonCode = String(
+    data?.cancel_reason_code ?? data?.cancelReasonCode ?? "",
+  )
+    .trim()
+    .slice(0, 80);
+  const cancelReasonText = String(
+    data?.cancel_reason_text ?? data?.cancelReasonText ?? "",
+  )
+    .trim()
+    .slice(0, 200);
+  const cancelNote = String(data?.cancel_note ?? data?.cancelNote ?? "")
+    .trim()
+    .slice(0, 500);
+  let cancelReason = String(data?.cancel_reason ?? data?.cancelReason ?? "user_cancelled").slice(
     0,
     200,
   );
-  await ref.set({
+  if (cancelReasonCode) {
+    cancelReason = cancelReasonCode;
+  }
+  if (
+    isCustomer &&
+    (cancelReason === "payment_timeout" || cancelReason === "unpaid_payment_timeout")
+  ) {
+    if (!deliveryUnpaidPaymentPastDeadline(row, now)) {
+      return { success: false, reason: "payment_deadline_not_reached" };
+    }
+    if (ds !== DELIVERY_STATE.driver_assigned) {
+      return { success: false, reason: "cannot_cancel_at_stage" };
+    }
+    console.log(
+      "DELIVERY_CANCEL_UNPAID_PAYMENT_TIMEOUT",
+      `deliveryId=${deliveryId}`,
+      `customerId=${customerId}`,
+    );
+  } else {
+    const decision = evaluateDeliveryCancelDecision(row, uid, {
+      cancelReason,
+      requestOnly:
+        data?.request_only === true ||
+        data?.requestOnly === true ||
+        cancelReason === "request_cancel",
+    });
+    if (!decision.allowed) {
+      if (decision.log) {
+        console.log(decision.log, `deliveryId=${deliveryId}`, `uid=${uid}`);
+      }
+      return { success: false, reason: decision.reason || "cannot_cancel_at_stage" };
+    }
+    if (decision.mode === "request") {
+      console.log(
+        decision.log || "DELIVERY_CANCEL_REQUESTED",
+        `deliveryId=${deliveryId}`,
+        `uid=${uid}`,
+      );
+      await ref.update({
+        cancellation_requested_at: now,
+        cancellation_requested_by: uid,
+        cancellation_request_reason: cancelReasonText || cancelReason || "request_cancel",
+        cancel_requested_by: isCustomer ? "customer" : isDriver ? "driver" : uid,
+        cancel_reason_code: cancelReasonCode || cancelReason || null,
+        cancel_reason_text: cancelReasonText || cancelReason || null,
+        cancel_note: cancelNote || null,
+        updated_at: now,
+      });
+      if (driverId) {
+        try {
+          await sendPushToUser(db, driverId, {
+            notification: {
+              title: "Cancellation requested",
+              body: "The sender requested to cancel this delivery. Review in the app.",
+            },
+            data: { type: "delivery_cancel_requested", delivery_id: deliveryId },
+          });
+        } catch (_) {}
+      }
+      return { success: true, reason: "delivery_cancel_requested", policy: decision.policy };
+    }
+    if (decision.log) {
+      console.log(decision.log, `deliveryId=${deliveryId}`, `uid=${uid}`);
+    }
+    cancelReason = decision.cancel_reason || cancelReason;
+  }
+
+  const mirror = deliveryUiMirrorFields(DELIVERY_STATE.cancelled, driverId || "");
+  const finalCancelReason = cancelReason;
+  const cancelledPatch = {
     ...row,
     delivery_state: DELIVERY_STATE.cancelled,
     trip_state: mirror.trip_state,
     status: mirror.status,
     cancelled_at: now,
-    cancel_reason: cancelReason,
+    cancel_reason: finalCancelReason,
+    cancel_requested_by: isCustomer ? "customer" : isDriver ? "driver" : uid,
+    cancel_reason_code: cancelReasonCode || finalCancelReason || null,
+    cancel_reason_text: cancelReasonText || finalCancelReason || null,
+    cancel_note: cancelNote || null,
     updated_at: now,
-  });
-  const cancelledRow = {
-    ...row,
-    delivery_state: DELIVERY_STATE.cancelled,
-    trip_state: mirror.trip_state,
-    status: mirror.status,
-    cancelled_at: now,
-    cancel_reason: cancelReason,
-    updated_at: now,
+    cancellation_requested_at: null,
+    cancellation_requested_by: null,
   };
+  const policyDecision = evaluateDeliveryCancelDecision(row, uid, { cancelReason: finalCancelReason });
+  if (policyDecision.refund_status) {
+    cancelledPatch.refund_status = policyDecision.refund_status;
+  }
+  if (policyDecision.policy) {
+    cancelledPatch.cancel_policy = policyDecision.policy;
+  }
+  await ref.set(cancelledPatch);
+  const cancelledRow = cancelledPatch;
   try {
     const { persistDeliveryTerminalHistory } = require("./trip_history_persistence");
     await persistDeliveryTerminalHistory(db, deliveryId, cancelledRow);
@@ -1806,7 +2730,18 @@ async function cancelDeliveryRequest(data, context, db) {
     customerId,
     driverId,
     merchantId: normUid(row.merchant_id ?? row.merchantId),
+    source: "cancelDeliveryRequest",
   });
+  try {
+    const { syncDeliveryTrackPublic } = require("./track_public");
+    await syncDeliveryTrackPublic(db, deliveryId);
+  } catch (trackErr) {
+    console.log(
+      "DELIVERY_SHARE_TRACK_SYNC_FAIL",
+      `deliveryId=${deliveryId}`,
+      trackErr?.message ?? trackErr,
+    );
+  }
   await writeAudit(db, {
     type: "delivery_cancel",
     delivery_id: deliveryId,
@@ -1879,6 +2814,328 @@ async function createFoodDeliveryForMerchantOrder(db, row) {
   return { ok: true, deliveryId };
 }
 
+async function registerPickupProofPhoto(data, context, db) {
+  const driverId = normUid(context?.auth?.uid);
+  const deliveryId = normDeliveryIdFromCallableData(data);
+  const photoUrl = trimStr(
+    data?.pickup_proof_photo_url ?? data?.pickupProofPhotoUrl ?? data?.delivery_proof_photo_url,
+    512,
+  );
+  console.log(
+    "DELIVERY_PICKUP_PROOF_UPLOAD_START",
+    `deliveryId=${deliveryId}`,
+    `driverId=${driverId}`,
+  );
+  if (!driverId || !deliveryId || !photoUrl.startsWith("https://")) {
+    console.log(
+      "DELIVERY_PICKUP_PROOF_UPLOAD_FAIL",
+      `deliveryId=${deliveryId}`,
+      `reason=invalid_input`,
+    );
+    return { success: false, reason: "invalid_input" };
+  }
+  const ref = db.ref(`delivery_requests/${deliveryId}`);
+  const snap = await ref.get();
+  const row = snap.val();
+  if (!row || typeof row !== "object") {
+    return { success: false, reason: "delivery_missing" };
+  }
+  if (canonicalAssignedDeliveryDriverId(row) !== driverId) {
+    return { success: false, reason: "not_assigned_driver" };
+  }
+  const now = nowMs();
+  await ref.update({
+    pickup_proof_photo_url: photoUrl,
+    pickup_proof_uploaded_at: now,
+    pickup_proof_uploaded_by: driverId,
+    updated_at: now,
+  });
+  console.log(
+    "DELIVERY_PICKUP_PROOF_UPLOAD_SUCCESS",
+    `deliveryId=${deliveryId}`,
+    `driverId=${driverId}`,
+  );
+  return { success: true, reason: "pickup_proof_registered" };
+}
+
+async function registerDeliveryProofPhoto(data, context, db) {
+  const driverId = normUid(context?.auth?.uid);
+  const deliveryId = normDeliveryIdFromCallableData(data);
+  const photoUrl = trimStr(data?.delivery_proof_photo_url ?? data?.deliveryProofPhotoUrl, 512);
+  console.log(
+    "DELIVERY_PROOF_UPLOAD_START",
+    `deliveryId=${deliveryId}`,
+    `driverId=${driverId}`,
+  );
+  if (!driverId || !deliveryId || !photoUrl.startsWith("https://")) {
+    console.log(
+      "DELIVERY_PROOF_UPLOAD_FAIL",
+      `deliveryId=${deliveryId}`,
+      `reason=invalid_input`,
+    );
+    return { success: false, reason: "invalid_input" };
+  }
+  const ref = db.ref(`delivery_requests/${deliveryId}`);
+  const snap = await ref.get();
+  const row = snap.val();
+  if (!row || typeof row !== "object") {
+    return { success: false, reason: "delivery_missing" };
+  }
+  if (canonicalAssignedDeliveryDriverId(row) !== driverId) {
+    return { success: false, reason: "not_assigned_driver" };
+  }
+  const now = nowMs();
+  await ref.update({
+    delivery_proof_photo_url: photoUrl,
+    delivery_proof_uploaded_at: now,
+    delivery_proof_status: "submitted",
+    updated_at: now,
+  });
+  console.log(
+    "DELIVERY_PROOF_UPLOAD_SUCCESS",
+    `deliveryId=${deliveryId}`,
+    `driverId=${driverId}`,
+  );
+  const customerId = normUid(row.customer_id);
+  if (customerId) {
+    try {
+      await sendPushToUser(db, customerId, {
+        notification: {
+          title: "Delivery photo uploaded",
+          body: "Your courier uploaded a delivery proof photo.",
+        },
+        data: {
+          type: "delivery_proof_uploaded",
+          delivery_id: deliveryId,
+        },
+      });
+    } catch (pushErr) {
+      console.log(
+        "DELIVERY_PROOF_NOTIFY_FAIL",
+        `deliveryId=${deliveryId}`,
+        String(pushErr?.message || pushErr),
+      );
+    }
+  }
+  return { success: true, reason: "proof_registered" };
+}
+
+async function submitDeliveryRating(data, context, db) {
+  if (!context.auth) {
+    return { success: false, reason: "unauthorized" };
+  }
+  const uid = normUid(context.auth.uid);
+  const deliveryId = normDeliveryIdFromCallableData(data);
+  const ratingRaw = Number(data?.rating ?? 0);
+  const rating = Math.round(ratingRaw);
+  if (!deliveryId || rating < 1 || rating > 5) {
+    return { success: false, reason: "invalid_input" };
+  }
+  const comment = trimStr(data?.comment, 500);
+  const part = await assertDeliveryChatParticipant(db, deliveryId, uid);
+  if (!part.ok) {
+    return { success: false, reason: part.reason || "forbidden" };
+  }
+  const row = part.row;
+  const customerId = normDeliveryCustomerId(row);
+  const driverId = canonicalAssignedDeliveryDriverId(row);
+  const ds = normalizeDeliveryState(row.delivery_state);
+  if (ds !== DELIVERY_STATE.completed) {
+    return { success: false, reason: "delivery_not_completed" };
+  }
+  let roleKey = "";
+  let toUid = "";
+  if (uid === customerId) {
+    roleKey = "rider_to_driver";
+    toUid = driverId;
+    console.log("DELIVERY_RIDER_RATING_SUBMIT", `deliveryId=${deliveryId}`, `rating=${rating}`);
+  } else if (uid === driverId) {
+    roleKey = "driver_to_rider";
+    toUid = customerId;
+    console.log("DELIVERY_DRIVER_RATING_SUBMIT", `deliveryId=${deliveryId}`, `rating=${rating}`);
+  } else {
+    return { success: false, reason: "forbidden" };
+  }
+  const path = deliveryRatingPath(deliveryId, roleKey);
+  const existing = await db.ref(path).get();
+  if (existing.exists()) {
+    console.log(
+      "DELIVERY_RATING_DUPLICATE_BLOCKED",
+      `deliveryId=${deliveryId}`,
+      `from_uid=${uid}`,
+      `roleKey=${roleKey}`,
+    );
+    return { success: false, reason: "rating_duplicate" };
+  }
+  const now = nowMs();
+  await db.ref(path).set({
+    delivery_id: deliveryId,
+    from_uid: uid,
+    to_uid: toUid,
+    rating,
+    comment: comment || null,
+    created_at: now,
+    role: roleKey,
+  });
+  if (uid === customerId && driverId) {
+    const avgSnap = await db.ref(`drivers/${driverId}/delivery_rating_summary`).get();
+    const prior = avgSnap.val() && typeof avgSnap.val() === "object" ? avgSnap.val() : {};
+    const count = Number(prior.count ?? 0) + 1;
+    const sum = Number(prior.sum ?? 0) + rating;
+    await db.ref(`drivers/${driverId}/delivery_rating_summary`).set({
+      count,
+      sum,
+      average: Math.round((sum / count) * 10) / 10,
+      updated_at: now,
+    });
+    const fleetBusinessId = trimStr(row.fleet_business_id ?? row.fleetBusinessId, 128);
+    if (fleetBusinessId) {
+      try {
+        await fleetAccountability.applyFleetRatingForDelivery(admin.firestore(), db, {
+          businessId: fleetBusinessId,
+          driverId,
+          deliveryId,
+          rating,
+          riderUid: uid,
+        });
+      } catch (fleetRatingErr) {
+        console.log(
+          "FLEET_RATING_UPDATE_FAIL",
+          `deliveryId=${deliveryId}`,
+          `businessId=${fleetBusinessId}`,
+          String(fleetRatingErr?.message || fleetRatingErr),
+        );
+      }
+    } else {
+      const driverSnap = await db.ref(`drivers/${driverId}`).get();
+      const driverProf =
+        driverSnap.val() && typeof driverSnap.val() === "object" ? driverSnap.val() : {};
+      if (fleetAccountability.isDriverLinkedToActiveFleet(driverProf)) {
+        const linkedFleetId = trimStr(driverProf.business_id ?? driverProf.businessId, 128);
+        if (linkedFleetId) {
+          try {
+            await fleetAccountability.applyFleetRatingForDelivery(admin.firestore(), db, {
+              businessId: linkedFleetId,
+              driverId,
+              deliveryId,
+              rating,
+              riderUid: uid,
+            });
+          } catch (fleetRatingErr) {
+            console.log(
+              "FLEET_RATING_UPDATE_FAIL",
+              `deliveryId=${deliveryId}`,
+              `businessId=${linkedFleetId}`,
+              String(fleetRatingErr?.message || fleetRatingErr),
+            );
+          }
+        }
+      }
+    }
+  }
+  return { success: true, reason: "rating_saved" };
+}
+
+async function sendDeliveryChatMessage(data, context, db) {
+  if (!context.auth) {
+    console.log("DELIVERY_CHAT_ACCESS_DENIED", "reason=unauthorized");
+    return { success: false, reason: "unauthorized" };
+  }
+  const uid = normUid(context.auth.uid);
+  const deliveryId = normDeliveryIdFromCallableData(data);
+  const msgType = trimStr(data?.type ?? "text", 16).toLowerCase() || "text";
+  const text = trimStr(data?.text, 2000);
+  const imageUrl = trimStr(data?.image_url ?? data?.imageUrl, 512);
+  if (!deliveryId) {
+    return { success: false, reason: "invalid_input" };
+  }
+  const part = await assertDeliveryChatParticipant(db, deliveryId, uid);
+  if (!part.ok) {
+    return { success: false, reason: part.reason || "forbidden" };
+  }
+  if (msgType === "text" && !text) {
+    return { success: false, reason: "empty_message" };
+  }
+  if (msgType === "image" && !imageUrl.startsWith("https://")) {
+    return { success: false, reason: "invalid_image_url" };
+  }
+  await ensureDeliveryChatMeta(
+    db,
+    deliveryId,
+    normUid(part.row.customer_id),
+    canonicalAssignedDeliveryDriverId(part.row),
+    part.row,
+  );
+  const now = nowMs();
+  const msgRef = db.ref(`delivery_chats/${deliveryId}/messages`).push();
+  const messageId = msgRef.key || "";
+  const payload = {
+    delivery_id: deliveryId,
+    sender_id: uid,
+    sender_uid: uid,
+    sender_role: part.role === "driver" ? "driver" : "rider",
+    type: msgType === "image" ? "image" : "text",
+    text: msgType === "text" ? text : "",
+    image_url: msgType === "image" ? imageUrl : null,
+    created_at: now,
+    created_at_ms: now,
+    timestamp: now,
+    status: "sent",
+    server_ack: true,
+  };
+  await msgRef.set(payload);
+  if (msgType === "image") {
+    console.log(
+      "CHAT_IMAGE_MESSAGE_CREATED",
+      `chatKind=delivery_chat`,
+      `threadId=${deliveryId}`,
+      `messageId=${messageId}`,
+      `senderId=${uid}`,
+      `messageType=image`,
+      `imageUrl=${imageUrl}`,
+    );
+    console.log(
+      "DELIVERY_CHAT_IMAGE_SENT",
+      `deliveryId=${deliveryId}`,
+      `messageId=${messageId}`,
+      `sender=${uid}`,
+    );
+  } else {
+    console.log(
+      "DELIVERY_CHAT_MESSAGE_SENT",
+      `deliveryId=${deliveryId}`,
+      `messageId=${messageId}`,
+      `sender=${uid}`,
+    );
+  }
+  try {
+    await onDeliveryChatMessageNotify(db, deliveryId, messageId, payload);
+    console.log(
+      "DELIVERY_CHAT_NOTIFY_SENT",
+      `deliveryId=${deliveryId}`,
+      `messageId=${messageId}`,
+    );
+  } catch (notifyErr) {
+    console.log(
+      "DELIVERY_CHAT_NOTIFY_FAIL",
+      `deliveryId=${deliveryId}`,
+      String(notifyErr?.message || notifyErr),
+    );
+  }
+  return { success: true, message_id: messageId, reason: "sent" };
+}
+
+async function onDeliveryChatMessageNotify(db, deliveryId, messageId, msg) {
+  const { onDeliveryChatMessageCreated } = require("./delivery_chat_triggers");
+  await onDeliveryChatMessageCreated(
+    {
+      params: { deliveryId, messageId },
+      data: { val: () => msg },
+    },
+    db,
+  );
+}
+
 module.exports = {
   DELIVERY_STATE,
   TERMINAL_DELIVERY,
@@ -1895,6 +3152,15 @@ module.exports = {
   DRIVER_DELIVERY_NEXT,
   deliveryUiMirrorFields,
   deliveryHasVerifiedOnlinePayment,
+  deliveryFanoutEligibleModelB,
+  deliveryUnpaidPaymentPastDeadline,
+  DELIVERY_UNPAID_PAYMENT_TTL_MS,
+  deliveryProgressRequiresVerifiedPayment,
+  hasDeliveryProofPhoto,
+  hasPickupProofPhoto,
+  normDeliveryCustomerId,
+  evaluateDeliveryCancelDecision,
+  buildDeliveryDriverContactPatch,
   paymentAllowsDispatchDelivery,
   resolveDeliveryBusyGuardForDriver,
   DELIVERY_SEARCH_TTL_MS,
@@ -1922,6 +3188,11 @@ module.exports = {
   expireDeliveryRequest,
   cancelDeliveryRequest,
   fanOutDeliveryOffersIfEligible,
+  registerPickupProofPhoto,
+  registerDeliveryProofPhoto,
+  submitDeliveryRating,
+  sendDeliveryChatMessage,
+  assertDeliveryChatParticipant,
   driverNearPickup,
   driverNearDropoff,
 };

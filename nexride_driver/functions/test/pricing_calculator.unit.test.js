@@ -4,12 +4,20 @@ const {
   computeRiderPricing,
   assertClientTotalMatches,
 } = require("../pricing_calculator");
+const { normalizePricingConfig } = require("../app_config_pricing");
 
-test("ride booking always includes ₦30 platform fee", () => {
+test("ride booking uses default platform fee when no config", () => {
   const p = computeRiderPricing({ flow: "ride_booking", trip_fare_ngn: 2500 });
   assert.equal(p.platform_fee_ngn, 30);
   assert.equal(p.small_order_fee_ngn, 0);
   assert.equal(p.total_ngn, 2530);
+});
+
+test("ride booking uses config booking fee when provided", () => {
+  const cfg = normalizePricingConfig({ bookingFeeNgn: 45, commissionRate: 0.1, cities: {} });
+  const p = computeRiderPricing({ flow: "ride_booking", trip_fare_ngn: 2500 }, cfg);
+  assert.equal(p.platform_fee_ngn, 45);
+  assert.equal(p.total_ngn, 2545);
 });
 
 test("dispatch request includes platform fee on delivery fare", () => {

@@ -6,8 +6,13 @@
 const { platformFeeNgn } = require("./params");
 const { createWalletTransactionInternal } = require("./wallet_core");
 const { resolveCommissionPolicy } = require("./driver_monetization");
+const {
+  commissionRateFromEntity,
+  bookingFeeFromEntity,
+  DEFAULT_COMMISSION_RATE,
+} = require("./app_config_pricing");
 
-const COMMISSION_RATE = 0.1;
+const COMMISSION_RATE = DEFAULT_COMMISSION_RATE;
 const PLATFORM_WALLET_UID = "nexride_platform";
 
 function normUid(uid) {
@@ -60,15 +65,28 @@ function computeRiderTotalNgn(ride) {
  */
 function computeRideFinanceBreakdown(ride, opts = {}) {
   const tripFare = tripFareFromRide(ride);
-  const bookingFee = roundNgn(platformFeeNgn());
+  const bookingFee = roundNgn(
+    opts.bookingFeeNgn != null
+      ? opts.bookingFeeNgn
+      : bookingFeeFromEntity(ride, opts.pricingConfig),
+  );
   const commissionExempt = opts.commissionExempt === true;
-  const commission = commissionExempt ? 0 : roundNgn(tripFare * COMMISSION_RATE);
+  const commissionRate = commissionExempt
+    ? 0
+    : opts.commissionRate != null
+      ? Number(opts.commissionRate)
+      : commissionRateFromEntity(ride);
+  const effectiveRate =
+    Number.isFinite(commissionRate) && commissionRate >= 0 && commissionRate <= 1
+      ? commissionRate
+      : COMMISSION_RATE;
+  const commission = commissionExempt ? 0 : roundNgn(tripFare * effectiveRate);
   const driverNet = Math.max(0, tripFare - commission);
   return {
     trip_fare_ngn: tripFare,
     booking_fee_ngn: bookingFee,
     commission_ngn: commission,
-    commission_rate: commissionExempt ? 0 : COMMISSION_RATE,
+    commission_rate: commissionExempt ? 0 : effectiveRate,
     driver_net_ngn: driverNet,
     rider_total_ngn: computeRiderTotalNgn(ride),
     commission_exempt: commissionExempt,

@@ -4,11 +4,13 @@ import 'package:flutter/foundation.dart';
 
 import '../support/driver_profile_support.dart';
 import '../support/realtime_database_error_support.dart';
+import 'driver_wallet_balance_logic.dart';
 
 enum DriverWithdrawalStatus {
   pending,
   processing,
   paid,
+  rejected,
   failed,
   unknown;
 
@@ -17,6 +19,7 @@ enum DriverWithdrawalStatus {
       DriverWithdrawalStatus.pending => 'Pending',
       DriverWithdrawalStatus.processing => 'Processing',
       DriverWithdrawalStatus.paid => 'Paid',
+      DriverWithdrawalStatus.rejected => 'Rejected',
       DriverWithdrawalStatus.failed => 'Failed',
       DriverWithdrawalStatus.unknown => 'Unknown',
     };
@@ -36,7 +39,7 @@ enum DriverWalletTransactionType {
       DriverWalletTransactionType.tripCredit => 'Trip credit',
       DriverWalletTransactionType.commissionDebit => 'Commission (NexRide)',
       DriverWalletTransactionType.withdrawalRequest => 'Withdrawal request',
-      DriverWalletTransactionType.withdrawalProcessed => 'Withdrawal processed',
+      DriverWalletTransactionType.withdrawalProcessed => 'Withdrawal paid',
       DriverWalletTransactionType.flutterwaveTopUp => 'Wallet top-up (Flutterwave)',
       DriverWalletTransactionType.adjustment => 'Adjustment',
     };
@@ -65,7 +68,8 @@ class DriverPayoutDestination {
   bool get isConfigured =>
       bankName.trim().isNotEmpty &&
       accountName.trim().isNotEmpty &&
-      accountNumber.trim().isNotEmpty;
+      accountNumber.trim().isNotEmpty &&
+      bankCode.trim().length >= 3;
 
   String get maskedAccountNumber {
     final digitsOnly = accountNumber.replaceAll(RegExp(r'\s+'), '');
@@ -89,6 +93,21 @@ class DriverPayoutDestination {
     ];
     return parts.join(' - ');
   }
+}
+
+class DriverWithdrawalBankOption {
+  const DriverWithdrawalBankOption({
+    required this.code,
+    required this.name,
+    this.accountBank = '',
+  });
+
+  final String code;
+  final String name;
+  final String accountBank;
+
+  String get flutterwaveAccountBank =>
+      accountBank.trim().isNotEmpty ? accountBank.trim() : code.trim();
 }
 
 class DriverEarningRecord {
@@ -165,7 +184,11 @@ class DriverFinanceSnapshot {
     required this.todayEarnings,
     required this.weeklyEarnings,
     required this.monthlyEarnings,
+    required this.totalWalletBalance,
     required this.currentWalletBalance,
+    required this.totalWalletCredits,
+    required this.totalWalletDebits,
+    required this.tripEarnings,
     required this.totalCreditedAmount,
     required this.totalWithdrawnAmount,
     required this.pendingWithdrawals,
@@ -183,7 +206,16 @@ class DriverFinanceSnapshot {
   final double todayEarnings;
   final double weeklyEarnings;
   final double monthlyEarnings;
+  /// Total from `wallets/{driverId}/balance` (authoritative; not trip-derived).
+  final double totalWalletBalance;
+  /// Spendable = [totalWalletBalance] minus reserved pending/processing withdrawals.
   final double currentWalletBalance;
+  /// Sum of `wallets/{id}/transactions` with direction=credit (or inferred credit types).
+  final double totalWalletCredits;
+  /// Sum of wallet debit / withdrawal transactions from RTDB ledger.
+  final double totalWalletDebits;
+  /// Trip settlement net earnings (not total wallet credits).
+  final double tripEarnings;
   final double totalCreditedAmount;
   final double totalWithdrawnAmount;
   final double pendingWithdrawals;
@@ -198,6 +230,9 @@ class DriverFinanceSnapshot {
   bool get hasWalletActivity =>
       walletTransactions.isNotEmpty ||
       withdrawals.isNotEmpty ||
+      totalWalletCredits > 0 ||
+      totalWalletDebits > 0 ||
+      tripEarnings > 0 ||
       totalCreditedAmount > 0 ||
       totalWithdrawnAmount > 0 ||
       pendingWithdrawals > 0 ||
@@ -314,34 +349,44 @@ class DriverFinanceService {
               .get(),
         ),
         _optionalSnapshot(
-          path:
-              'withdraw_requests[orderByChild=driver_id,equalTo=$normalizedDriverId]',
-          request: () => _rootRef
-              .child('withdraw_requests')
-              .orderByChild('driver_id')
-              .equalTo(normalizedDriverId)
-              .get(),
-        ),
-        _optionalSnapshot(
-          path:
-              'withdraw_requests[orderByChild=driverId,equalTo=$normalizedDriverId]',
-          request: () => _rootRef
-              .child('withdraw_requests')
-              .orderByChild('driverId')
-              .equalTo(normalizedDriverId)
-              .get(),
-        ),
-        _optionalSnapshot(
-          path: 'withdraw_requests/$normalizedDriverId',
+          path: 'driver_wallet_ledger/$normalizedDriverId',
           request: () =>
-              _rootRef.child('withdraw_requests/$normalizedDriverId').get(),
+              _rootRef.child('driver_wallet_ledger/$normalizedDriverId').get(),
+        ),
+        _optionalSnapshot(
+          path: 'driver_withdraw_requests/$normalizedDriverId',
+          request: () => _rootRef
+              .child('driver_withdraw_requests/$normalizedDriverId')
+              .get(),
         ),
       ]);
 
-      final walletData = _mergeMaps(
-        _map(driverData['wallet']),
-        _map(optionalSnapshots[0]?.value),
-      );
+      final walletsSnapshot = optionalSnapshots[0];
+      final driverWalletLedgerSnapshot = optionalSnapshots[5];
+      final walletsNodeLoaded = walletsSnapshot != null;
+      final walletsNode = walletsNodeLoaded
+          ? _map(walletsSnapshot!.value)
+          : const <String, dynamic>{};
+      final driverWalletLedgerNode = _map(driverWalletLedgerSnapshot?.value);
+      final walletTransactionMap = _map(walletsNode['transactions']);
+      bool rideWalletCreditConfirmed(String rideId) {
+        final normalizedRideId = rideId.trim();
+        if (normalizedRideId.isEmpty) {
+          return false;
+        }
+        final ledger = _map(driverWalletLedgerNode['${normalizedRideId}_driver_net']);
+        if (ledger['completed'] == true) {
+          return true;
+        }
+        final tx = _map(walletTransactionMap['${normalizedRideId}_driver_net']);
+        return tx.isNotEmpty;
+      }
+      final legacyWalletMetadata =
+          walletMetadataWithoutBalance(_map(driverData['wallet']));
+      final walletData = walletsNodeLoaded
+          ? _mergeMaps(legacyWalletMetadata, walletsNode)
+          : legacyWalletMetadata;
+      final rawWalletsBalance = walletsNode['balance'];
       final legacyEarningsData = _mergeMaps(
         _map(driverData['earnings']),
         _map(optionalSnapshots[1]?.value),
@@ -401,6 +446,7 @@ class DriverFinanceService {
           rideData: rideData,
           recordId: rideId.isEmpty ? entry.key : rideId,
           businessModel: normalizedBusinessModel,
+          rideWalletCredited: rideWalletCreditConfirmed,
         );
         if (record == null) {
           continue;
@@ -414,6 +460,7 @@ class DriverFinanceService {
           rideData: entry.value,
           recordId: _rideIdFromRecord(entry.value, fallbackId: entry.key),
           businessModel: normalizedBusinessModel,
+          rideWalletCredited: rideWalletCreditConfirmed,
         );
         if (record == null || earningsById.containsKey(record.id)) {
           continue;
@@ -428,6 +475,7 @@ class DriverFinanceService {
           rideData: entry.value,
           recordId: _rideIdFromRecord(entry.value, fallbackId: entry.key),
           businessModel: normalizedBusinessModel,
+          rideWalletCredited: rideWalletCreditConfirmed,
         );
         if (record == null || earningsById.containsKey(record.id)) {
           continue;
@@ -443,12 +491,12 @@ class DriverFinanceService {
         );
 
       final withdrawals = _buildWithdrawalRecords(
-        driverData: driverData,
+        driverId: normalizedDriverId,
         payoutDestination: payoutDestination,
         rawCollections: <Map<String, dynamic>>[
-          _map(optionalSnapshots[5]?.value),
           _map(optionalSnapshots[6]?.value),
-          _map(optionalSnapshots[7]?.value),
+          _map(driverData['withdrawals']),
+          _map(driverData['withdrawal_requests']),
         ],
       );
 
@@ -542,7 +590,7 @@ class DriverFinanceService {
               legacyEarningsData['monthlyEarnings'],
             ]);
 
-      final totalCreditedAmount = earnings.fold<double>(
+      final tripEarnings = earnings.fold<double>(
         0,
         (double sum, DriverEarningRecord record) =>
             record.countsTowardWallet ? sum + record.netEarning : sum,
@@ -554,34 +602,67 @@ class DriverFinanceService {
                 ? sum + record.amount
                 : sum,
       );
-      final pendingWithdrawalAmount = withdrawals.fold<double>(
-        0,
-        (double sum, DriverWithdrawalRecord record) {
-          final status = record.status;
-          return status == DriverWithdrawalStatus.pending ||
-                  status == DriverWithdrawalStatus.processing
-              ? sum + record.amount
-              : sum;
-        },
+      final pendingWithdrawalAmount =
+          driverPendingWithdrawalTotal(withdrawals);
+
+      final storedWalletBalanceNgn = storedWalletBalanceFromWalletData(
+        walletData,
+        legacyEarningsData: legacyEarningsData,
+        walletsNodeLoaded: walletsNodeLoaded,
+      );
+      final walletLedgerTotals = walletsNodeLoaded
+          ? walletLedgerTotalsFromRtdb(walletData)
+          : const WalletLedgerTotals(totalCredits: 0, totalDebits: 0);
+      final totalWalletCredits = walletLedgerTotals.totalCredits;
+      final totalWalletDebits = walletsNodeLoaded
+          ? walletLedgerTotals.totalDebits
+          : totalWithdrawnAmount;
+
+      final totalWalletBalance =
+          driverWalletTotalBalanceNgn(storedWalletBalanceNgn);
+      final currentWalletBalance = driverWalletAvailableBalanceNgn(
+        storedWalletBalanceNgn: storedWalletBalanceNgn,
+        pendingWithdrawals: pendingWithdrawalAmount,
       );
 
-      final derivedWalletBalance =
-          totalCreditedAmount - totalWithdrawnAmount - pendingWithdrawalAmount;
-      final storedWalletBalance = _doubleOrNull(
-        walletData['balance'] ??
-            walletData['currentBalance'] ??
-            legacyEarningsData['walletBalance'] ??
-            legacyEarningsData['currentWalletBalance'],
-      );
-      final currentWalletBalance = earnings.isNotEmpty || withdrawals.isNotEmpty
-          ? (derivedWalletBalance < 0 ? 0.0 : derivedWalletBalance)
-          : (storedWalletBalance ?? 0.0);
+      final walletTransactionList = walletsNodeLoaded
+          ? walletTransactionsFromRtdb(walletData)
+          : const <DriverWalletTransaction>[];
 
-      final walletTransactions = _buildWalletTransactions(
-        walletData: walletData,
-        earnings: earnings,
-        withdrawals: withdrawals,
+      debugPrint(
+        'DRIVER_WITHDRAWAL_HISTORY_REFRESHED '
+        'driverId=$normalizedDriverId '
+        'withdrawalCount=${withdrawals.length} '
+        'pendingReserved=$pendingWithdrawalAmount '
+        'availableBalance=$currentWalletBalance',
       );
+      if (pendingWithdrawalAmount > 0) {
+        debugPrint(
+          'DRIVER_WITHDRAWAL_PENDING_RESERVED '
+          'driverId=$normalizedDriverId '
+          'amount=$pendingWithdrawalAmount',
+        );
+      }
+      if (kDebugMode) {
+        debugPrint(
+          '[DriverFinance][wallet] driverId=$normalizedDriverId '
+          'walletsNodeLoaded=$walletsNodeLoaded '
+          'walletDataKeys=${walletData.keys.toList()} '
+          'storedWalletBalanceNgn=$storedWalletBalanceNgn '
+          'rawWalletsBalance=$rawWalletsBalance '
+          'currentWalletBalance=$currentWalletBalance '
+          'totalWalletCredits=$totalWalletCredits '
+          'totalWalletDebits=$totalWalletDebits '
+          'tripEarnings=$tripEarnings '
+          'walletTxCount=${walletTransactionList.length}',
+        );
+        if (!walletsNodeLoaded) {
+          debugPrint(
+            '[DriverFinance][wallet] wallets/$normalizedDriverId read returned null '
+            '(likely RTDB permission-denied — deploy database.rules.json wallets read rule)',
+          );
+        }
+      }
 
       final hasLiveBackendData = earnings.isNotEmpty ||
           withdrawals.isNotEmpty ||
@@ -599,13 +680,17 @@ class DriverFinanceService {
         todayEarnings: todayEarnings,
         weeklyEarnings: weeklyEarnings,
         monthlyEarnings: monthlyEarnings,
+        totalWalletBalance: totalWalletBalance,
         currentWalletBalance: currentWalletBalance,
-        totalCreditedAmount: totalCreditedAmount,
+        totalWalletCredits: totalWalletCredits,
+        totalWalletDebits: totalWalletDebits,
+        tripEarnings: tripEarnings,
+        totalCreditedAmount: tripEarnings,
         totalWithdrawnAmount: totalWithdrawnAmount,
         pendingWithdrawals: pendingWithdrawalAmount,
         earnings: earnings,
         withdrawals: withdrawals,
-        walletTransactions: walletTransactions,
+        walletTransactions: walletTransactionList,
         payoutDestination: payoutDestination,
         hasLiveBackendData: hasLiveBackendData,
         businessManagedWithdrawalsBlocked: businessManagedWithdrawalsBlocked,
@@ -622,9 +707,78 @@ class DriverFinanceService {
     }
   }
 
-  Future<void> createWithdrawalRequest({
+  Future<Map<String, dynamic>> fetchWithdrawalFeePreview({
+    required String entityType,
+    required double amount,
+  }) async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'getWithdrawalFeePreview',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+    );
+    final result = await callable.call(<String, dynamic>{
+      'entity_type': entityType,
+      'entityType': entityType,
+      'amount': amount,
+    });
+    final data = result.data;
+    if (data is! Map) {
+      throw StateError('withdrawal_fee_preview_invalid_response');
+    }
+    final map = Map<String, dynamic>.from(data);
+    if (map['success'] != true && map['success'] != 1) {
+      final reason = '${map['reason'] ?? 'withdrawal_fee_preview_failed'}'.trim();
+      throw StateError(reason.isEmpty ? 'withdrawal_fee_preview_failed' : reason);
+    }
+    return map;
+  }
+
+  /// Applies a newly created pending withdrawal to [snapshot] until RTDB refresh catches up.
+  DriverFinanceSnapshot snapshotWithNewPendingWithdrawal(
+    DriverFinanceSnapshot snapshot, {
+    required String withdrawalId,
+    required double requestedAmount,
+  }) {
+    return snapshotWithWithdrawalRow(
+      snapshot,
+      DriverWithdrawalRecord(
+        id: withdrawalId.trim(),
+        amount: requestedAmount,
+        requestDate: DateTime.now(),
+        processedDate: null,
+        status: DriverWithdrawalStatus.pending,
+        payoutReference: '',
+        destination: snapshot.payoutDestination,
+      ),
+    );
+  }
+
+  /// Inserts [row] when absent and recomputes pending totals / spendable balance.
+  DriverFinanceSnapshot snapshotWithWithdrawalRow(
+    DriverFinanceSnapshot snapshot,
+    DriverWithdrawalRecord row,
+  ) {
+    return driverSnapshotWithWithdrawalRow(snapshot, row);
+  }
+
+  /// Keeps optimistic/pending rows from [prior] when [refreshed] RTDB query has not caught up.
+  DriverFinanceSnapshot mergeRetainingOptimisticPending({
+    required DriverFinanceSnapshot refreshed,
+    DriverFinanceSnapshot? prior,
+    Set<String> pinnedWithdrawalIds = const <String>{},
+  }) {
+    return mergeDriverSnapshotsRetainingOptimisticPending(
+      refreshed: refreshed,
+      prior: prior,
+      pinnedWithdrawalIds: pinnedWithdrawalIds,
+    );
+  }
+
+  Future<Map<String, dynamic>> createWithdrawalRequest({
     required String driverId,
     required double amount,
+    bool userConfirmed = true,
   }) async {
     final normalizedDriverId = driverId.trim();
     if (normalizedDriverId.isEmpty) {
@@ -642,6 +796,8 @@ class DriverFinanceService {
     );
     final result = await callable.call(<String, dynamic>{
       'amount': amount,
+      'user_confirmed': userConfirmed,
+      'userConfirmed': userConfirmed,
     });
     final data = result.data;
     if (data is! Map) {
@@ -652,12 +808,84 @@ class DriverFinanceService {
       final reason = '${map['reason'] ?? 'withdrawal_failed'}'.trim();
       throw StateError(reason.isEmpty ? 'withdrawal_failed' : reason);
     }
+    final withdrawalId = _text(map['withdrawalId'] ?? map['withdrawal_id']);
+    final requestedAmount = _firstPositiveDouble(<dynamic>[
+      map['requested_amount'],
+      map['requestedAmount'],
+      amount,
+    ]);
+    debugPrint(
+      'DRIVER_WITHDRAWAL_REQUEST_CREATED '
+      'driverId=$normalizedDriverId '
+      'withdrawalId=$withdrawalId '
+      'requestedAmount=$requestedAmount',
+    );
+    debugPrint(
+      'DRIVER_WITHDRAWAL_REQUEST_RESPONSE '
+      'driverId=$normalizedDriverId '
+      'withdrawalId=$withdrawalId '
+      'status=${_text(map['status']).isEmpty ? 'pending' : _text(map['status'])} '
+      'success=true',
+    );
+    return map;
+  }
+
+  /// Loads Flutterwave NGN banks for withdrawal destination picker.
+  Future<List<DriverWithdrawalBankOption>> fetchWithdrawalBanks() async {
+    final callable = FirebaseFunctions.instanceFor(
+      region: 'us-central1',
+    ).httpsCallable(
+      'driverListWithdrawalBanks',
+      options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
+    );
+    final result = await callable.call(<String, dynamic>{});
+    final data = result.data;
+    if (data is! Map) {
+      throw StateError('withdrawal_banks_invalid_response');
+    }
+    final map = Map<String, dynamic>.from(data);
+    if (map['success'] != true && map['success'] != 1) {
+      final reason = '${map['reason'] ?? 'withdrawal_banks_failed'}'.trim();
+      throw StateError(reason.isEmpty ? 'withdrawal_banks_failed' : reason);
+    }
+    final rawBanks = map['banks'];
+    if (rawBanks is! List) {
+      return const <DriverWithdrawalBankOption>[];
+    }
+    final banks = <DriverWithdrawalBankOption>[];
+    for (final entry in rawBanks) {
+      if (entry is! Map) {
+        continue;
+      }
+      final row = Map<String, dynamic>.from(entry);
+      final code = _text(row['account_bank'] ?? row['bank_code'] ?? row['code']);
+      final name = _text(row['name'] ?? row['bank_name']);
+      if (code.length < 3 || name.isEmpty) {
+        continue;
+      }
+      banks.add(
+        DriverWithdrawalBankOption(
+          code: code,
+          name: name,
+          accountBank: code,
+        ),
+      );
+    }
+    banks.sort(
+      (DriverWithdrawalBankOption a, DriverWithdrawalBankOption b) =>
+          a.name.compareTo(b.name),
+    );
+    return banks;
   }
 
   /// Persists payout account via [driverUpdateWithdrawalDestination] (authoritative).
   Future<void> saveWithdrawalDestination({
     required DriverPayoutDestination destination,
   }) async {
+    final bankCode = destination.bankCode.trim();
+    if (bankCode.length < 3) {
+      throw StateError('bank_selection_required');
+    }
     final callable = FirebaseFunctions.instanceFor(
       region: 'us-central1',
     ).httpsCallable(
@@ -665,24 +893,26 @@ class DriverFinanceService {
       options: HttpsCallableOptions(timeout: const Duration(seconds: 45)),
     );
     final payload = <String, dynamic>{
-      'bank_name': destination.bankName.trim(),
       'account_holder_name': destination.accountName.trim(),
+      'account_name': destination.accountName.trim(),
       'account_number': destination.accountNumber.trim().replaceAll(RegExp(r'\s+'), ''),
+      'bank_code': bankCode,
+      'account_bank': bankCode,
     };
-    final bc = destination.bankCode.trim();
-    if (bc.isNotEmpty) {
-      payload['bank_code'] = bc;
-    }
+    debugPrint('DRIVER_WITHDRAW_DEST_SAVE_START');
     final result = await callable.call(payload);
     final data = result.data;
     if (data is! Map) {
+      debugPrint('DRIVER_WITHDRAW_DEST_SAVE_FAIL reason=destination_invalid_response');
       throw StateError('destination_invalid_response');
     }
     final map = Map<String, dynamic>.from(data);
     if (map['success'] != true && map['success'] != 1) {
       final reason = '${map['reason'] ?? 'destination_save_failed'}'.trim();
+      debugPrint('DRIVER_WITHDRAW_DEST_SAVE_FAIL reason=$reason');
       throw StateError(reason.isEmpty ? 'destination_save_failed' : reason);
     }
+    debugPrint('DRIVER_WITHDRAW_DEST_SAVE_SUCCESS');
   }
 
   Future<rtdb.DataSnapshot?> _optionalSnapshot({
@@ -706,7 +936,11 @@ class DriverFinanceService {
       todayEarnings: 0,
       weeklyEarnings: 0,
       monthlyEarnings: 0,
+      totalWalletBalance: 0,
       currentWalletBalance: 0,
+      totalWalletCredits: 0,
+      totalWalletDebits: 0,
+      tripEarnings: 0,
       totalCreditedAmount: 0,
       totalWithdrawnAmount: 0,
       pendingWithdrawals: 0,
@@ -759,8 +993,24 @@ class DriverFinanceService {
     return _map(value);
   }
 
+  bool _isDriverWithdrawRequestRecord(
+    Map<String, dynamic> rawRecord,
+    String driverId,
+  ) {
+    final entityType =
+        _text(rawRecord['entity_type'] ?? rawRecord['entityType']).toLowerCase();
+    if (entityType.isNotEmpty && entityType != 'driver') {
+      return false;
+    }
+    final rowDriver = _text(rawRecord['driver_id'] ?? rawRecord['driverId']);
+    if (rowDriver.isNotEmpty && rowDriver != driverId) {
+      return false;
+    }
+    return true;
+  }
+
   List<DriverWithdrawalRecord> _buildWithdrawalRecords({
-    required Map<String, dynamic> driverData,
+    required String driverId,
     required DriverPayoutDestination payoutDestination,
     required List<Map<String, dynamic>> rawCollections,
   }) {
@@ -769,10 +1019,15 @@ class DriverFinanceService {
     for (final collection in rawCollections) {
       for (final entry in _recordEntries(collection)) {
         final rawRecord = entry.value;
+        if (!_isDriverWithdrawRequestRecord(rawRecord, driverId)) {
+          continue;
+        }
         final amount = _firstPositiveDouble(<dynamic>[
-          rawRecord['amount'],
-          rawRecord['requestedAmount'],
           rawRecord['requested_amount'],
+          rawRecord['requestedAmount'],
+          rawRecord['amount_ngn'],
+          rawRecord['amountNgn'],
+          rawRecord['amount'],
         ]);
         if (amount <= 0) {
           continue;
@@ -805,7 +1060,7 @@ class DriverFinanceService {
             rawRecord['updatedAt'],
             rawRecord['updated_at'],
           ]),
-          status: _withdrawalStatus(_text(rawRecord['status'])),
+          status: driverWithdrawalStatusFromRtdb(_text(rawRecord['status'])),
           payoutReference: _firstText(<dynamic>[
             rawRecord['payoutReference'],
             rawRecord['payout_reference'],
@@ -814,6 +1069,13 @@ class DriverFinanceService {
             rawRecord['transaction_reference'],
           ]),
           destination: destination,
+        );
+        debugPrint(
+          'DRIVER_WITHDRAWAL_ROW_STATUS '
+          'driverId=$driverId '
+          'withdrawalId=$id '
+          'status=${_text(rawRecord['status'])} '
+          'amount=$amount',
         );
       }
     }
@@ -827,107 +1089,12 @@ class DriverFinanceService {
     return withdrawals;
   }
 
-  List<DriverWalletTransaction> _buildWalletTransactions({
-    required Map<String, dynamic> walletData,
-    required List<DriverEarningRecord> earnings,
-    required List<DriverWithdrawalRecord> withdrawals,
-  }) {
-    final transactions = <DriverWalletTransaction>[];
-
-    for (final entry in _recordEntries(_map(walletData['transactions']))) {
-      final record = entry.value;
-      final type = _walletTransactionType(_text(record['type']));
-      final amount = _doubleOrNull(record['amount']) ?? 0;
-      if (amount == 0) {
-        continue;
-      }
-      transactions.add(
-        DriverWalletTransaction(
-          id: entry.key,
-          date: _dateFromCandidates(<dynamic>[
-            record['timestamp'],
-            record['createdAt'],
-            record['created_at'],
-            record['updatedAt'],
-          ]),
-          type: type,
-          amount: amount,
-          statusLabel: _text(record['status']).isNotEmpty
-              ? _titleCase(_text(record['status']))
-              : 'Completed',
-          referenceLabel: _firstText(<dynamic>[
-            record['reference'],
-            record['rideId'],
-            record['ride_id'],
-            record['note'],
-          ]),
-        ),
-      );
-    }
-
-    if (transactions.isEmpty) {
-      for (final record in earnings) {
-        if (!record.countsTowardWallet) {
-          continue;
-        }
-        if (record.commission > 0.009) {
-          transactions.add(
-            DriverWalletTransaction(
-              id: 'commission_${record.id}',
-              date: record.tripDate,
-              type: DriverWalletTransactionType.commissionDebit,
-              amount: -record.commission,
-              statusLabel: 'Deducted',
-              referenceLabel: record.rideId,
-            ),
-          );
-        }
-        transactions.add(
-          DriverWalletTransaction(
-            id: 'credit_${record.id}',
-            date: record.tripDate,
-            type: DriverWalletTransactionType.tripCredit,
-            amount: record.grossFare,
-            statusLabel: 'Trip fare (gross)',
-            referenceLabel: record.rideId,
-          ),
-        );
-      }
-
-      for (final record in withdrawals) {
-        final type = record.status == DriverWithdrawalStatus.paid
-            ? DriverWalletTransactionType.withdrawalProcessed
-            : DriverWalletTransactionType.withdrawalRequest;
-        transactions.add(
-          DriverWalletTransaction(
-            id: 'withdrawal_${record.id}',
-            date: record.status == DriverWithdrawalStatus.paid
-                ? record.processedDate ?? record.requestDate
-                : record.requestDate,
-            type: type,
-            amount: -record.amount,
-            statusLabel: record.status.label,
-            referenceLabel: record.payoutReference.isNotEmpty
-                ? record.payoutReference
-                : record.id,
-          ),
-        );
-      }
-    }
-
-    transactions.sort(
-      (DriverWalletTransaction a, DriverWalletTransaction b) =>
-          (b.date?.millisecondsSinceEpoch ?? 0)
-              .compareTo(a.date?.millisecondsSinceEpoch ?? 0),
-    );
-    return transactions;
-  }
-
   DriverEarningRecord? _earningFromRecord({
     required Map<String, dynamic> rawRecord,
     required Map<String, dynamic> rideData,
     required String recordId,
     required Map<String, dynamic> businessModel,
+    required bool Function(String rideId) rideWalletCredited,
   }) {
     final rawSettlement = _map(rawRecord['settlement']);
     final rideSettlement = _map(rideData['settlement']);
@@ -1020,12 +1187,19 @@ class DriverFinanceService {
         rideData['status'],
       ]),
     );
+    final resolvedRideId = _rideIdFromRecord(rawRecord, fallbackId: recordId);
+    final walletCreditConfirmed = rideWalletCredited(resolvedRideId);
     final explicitCountsTowardWallet =
         _boolOrNull(rawRecord['countsTowardWallet']) ??
             _boolOrNull(settlementContext['countsTowardWallet']);
     final countsTowardWallet =
         driverSettlementCountsTowardWallet(settlementStatus) &&
+            walletCreditConfirmed &&
             (explicitCountsTowardWallet ?? true);
+    final displaySettlementStatus =
+        driverSettlementCountsTowardWallet(settlementStatus) && !walletCreditConfirmed
+            ? 'wallet_pending'
+            : settlementStatus;
 
     return DriverEarningRecord(
       id: recordId,
@@ -1067,7 +1241,7 @@ class DriverFinanceService {
           _map(rideData['settlement'])['paymentMethod'],
         ]),
       ),
-      settlementStatus: settlementStatus,
+      settlementStatus: displaySettlementStatus,
       countsTowardWallet: countsTowardWallet,
     );
   }
@@ -1086,6 +1260,8 @@ class DriverFinanceService {
       _map(record['payout_account']),
       _map(record['withdrawalAccount']),
       _map(record['withdrawal_account']),
+      _map(record['withdrawal_destination_snapshot']),
+      _map(record['withdrawalDestinationSnapshot']),
       _map(record['settlementAccount']),
       _map(record['settlement_account']),
       _map(record['bankAccount']),
@@ -1119,7 +1295,7 @@ class DriverFinanceService {
       ),
       bankCode: _firstMappedText(
         candidateMaps,
-        <String>['bankCode', 'bank_code'],
+        <String>['bankCode', 'bank_code', 'account_bank', 'accountBank'],
       ),
     );
   }
@@ -1218,49 +1394,6 @@ class DriverFinanceService {
       fallbackId,
     ]);
     return rideId;
-  }
-
-  DriverWithdrawalStatus _withdrawalStatus(String value) {
-    return switch (value.trim().toLowerCase()) {
-      'pending' || 'requested' || 'submitted' => DriverWithdrawalStatus.pending,
-      'processing' ||
-      'processing_payment' ||
-      'in_progress' =>
-        DriverWithdrawalStatus.processing,
-      'paid' ||
-      'processed' ||
-      'completed' ||
-      'success' =>
-        DriverWithdrawalStatus.paid,
-      'failed' || 'rejected' || 'cancelled' => DriverWithdrawalStatus.failed,
-      _ => DriverWithdrawalStatus.unknown,
-    };
-  }
-
-  DriverWalletTransactionType _walletTransactionType(String value) {
-    return switch (value.trim().toLowerCase()) {
-      'trip_credit' ||
-      'credit' ||
-      'earning' =>
-        DriverWalletTransactionType.tripCredit,
-      'commission_debit' ||
-      'commission' ||
-      'commission_deduction' =>
-        DriverWalletTransactionType.commissionDebit,
-      'withdrawal_request' ||
-      'withdraw_request' ||
-      'withdrawal' =>
-        DriverWalletTransactionType.withdrawalRequest,
-      'withdrawal_processed' ||
-      'withdrawal_paid' ||
-      'payout' =>
-        DriverWalletTransactionType.withdrawalProcessed,
-      'driver_flutterwave_wallet_topup' ||
-      'flutterwave_wallet_topup' ||
-      'wallet_topup' =>
-        DriverWalletTransactionType.flutterwaveTopUp,
-      _ => DriverWalletTransactionType.adjustment,
-    };
   }
 
   String _normalizedSettlementStatus(String value) {
