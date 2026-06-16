@@ -12,6 +12,8 @@ import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:share_plus/share_plus.dart';
+
 import 'compliance/rider_identity_booking_gate.dart';
 import 'onboarding/rider_selfie_verification_screen.dart';
 import 'config/rider_app_config.dart';
@@ -39,16 +41,31 @@ import 'support/rider_fare_support.dart';
 import 'support/friendly_firebase_errors.dart';
 import 'support/rtdb_flow_debug_log.dart';
 import 'support/startup_rtdb_support.dart';
-import 'trip_sync/delivery_state_machine.dart';
+import 'support/phone_requirement.dart';
+import 'screens/rider_profile_edit_screen.dart';
 import 'trip_sync/trip_state_machine.dart';
 import 'services/delivery_chat_service.dart';
 import 'services/delivery_report_service.dart';
 import 'services/call_service.dart';
 import 'widgets/delivery_chat_sheet.dart';
+import 'widgets/ride_chat_sheet.dart' show RideChatImageSource;
 import 'widgets/delivery_live_tracking_panel.dart';
+import 'widgets/driver_safety_card.dart';
+import 'support/driver_vehicle_display.dart';
+import 'services/vehicle_mismatch_report_service.dart';
+import 'widgets/delivery_rating_sheet.dart';
+import 'support/chat_image_debug.dart';
 import 'support/delivery_chat_support.dart';
+import 'support/delivery_call_support.dart';
+import 'support/delivery_call_ui_controller.dart';
+import 'support/delivery_cancel_reasons.dart';
+import 'safe_share_origin.dart';
 import 'services/rider_compliance_service.dart';
 import 'widgets/rider_identity_verification_banner.dart';
+import 'services/native_places_service.dart';
+import 'share_trip_rtdb.dart';
+import 'widgets/native_places_autocomplete_field.dart';
+import 'widgets/rider_discount_selector.dart';
 import 'widgets/rider_flutterwave_va_payment_sheet.dart';
 
 class DispatchRequestScreen extends StatefulWidget {
@@ -73,6 +90,12 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   final TextEditingController _recipientPhoneController =
       TextEditingController();
   final ImagePicker _dispatchPhotoPicker = ImagePicker();
+  final NativePlacesService _nativePlaces = NativePlacesService.instance;
+
+  LatLng? _pickupLocation;
+  LatLng? _dropoffLocation;
+  bool _sharingDeliveryLink = false;
+  bool _applyingDispatchPlace = false;
 
   final rtdb.DatabaseReference _rideRequestsRef = rtdb.FirebaseDatabase.instance
       .ref('ride_requests');
@@ -108,16 +131,24 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       TripSafetyTelemetryService();
 
   StreamSubscription<rtdb.DatabaseEvent>? _activeRequestSubscription;
+  Timer? _deliveryWaitFeePollTimer;
   StreamSubscription<rtdb.DatabaseEvent>? _deliveryChatSubscription;
   final ValueNotifier<List<DeliveryChatMessage>> _deliveryChatMessages =
       ValueNotifier<List<DeliveryChatMessage>>(<DeliveryChatMessage>[]);
   final DeliveryChatService _deliveryChatService = DeliveryChatService();
   final DeliveryReportService _deliveryReportService = DeliveryReportService();
   final CallService _callService = CallService();
+  late final DeliveryCallUiController _deliveryCallUi;
   bool _isStartingDeliveryCall = false;
   String? _activeRequestId;
   Map<String, dynamic>? _activeRequest;
+  String? _paymentPromptedForDeliveryId;
+  String? _ratingPromptedForDeliveryId;
   RiderBackendPricingQuote? _dispatchFarePreview;
+  List<RiderDiscountOption> _deliveryDiscountOptions = <RiderDiscountOption>[];
+  String? _selectedDeliveryDiscountId;
+  bool _deliveryDiscountsLoading = false;
+  bool _dispatchQuoteLoading = false;
   DispatchPhotoSelectedAsset? _packagePhotoAsset;
   String _selectedLaunchCity = RiderLaunchScope.defaultBrowseCity;
   List<RolloutDeliveryRegionModel> _rolloutCatalog =
@@ -134,6 +165,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   bool _rolloutBannerDismissed = false;
   bool _loading = true;
   bool _submitting = false;
+  bool _uploadingPackagePhoto = false;
   /// Hosted Flutterwave card link vs Flutterwave virtual-account bank transfer.
   String _dispatchPaymentMethod = 'flutterwave';
   bool _restoringActiveRequest = false;
@@ -168,6 +200,18 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   @override
   void initState() {
     super.initState();
+    _deliveryCallUi = DeliveryCallUiController(
+      callService: _callService,
+      getOverlayContext: () => mounted ? context : null,
+      onBusyChanged: (busy) {
+        if (mounted) {
+          setState(() => _isStartingDeliveryCall = busy);
+        }
+      },
+    );
+    _deliveryCallUi.registerLifecycle();
+    _pickupController.addListener(_onPickupAddressEdited);
+    _dropoffController.addListener(_onDropoffAddressEdited);
     unawaited(_hydrateRiderTrustState(persist: true));
     unawaited(_restoreActiveDispatchRequest());
     unawaited(_loadIdentityCompliance());
@@ -349,8 +393,13 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
   @override
   void dispose() {
     _activeRequestSubscription?.cancel();
+    unawaited(_deliveryCallUi.dispose());
+    _deliveryWaitFeePollTimer?.cancel();
+    _deliveryWaitFeePollTimer = null;
     _deliveryChatSubscription?.cancel();
     _deliveryChatMessages.dispose();
+    _pickupController.removeListener(_onPickupAddressEdited);
+    _dropoffController.removeListener(_onDropoffAddressEdited);
     _pickupController.dispose();
     _dropoffController.dispose();
     _packageController.dispose();
@@ -679,10 +728,25 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     return null;
   }
 
+  int _deliveryWaitFeeNgn(Map<String, dynamic>? row) {
+    if (row == null) {
+      return 0;
+    }
+    final raw = row['wait_fee_total'] ?? row['waitFeeTotal'];
+    if (raw is num) {
+      return raw.round();
+    }
+    return int.tryParse('$raw') ?? 0;
+  }
+
   bool _deliveryPaymentVerified(Map<String, dynamic> row) {
     final ps = (row['payment_status']?.toString() ?? '').trim().toLowerCase();
     final tid = (row['payment_transaction_id']?.toString() ?? '').trim();
-    return (ps == 'verified' || ps == 'paid') && tid.isNotEmpty;
+    final verified = row['payment_verified'] == true;
+    if (ps == 'paid_verified' && tid.isNotEmpty) {
+      return verified;
+    }
+    return ps == 'verified' && tid.isNotEmpty && verified;
   }
 
   Future<Map<String, dynamic>?> _runFlutterwaveDeliveryCheckout({
@@ -803,13 +867,34 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     );
   }
 
+  void _safeNavigatorPop(BuildContext navigatorContext, [Object? result]) {
+    if (!mounted) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      final navigator = Navigator.of(navigatorContext);
+      if (!navigator.canPop()) {
+        return;
+      }
+      debugPrint('DISPATCH_NAVIGATION_LOCK_GUARD pop');
+      navigator.pop(result);
+    });
+  }
+
   String _deliveryCreateUserMessage(String reason) {
     switch (reason) {
+      case 'package_photo_upload_failed':
+      case 'package_photo_upload_timeout':
+        return 'Package photo upload failed. Check your connection and try again.';
       case 'package_description_required':
       case 'package_description_too_long':
         return 'Please describe your package in 3–2000 characters.';
       case 'recipient_name_required':
-        return 'Please enter the recipient’s name.';
+      case 'recipient_name_invalid':
+        return 'Please enter the recipient’s name (at least 2 characters) or leave it blank.';
       case 'recipient_phone_invalid':
         return 'Enter a valid recipient phone number.';
       case 'invalid_category':
@@ -833,6 +918,16 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       case 'invalid_fare':
       case 'fare_above_limit':
         return 'The delivery fare could not be calculated. Try again.';
+      case 'fare_quote_mismatch':
+        return 'The delivery fare changed. Review the price and try again.';
+      case 'pricing_total_mismatch':
+        return 'The delivery total did not match the quoted price. Try again.';
+      case 'invalid_distance':
+        return 'Dispatch distance could not be validated. Refresh the route and try again.';
+      case 'invalid_eta':
+        return 'Dispatch ETA could not be validated. Refresh the route and try again.';
+      case 'invalid_pickup_or_dropoff':
+        return 'Pickup and dropoff locations are required.';
       case 'unsupported_payment_method':
         return 'This payment method is not available for delivery yet.';
       case 'payment_failed':
@@ -863,6 +958,31 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     messenger
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Shows a profile-completion block with a direct "Edit profile" action.
+  void _promptCompleteProfile(String riderId, String message) {
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) {
+      return;
+    }
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(seconds: 6),
+          action: SnackBarAction(
+            label: 'Edit profile',
+            onPressed: () {
+              RiderProfileEditScreen.open(context, riderId: riderId);
+            },
+          ),
+        ),
+      );
   }
 
   String _dispatchPackagePhotoUrl(Map<String, dynamic>? request) {
@@ -938,8 +1058,26 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     if (source == _DispatchItemPhotoSource.camera) {
       final permission = await Permission.camera.request();
       if (!permission.isGranted) {
-        _showMessage('Camera permission is required to add an item photo.');
-        return null;
+        _showMessage(
+          'Camera permission denied. Opening your photo gallery instead.',
+        );
+        final galleryImage = await _dispatchPhotoPicker.pickImage(
+          source: ImageSource.gallery,
+          maxWidth: 1800,
+          imageQuality: 88,
+        );
+        if (galleryImage == null) {
+          return null;
+        }
+        return DispatchPhotoSelectedAsset(
+          localPath: galleryImage.path,
+          fileName: galleryImage.name.isNotEmpty
+              ? galleryImage.name
+              : galleryImage.path.split('/').last,
+          mimeType: _mimeTypeForPath(galleryImage.path),
+          fileSizeBytes: File(galleryImage.path).lengthSync(),
+          source: 'gallery',
+        );
       }
     }
 
@@ -984,7 +1122,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             child: InkWell(
               borderRadius: BorderRadius.circular(22),
               onTap: () {
-                Navigator.of(sheetContext).pop(source);
+                _safeNavigatorPop(sheetContext, source);
               },
               child: Ink(
                 padding: const EdgeInsets.all(18),
@@ -1145,7 +1283,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                       ),
                       IconButton(
                         onPressed: () {
-                          Navigator.of(dialogContext).pop();
+                          _safeNavigatorPop(dialogContext);
                         },
                         icon: const Icon(Icons.close_rounded),
                       ),
@@ -1221,6 +1359,11 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
               if (timedOut) {
                 return;
               }
+              final unpaidTimedOut =
+                  await _cancelUnpaidAssignedDispatchIfNeeded(requestId, data);
+              if (unpaidTimedOut) {
+                return;
+              }
             }
 
             if (!mounted) {
@@ -1235,8 +1378,24 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                 _submitting = false;
                 _loading = false;
                 _startDeliveryChatListener(requestId);
+                _ensureDeliveryCallListener(requestId);
+                _syncDeliveryWaitFeePolling(data, requestId);
               }
             });
+            if (data != null &&
+                DeliveryStateMachine.snapshotShowsAssignedDriver(data) &&
+                !_deliveryPaymentVerified(data) &&
+                _paymentPromptedForDeliveryId != requestId) {
+              _paymentPromptedForDeliveryId = requestId;
+              unawaited(_collectPaymentAfterDriverAssigned(requestId, data));
+            }
+            if (data != null &&
+                DeliveryStateMachine.canonicalStateFromSnapshot(data) ==
+                    DeliveryLifecycleState.completed &&
+                _ratingPromptedForDeliveryId != requestId) {
+              _ratingPromptedForDeliveryId = requestId;
+              unawaited(_promptRiderDeliveryRating(requestId));
+            }
           },
           onError: (Object error) {
             debugPrint('[Dispatch] request listener failed: $error');
@@ -1271,6 +1430,96 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     // Client-side RTDB transactions for assignment release are disabled; lifecycle
     // is enforced by Cloud Functions.
     return false;
+  }
+
+  int _unpaidPaymentDeadlineAt(Map<String, dynamic>? request) {
+    if (request == null) {
+      return 0;
+    }
+    for (final key in <String>['payment_deadline_at', 'paymentDeadlineAt']) {
+      final value = _parseTimestamp(request[key]);
+      if (value > 0) {
+        return value;
+      }
+    }
+    return 0;
+  }
+
+  bool _unpaidAssignedPaymentPastDeadline(Map<String, dynamic>? request) {
+    if (request == null || _deliveryPaymentVerified(request)) {
+      return false;
+    }
+    final deadline = _unpaidPaymentDeadlineAt(request);
+    if (deadline <= 0) {
+      return false;
+    }
+    final state = DeliveryStateMachine.canonicalStateFromSnapshot(request);
+    if (state != DeliveryLifecycleState.driverAssigned) {
+      return false;
+    }
+    return DateTime.now().millisecondsSinceEpoch >= deadline;
+  }
+
+  Future<bool> _cancelUnpaidAssignedDispatchIfNeeded(
+    String requestId,
+    Map<String, dynamic>? request,
+  ) async {
+    if (!_unpaidAssignedPaymentPastDeadline(request)) {
+      return false;
+    }
+    try {
+      await _deliveryCloud.cancelDeliveryRequest(
+        deliveryId: requestId,
+        cancelReason: 'payment_timeout',
+      );
+    } catch (error) {
+      debugPrint('[Dispatch] unpaid payment timeout cancel failed: $error');
+      return false;
+    }
+    if (!mounted) {
+      return true;
+    }
+    setState(() {
+      _activeRequestId = null;
+      _activeRequest = null;
+      _paymentPromptedForDeliveryId = null;
+    });
+    _showMessage(
+      'Payment was not completed in time. This delivery was cancelled.',
+    );
+    debugPrint(
+      '[Dispatch] unpaid payment timeout requestId=$requestId',
+    );
+    return true;
+  }
+
+  Future<void> _promptRiderDeliveryRating(String deliveryId) async {
+    if (!mounted) {
+      return;
+    }
+    final result = await showDeliveryRatingSheet(
+      context,
+      title: 'Rate your biker',
+      subtitle: 'How was this delivery?',
+    );
+    if (result == null || !mounted) {
+      return;
+    }
+    try {
+      final res = await _deliveryCloud.submitDeliveryRating(
+        deliveryId: deliveryId,
+        rating: result.rating,
+        comment: result.comment.isNotEmpty ? result.comment : null,
+      );
+      if (!riderDeliveryCallableSucceeded(res)) {
+        final reason = riderDeliveryCallableReason(res);
+        if (reason != 'rating_duplicate') {
+          _showMessage('Could not save rating ($reason).');
+        }
+      }
+    } catch (error) {
+      debugPrint('[Dispatch] rider rating failed: $error');
+    }
   }
 
   Future<bool> _cancelTimedOutDispatchRequestIfNeeded(
@@ -1325,6 +1574,382 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       }
     }
     throw const FormatException('address_not_found');
+  }
+
+  List<NativePlaceSuggestion> _fallbackPlaceSuggestions(String query) {
+    final suggestions = RiderLaunchScope.buildFallbackSearchSuggestions(
+      query,
+      preferredCity: _selectedLaunchCity,
+    );
+    return suggestions
+        .map(
+          (suggestion) => NativePlaceSuggestion.manual(
+            primaryText: suggestion.primaryText,
+            secondaryText: suggestion.secondaryText,
+            fullText: suggestion.fullText,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<LatLng?> _resolvePlaceLocation({
+    required NativePlaceSuggestion suggestion,
+    required String description,
+  }) async {
+    if (!suggestion.isManualSuggestion && suggestion.placeId.isNotEmpty) {
+      final details = await _nativePlaces.fetchPlaceDetails(suggestion.placeId);
+      if (details != null &&
+          details.latitude != 0 &&
+          details.longitude != 0) {
+        return LatLng(details.latitude, details.longitude);
+      }
+    }
+    for (final query in RiderLaunchScope.buildSearchQueries(
+      description,
+      preferredCity: _selectedLaunchCity,
+    )) {
+      try {
+        final locations = await locationFromAddress(query);
+        if (locations.isNotEmpty) {
+          final location = locations.first;
+          return LatLng(location.latitude, location.longitude);
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  void _onPickupAddressEdited() {
+    if (_applyingDispatchPlace) {
+      return;
+    }
+    _pickupLocation = null;
+  }
+
+  void _onDropoffAddressEdited() {
+    if (_applyingDispatchPlace) {
+      return;
+    }
+    _dropoffLocation = null;
+  }
+
+  Future<void> _handleDispatchPlaceSelection({
+    required NativePlaceSuggestion suggestion,
+    required bool isPickup,
+  }) async {
+    final description = suggestion.fullText.trim();
+    if (description.isEmpty) {
+      return;
+    }
+    final point = await _resolvePlaceLocation(
+      suggestion: suggestion,
+      description: description,
+    );
+    if (point == null) {
+      _showMessage('Unable to resolve that location. Try another suggestion.');
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _applyingDispatchPlace = true;
+      if (isPickup) {
+        _pickupController.text = description;
+        _pickupLocation = point;
+      } else {
+        _dropoffController.text = description;
+        _dropoffLocation = point;
+      }
+      _applyingDispatchPlace = false;
+    });
+    unawaited(_refreshDispatchFarePreview());
+  }
+
+  String? _dispatchMarketSlug() {
+    if (_rolloutSelectionComplete &&
+        (_rolloutDispatchMarketId ?? '').trim().isNotEmpty) {
+      final dm =
+          RiderServiceAreaConfig.marketForCity(_rolloutDispatchMarketId).city;
+      return normalizeRideMarketSlug(dm) ?? dm.trim().toLowerCase();
+    }
+    return null;
+  }
+
+  Future<void> _loadDeliveryDiscountOptions({required int baseAmountNgn}) async {
+    if (baseAmountNgn <= 0) return;
+    setState(() => _deliveryDiscountsLoading = true);
+    try {
+      final res = await _rideCloud.listRiderDiscounts(
+        appliesTo: 'delivery',
+        baseAmountNgn: baseAmountNgn,
+      );
+      if (!mounted) return;
+      final options = <RiderDiscountOption>[];
+      if (res['success'] == true && res['discounts'] is List) {
+        for (final row in res['discounts'] as List) {
+          if (row is Map) {
+            final opt = RiderDiscountOption.fromMap(
+              Map<String, dynamic>.from(row),
+            );
+            if (opt.discountId.isNotEmpty) {
+              options.add(opt);
+            }
+          }
+        }
+      }
+      setState(() {
+        _deliveryDiscountOptions = options;
+        _deliveryDiscountsLoading = false;
+        if (_selectedDeliveryDiscountId != null &&
+            !options.any((o) => o.discountId == _selectedDeliveryDiscountId)) {
+          _selectedDeliveryDiscountId = null;
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() => _deliveryDiscountsLoading = false);
+    }
+  }
+
+  Future<void> _refreshDispatchFarePreview() async {
+    final pickup = _pickupLocation;
+    final dropoff = _dropoffLocation;
+    final dispatchSlug = _dispatchMarketSlug();
+    if (pickup == null || dropoff == null || dispatchSlug == null) {
+      return;
+    }
+    final distanceKm =
+        Geolocator.distanceBetween(
+          pickup.latitude,
+          pickup.longitude,
+          dropoff.latitude,
+          dropoff.longitude,
+        ) /
+        1000;
+    if (distanceKm <= 0) return;
+    final etaMin = estimateRiderDurationMinutes(distanceKm: distanceKm);
+    if (mounted) setState(() => _dispatchQuoteLoading = true);
+    try {
+      final quoteRes = await _deliveryCloud
+          .quoteDeliveryFare(
+            market: dispatchSlug,
+            distanceKm: distanceKm,
+            etaMin: etaMin,
+            discountId: _selectedDeliveryDiscountId,
+          )
+          .timeout(const Duration(seconds: 20));
+      final dispatchQuote =
+          RiderBackendPricingQuote.tryFromDeliveryQuoteResponse(
+        quoteRes,
+        market: dispatchSlug,
+        distanceKm: distanceKm,
+        etaMin: etaMin,
+      );
+      if (!mounted) return;
+      setState(() {
+        _dispatchFarePreview = dispatchQuote;
+        _dispatchQuoteLoading = false;
+        if (_selectedDeliveryDiscountId != null &&
+            dispatchQuote?.showsDiscount != true) {
+          _selectedDeliveryDiscountId = null;
+        }
+      });
+      if (dispatchQuote != null) {
+        unawaited(
+          _loadDeliveryDiscountOptions(
+            baseAmountNgn: dispatchQuote.preDiscountSubtotalNgn,
+          ),
+        );
+      }
+    } catch (_) {
+      if (mounted) setState(() => _dispatchQuoteLoading = false);
+    }
+  }
+
+  Future<void> _handleSelectDeliveryDiscount(RiderDiscountOption option) async {
+    setState(() => _selectedDeliveryDiscountId = option.discountId);
+    await _refreshDispatchFarePreview();
+  }
+
+  Future<void> _handleClearDeliveryDiscount() async {
+    setState(() => _selectedDeliveryDiscountId = null);
+    await _refreshDispatchFarePreview();
+  }
+
+  Future<({double lat, double lng})> _resolveDispatchPoint({
+    required String address,
+    required LatLng? selected,
+    required String label,
+  }) async {
+    if (selected != null) {
+      return (lat: selected.latitude, lng: selected.longitude);
+    }
+    try {
+      return await _resolveCoordinates(address);
+    } on FormatException {
+      throw FormatException('address_not_found:$label');
+    }
+  }
+
+  String _fleetOperatorLabel(Map<String, dynamic>? request) {
+    if (request == null) {
+      return '';
+    }
+    final ownerName = request['fleet_owner_name']?.toString().trim() ??
+        request['fleetOwnerName']?.toString().trim() ??
+        '';
+    if (ownerName.isEmpty) {
+      return '';
+    }
+    return 'Fleet operator: $ownerName';
+  }
+
+  String _dispatchDriverPhone(Map<String, dynamic>? request) {
+    if (request == null) {
+      return '';
+    }
+    for (final key in <String>[
+      'assigned_driver_phone',
+      'driver_phone',
+      'driverPhone',
+    ]) {
+      final v = request[key]?.toString().trim() ?? '';
+      if (v.length >= 8) {
+        return v;
+      }
+    }
+    return '';
+  }
+
+  Future<void> _callDispatchDriverPhone() async {
+    final phone = _dispatchDriverPhone(_activeRequest);
+    if (phone.isEmpty) {
+      _showMessage('Driver phone is not available yet.');
+      return;
+    }
+    final uri = Uri(scheme: 'tel', path: phone);
+    if (!await canLaunchUrl(uri)) {
+      _showMessage('Could not start a phone call on this device.');
+      return;
+    }
+    await launchUrl(uri);
+  }
+
+  Future<void> _cancelActiveDispatchDelivery() async {
+    final deliveryId = _activeRequestId?.trim();
+    if (deliveryId == null || deliveryId.isEmpty) {
+      return;
+    }
+    final state = DeliveryStateMachine.canonicalStateFromSnapshot(_activeRequest);
+    final paid = _activeRequest != null && _deliveryPaymentVerified(_activeRequest!);
+    final afterPickup = state == DeliveryLifecycleState.pickedUp ||
+        state == DeliveryLifecycleState.onDelivery ||
+        state == DeliveryLifecycleState.arrivedDropoff;
+    final picked = await showDeliveryCancelReasonSheet(
+      context: context,
+      title: afterPickup ? 'Why request cancellation?' : 'Why cancel delivery?',
+      options: riderDeliveryCancelReasons,
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(afterPickup ? 'Request cancellation?' : 'Cancel delivery?'),
+        content: Text(
+          afterPickup
+              ? 'Your package is already picked up. Support will review your request.'
+              : paid
+                  ? 'Payment was verified. Cancelling before pickup may queue a refund review.'
+                  : 'Cancel this delivery? The assigned biker will be released.',
+        ),
+        actions: <Widget>[
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(afterPickup ? 'Request cancel' : 'Cancel delivery'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    try {
+      final res = await _deliveryCloud.cancelDeliveryRequest(
+        deliveryId: deliveryId,
+        cancelReason: afterPickup ? 'request_cancel' : picked.code,
+        cancelReasonCode: picked.code,
+        cancelReasonText: picked.text,
+        cancelNote: picked.note,
+        requestOnly: afterPickup,
+      );
+      if (!riderDeliveryCallableSucceeded(res)) {
+        _showMessage(
+          'Could not cancel (${riderDeliveryCallableReason(res)}).',
+        );
+        return;
+      }
+      final reason = riderDeliveryCallableReason(res);
+      if (reason == 'delivery_cancel_requested') {
+        _showMessage('Cancellation request sent to your biker.');
+      } else {
+        _showMessage('Delivery cancelled.');
+        setState(() {
+          _activeRequestId = null;
+          _activeRequest = null;
+        });
+      }
+    } catch (error) {
+      _showMessage('Could not cancel delivery: $error');
+    }
+  }
+
+  Future<void> _shareActiveDeliveryLink({Rect? sharePositionOrigin}) async {
+    final deliveryId = _activeRequestId?.trim();
+    if (deliveryId == null || deliveryId.isEmpty || _sharingDeliveryLink) {
+      return;
+    }
+    setState(() => _sharingDeliveryLink = true);
+    try {
+      final trackToken =
+          _activeRequest?['track_token']?.toString().trim() ?? '';
+      String shareUrl;
+      if (trackToken.isNotEmpty) {
+        shareUrl = 'https://nexride.africa/track/$trackToken';
+        debugPrint('DELIVERY_SHARE_TOKEN_SUCCESS deliveryId=$deliveryId reused=true');
+      } else {
+        final tokenResp =
+            await _rideCloud.createTripShareToken(deliveryId: deliveryId);
+        if (!riderRideCallableSucceeded(tokenResp)) {
+          debugPrint(
+            'DELIVERY_SHARE_FAIL deliveryId=$deliveryId reason=${riderRideCallableReason(tokenResp)}',
+          );
+          _showMessage(
+            'Unable to create a live tracking link (${riderRideCallableReason(tokenResp)}).',
+          );
+          return;
+        }
+        shareUrl = tokenResp['share_url']?.toString().trim() ??
+            'https://nexride.africa/track/${tokenResp['track_token']?.toString().trim() ?? ''}';
+        debugPrint('DELIVERY_SHARE_TOKEN_SUCCESS deliveryId=$deliveryId reused=false');
+      }
+      final origin = safeShareOrigin(context, override: sharePositionOrigin);
+      debugPrint('DELIVERY_SHARE_SHEET_OPEN deliveryId=$deliveryId');
+      await Share.share(
+        'Track this NexRide delivery live: $shareUrl',
+        subject: 'NexRide delivery tracking',
+        sharePositionOrigin: origin,
+      );
+    } catch (error) {
+      debugPrint('DELIVERY_SHARE_FAIL deliveryId=$deliveryId reason=$error');
+      _showMessage('Unable to share live tracking right now ($error).');
+    } finally {
+      if (mounted) {
+        setState(() => _sharingDeliveryLink = false);
+      }
+    }
   }
 
   String? _normalizeCity(String? rawValue) {
@@ -1420,11 +2045,26 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     return null;
   }
 
+  String _dispatchMatchingStatusLabel(Map<String, dynamic>? request) {
+    if (request == null || request.isEmpty) {
+      return DeliveryStateMachine.uiStatusLabel(DeliveryLifecycleState.searching);
+    }
+    final state = DeliveryStateMachine.canonicalStateFromSnapshot(request);
+    if (state == DeliveryLifecycleState.searching) {
+      final matchDebug = request['match_debug'];
+      if (matchDebug is Map) {
+        final offersWritten = matchDebug['offers_written'];
+        if (offersWritten is num && offersWritten.toInt() == 0) {
+          return 'No nearby dispatch driver yet. We are still searching.';
+        }
+      }
+    }
+    return DeliveryStateMachine.uiStatusLabel(state);
+  }
+
   String _statusLabel(String status) {
     if (_activeRequest != null && _activeRequest!.isNotEmpty) {
-      return DeliveryStateMachine.uiStatusLabel(
-        DeliveryStateMachine.canonicalStateFromSnapshot(_activeRequest),
-      );
+      return _dispatchMatchingStatusLabel(_activeRequest);
     }
     return riderServiceStatusLabel(RiderServiceType.dispatchDelivery, status);
   }
@@ -1440,8 +2080,67 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     ).format(DateTime.fromMillisecondsSinceEpoch(timestamp).toLocal());
   }
 
+  Future<void> _collectPaymentAfterDriverAssigned(
+    String deliveryId,
+    Map<String, dynamic> row,
+  ) async {
+    if (_deliveryPaymentVerified(row)) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    _showMessage('Driver assigned — complete payment to continue.');
+    try {
+      if (_dispatchPaymentMethod == 'bank_transfer') {
+        final bankReg = await _rideCloud
+            .registerBankTransferPayment(deliveryId: deliveryId)
+            .timeout(const Duration(seconds: 45));
+        if (bankReg['success'] != true) {
+          _showMessage(
+            riderRideCallableUserMessage(Map<String, dynamic>.from(bankReg)),
+          );
+          return;
+        }
+        final autoVa =
+            bankReg['automated_va'] == true ||
+            bankReg['automated_va'] == 'true' ||
+            bankReg['automated_va'] == 1;
+        if (autoVa && mounted) {
+          await showModalBottomSheet<bool>(
+            context: context,
+            isScrollControlled: true,
+            showDragHandle: true,
+            builder: (ctx) => RiderFlutterwaveVaPaymentSheet(
+              databaseRef: _deliveryRequestsRef.child(deliveryId),
+              sheetTitle: 'Pay for dispatch',
+              initialRegistration: Map<String, dynamic>.from(bankReg),
+              onRegenerate: () => _rideCloud.registerBankTransferPayment(
+                deliveryId: deliveryId,
+              ),
+            ),
+          );
+        }
+      } else {
+        await _runFlutterwaveDeliveryCheckout(
+          deliveryId: deliveryId,
+          deliveryRow: row,
+        );
+      }
+    } catch (error) {
+      debugPrint('DISPATCH_PAYMENT_AFTER_ASSIGN_FAIL error=$error');
+      if (mounted) {
+        _showMessage('Payment could not be started. Try again from this screen.');
+      }
+    }
+  }
+
   Future<void> _submitDispatchRequest() async {
-    if (_submitting || _hasActiveRequest) {
+    debugPrint('DISPATCH_REQUEST_SUBMIT_START');
+    if (_submitting || _uploadingPackagePhoto || _hasActiveRequest) {
+      if (_uploadingPackagePhoto) {
+        debugPrint('DISPATCH_SUBMIT_BLOCKED_PHOTO_UPLOAD');
+      }
       return;
     }
 
@@ -1457,21 +2156,39 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     if (pickupAddress.isEmpty ||
         dropoffAddress.isEmpty ||
         packageDetails.isEmpty) {
+      debugPrint('DISPATCH_REQUEST_VALIDATION_FAIL reason=required_fields_missing');
       _showMessage('Pickup, dropoff, and package details are required.');
       return;
     }
-    if (recipientName.length < 2) {
-      _showMessage('Recipient name must be at least 2 characters.');
+    if (recipientName.isNotEmpty && recipientName.length < 2) {
+      debugPrint('DISPATCH_REQUEST_VALIDATION_FAIL reason=recipient_name_invalid');
+      _showMessage('Recipient name must be at least 2 characters or left blank.');
       return;
     }
-    if (recipientPhone.length < 8 || recipientPhone.length > 20) {
-      _showMessage('Enter a valid recipient phone number (8–20 digits).');
+    if (recipientPhone.isNotEmpty &&
+        (recipientPhone.length < 8 || recipientPhone.length > 20)) {
+      debugPrint('DISPATCH_REQUEST_VALIDATION_FAIL reason=recipient_phone_invalid');
+      _showMessage('Enter a valid recipient phone (8–20 digits) or leave it blank.');
       return;
     }
 
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       _showMessage('Please log in again to send a request.');
+      return;
+    }
+
+    final profileBlock = await RiderProfileRequirement.evaluate(user.uid);
+    if (profileBlock != RiderProfileBlock.none) {
+      final reason = profileBlock == RiderProfileBlock.missingPhone
+          ? 'missing_phone'
+          : 'missing_photo';
+      debugPrint('PROFILE_REQUIREMENT_BLOCKED reason=$reason');
+      _promptCompleteProfile(
+        user.uid,
+        RiderProfileRequirement.messageFor(
+            profileBlock, 'send a delivery request'),
+      );
       return;
     }
 
@@ -1536,8 +2253,16 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     debugPrint('[Dispatch] submit tapped');
 
     try {
-      final pickup = await _resolveCoordinates(pickupAddress);
-      final dropoff = await _resolveCoordinates(dropoffAddress);
+      final pickup = await _resolveDispatchPoint(
+        address: pickupAddress,
+        selected: _pickupLocation,
+        label: 'pickup',
+      );
+      final dropoff = await _resolveDispatchPoint(
+        address: dropoffAddress,
+        selected: _dropoffLocation,
+        label: 'dropoff',
+      );
       final city = await _resolveServiceCity(
         pickupAddress: pickupAddress,
         dropoffAddress: dropoffAddress,
@@ -1563,22 +2288,56 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
       DispatchUploadedPhoto? uploadedPackagePhoto;
       if (packagePhotoAsset != null) {
-        uploadedPackagePhoto = await _dispatchPhotoUploadService
-            .uploadRidePhoto(
-              rideId: photoUploadKey,
-              actorId: user.uid,
-              category: 'package_photo',
-              asset: packagePhotoAsset,
-              onProgress: (double progress) {
-                if (!mounted) {
-                  _packagePhotoUploadProgress = progress.clamp(0.08, 0.94);
-                  return;
-                }
-                setState(() {
-                  _packagePhotoUploadProgress = progress.clamp(0.08, 0.94);
-                });
-              },
-            );
+        debugPrint('DISPATCH_PHOTO_UPLOAD_START');
+        if (mounted) {
+          setState(() {
+            _uploadingPackagePhoto = true;
+            _packagePhotoUploadProgress = 0.08;
+          });
+        }
+        try {
+          uploadedPackagePhoto = await _dispatchPhotoUploadService
+              .uploadRidePhoto(
+                rideId: photoUploadKey,
+                actorId: user.uid,
+                category: 'package_photo',
+                asset: packagePhotoAsset,
+                onProgress: (double progress) {
+                  final clamped = progress.clamp(0.08, 0.94);
+                  if (!mounted) {
+                    _packagePhotoUploadProgress = clamped;
+                    return;
+                  }
+                  setState(() {
+                    _packagePhotoUploadProgress = clamped;
+                  });
+                },
+              )
+              .timeout(const Duration(seconds: 90));
+          debugPrint(
+            'DISPATCH_PHOTO_UPLOAD_SUCCESS '
+            'bytes=${uploadedPackagePhoto.fileSizeBytes}',
+          );
+          if (mounted) {
+            setState(() => _packagePhotoUploadProgress = 1);
+          }
+        } on TimeoutException {
+          debugPrint('DISPATCH_PHOTO_UPLOAD_FAIL reason=timeout');
+          throw StateError('package_photo_upload_timeout');
+        } catch (error, stackTrace) {
+          debugPrint('DISPATCH_PHOTO_UPLOAD_FAIL error=$error');
+          debugPrintStack(
+            label: 'DISPATCH_PHOTO_UPLOAD_FAIL',
+            stackTrace: stackTrace,
+          );
+          throw StateError('package_photo_upload_failed');
+        } finally {
+          if (mounted) {
+            setState(() => _uploadingPackagePhoto = false);
+          } else {
+            _uploadingPackagePhoto = false;
+          }
+        }
       }
 
       final distanceKm =
@@ -1589,11 +2348,34 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             dropoff.lng,
           ) /
           1000;
-      final fareBreakdown = calculateRiderFare(
-        serviceKey: RiderServiceType.dispatchDelivery.key,
-        city: dispatchSlug,
-        distanceKm: distanceKm,
-      );
+      final etaMin = estimateRiderDurationMinutes(distanceKm: distanceKm);
+      final quoteRes = await _deliveryCloud
+          .quoteDeliveryFare(
+            market: dispatchSlug,
+            distanceKm: distanceKm,
+            etaMin: etaMin,
+            discountId: _selectedDeliveryDiscountId,
+          )
+          .timeout(const Duration(seconds: 20));
+      final dispatchQuote =
+          RiderBackendPricingQuote.tryFromDeliveryQuoteResponse(quoteRes);
+      if (dispatchQuote == null || dispatchQuote.tripFareNgn <= 0) {
+        debugPrint(
+          '[RIDER_DELIVERY_QUOTE_FAIL] market=$dispatchSlug '
+          'distance_km=$distanceKm eta_min=$etaMin response=$quoteRes',
+        );
+        throw StateError(
+          'Could not load delivery pricing. Check your connection and try again.',
+        );
+      }
+      final tripFareNgn = dispatchQuote.tripFareNgn;
+      final bookingFeeNgn = dispatchQuote.platformFeeNgn;
+      final totalNgn = dispatchQuote.totalNgn > 0
+          ? dispatchQuote.totalNgn
+          : tripFareNgn + bookingFeeNgn;
+      if (mounted) {
+        setState(() => _dispatchFarePreview = dispatchQuote);
+      }
       final pickupArea = await _resolveAreaFromPoint(
         pickup.lat,
         pickup.lng,
@@ -1632,8 +2414,10 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       );
       debugPrint(
         '[RIDER_DELIVERY_CREATE] rider_id=${user.uid} market=$dispatchSlug '
-        'fare=${fareBreakdown.totalFare}',
+        'trip_fare=$tripFareNgn booking_fee=$bookingFeeNgn total_ngn=$totalNgn '
+        'distance_km=$distanceKm eta_min=$etaMin',
       );
+      debugPrint('DISPATCH_CREATE_CALL_START delivery market=$dispatchSlug');
       final createRes = await _deliveryCloud
           .createDeliveryRequest(<String, dynamic>{
             'market': dispatchSlug,
@@ -1645,25 +2429,46 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             },
             'pickup': pickupPayload,
             'dropoff': dropoffPayload,
-            'fare': fareBreakdown.totalFare,
+            'fare': tripFareNgn,
+            'trip_fare_ngn': tripFareNgn,
+            'delivery_fee_ngn': tripFareNgn,
+            'booking_fee_ngn': bookingFeeNgn,
+            'platform_fee_ngn': bookingFeeNgn,
+            'total_ngn': totalNgn,
+            if (_selectedDeliveryDiscountId != null)
+              'discount_id': _selectedDeliveryDiscountId,
+            if (dispatchQuote.discountAppliedNgn > 0)
+              'discount_applied_ngn': dispatchQuote.discountAppliedNgn,
             'currency': 'NGN',
-            'distance_km': fareBreakdown.distanceKm,
-            'eta_min': fareBreakdown.durationMin,
-            'eta_minutes': fareBreakdown.durationMin,
+            'distance_km': double.parse(distanceKm.toStringAsFixed(2)),
+            'eta_min': double.parse(etaMin.toStringAsFixed(2)),
+            'eta_minutes': double.parse(etaMin.toStringAsFixed(2)),
             'payment_method':
                 _dispatchPaymentMethod == 'bank_transfer'
                     ? 'bank_transfer'
                     : 'flutterwave',
             'package_description': packageDetails,
-            'recipient_name': recipientName,
-            'recipient_phone': recipientPhone,
+            if (recipientName.isNotEmpty) 'recipient_name': recipientName,
+            if (recipientPhone.isNotEmpty) 'recipient_phone': recipientPhone,
             'category': 'parcel',
             if (packagePhotoUrl.isNotEmpty) 'package_photo_url': packagePhotoUrl,
           })
           .timeout(const Duration(seconds: 45));
+      debugPrint(
+        'DISPATCH_CREATE_CALL_RESPONSE success=${createRes['success']} reason=${createRes['reason']}',
+      );
       if (!riderDeliveryCallableSucceeded(createRes)) {
         final reason = riderDeliveryCallableReason(createRes);
-        throw StateError(reason);
+        debugPrint(
+          'DISPATCH_CREATE_CALL_FAIL reason=$reason response=$createRes',
+        );
+        final serverMsg = createRes['message']?.toString().trim();
+        final mapped = _deliveryCreateUserMessage(reason);
+        final detail = serverMsg?.isNotEmpty == true &&
+                mapped == 'Unable to send your dispatch request right now.'
+            ? serverMsg!
+            : mapped;
+        throw StateError(detail);
       }
       final effectiveRequestId =
           (createRes['deliveryId'] ?? createRes['delivery_id'] ?? '')
@@ -1681,65 +2486,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       if (livePayload == null) {
         throw StateError('dispatch_invalid_after_create');
       }
-      Map<String, dynamic> workingPayload =
-          Map<String, dynamic>.from(livePayload);
-      if (!_deliveryPaymentVerified(workingPayload)) {
-        if (_dispatchPaymentMethod == 'bank_transfer') {
-          final bankReg = await _rideCloud.registerBankTransferPayment(
-            deliveryId: effectiveRequestId,
-          );
-          if (bankReg['success'] != true) {
-            debugPrint(
-              '[DispatchPayment] bank VA register failed '
-              'userMsg=${riderRideCallableUserMessage(Map<String, dynamic>.from(bankReg))} '
-              'raw=$bankReg',
-            );
-            await _deliveryCloud.cancelDeliveryRequest(
-              deliveryId: effectiveRequestId,
-              cancelReason: 'payment_failed',
-            );
-            throw StateError('payment_failed');
-          }
-          final autoVa =
-              bankReg['automated_va'] == true ||
-              bankReg['automated_va'] == 'true' ||
-              bankReg['automated_va'] == 1;
-          if (autoVa && mounted) {
-            await showModalBottomSheet<bool>(
-              context: context,
-              isScrollControlled: true,
-              showDragHandle: true,
-              builder: (ctx) => RiderFlutterwaveVaPaymentSheet(
-                databaseRef: _deliveryRequestsRef.child(effectiveRequestId),
-                sheetTitle: 'Pay for dispatch',
-                initialRegistration: Map<String, dynamic>.from(bankReg),
-                onRegenerate: () => _rideCloud.registerBankTransferPayment(
-                  deliveryId: effectiveRequestId,
-                ),
-              ),
-            );
-          }
-          final refreshed =
-              await _deliveryRequestsRef.child(effectiveRequestId).get();
-          final refreshedMap = _asStringDynamicMap(refreshed.value);
-          if (refreshedMap != null) {
-            workingPayload = refreshedMap;
-          }
-        } else {
-          final paidRow = await _runFlutterwaveDeliveryCheckout(
-            deliveryId: effectiveRequestId,
-            deliveryRow: workingPayload,
-          );
-          if (paidRow == null) {
-            await _deliveryCloud.cancelDeliveryRequest(
-              deliveryId: effectiveRequestId,
-              cancelReason: 'payment_failed',
-            );
-            throw StateError('payment_failed');
-          }
-          workingPayload = paidRow;
-        }
-      }
+      final workingPayload = Map<String, dynamic>.from(livePayload);
       debugPrint('[Dispatch] delivery created deliveryId=$effectiveRequestId');
       await _tripSafetyService.registerRideRequest(
         rideId: effectiveRequestId,
@@ -1763,34 +2510,47 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         _activeRequest = workingPayload;
       });
 
-      _showMessage('Dispatch request sent successfully.');
+      _showMessage(
+        'Dispatch request sent. Bikers nearby will be notified.',
+      );
     } on FormatException catch (error) {
-      final message = error.message == 'unsupported_city'
-          ? RiderLaunchScope.tripRequestAvailabilityMessage
-          : 'Please use clearer pickup and dropoff addresses.';
+      debugPrint('DISPATCH_REQUEST_GEO_FAIL message=${error.message}');
+      final message = switch (error.message) {
+        'unsupported_city' => RiderLaunchScope.tripRequestAvailabilityMessage,
+        'address_not_found:pickup' =>
+          'Pickup address could not be found. Choose a suggestion or enter a clearer address.',
+        'address_not_found:dropoff' =>
+          'Dropoff address could not be found. Choose a suggestion or enter a clearer address.',
+        'address_not_found' =>
+          'Pickup or dropoff address could not be found. Choose a suggestion from the list.',
+        _ => 'Please use clearer pickup and dropoff addresses.',
+      };
       if (!mounted) {
         return;
       }
       _showMessage(message);
     } catch (error, stackTrace) {
+      debugPrint('DISPATCH_CREATE_CALL_FAIL error=$error');
       debugPrint('[Dispatch] submit failed: $error');
       debugPrintStack(label: '[Dispatch] submit stack', stackTrace: stackTrace);
       if (!mounted) {
         return;
       }
       final message = error is StateError
-          ? _deliveryCreateUserMessage(error.message)
+          ? (error.message?.trim().isNotEmpty == true
+              ? error.message!.trim()
+              : 'Unable to send your dispatch request right now.')
           : friendlyFirebaseError(error, debugLabel: 'dispatchSubmit');
       _showMessage(message);
     } finally {
+      _submitting = false;
+      _uploadingPackagePhoto = false;
+      _packagePhotoUploadProgress = 0;
+      debugPrint('DISPATCH_SUBMIT_RECOVERED');
       if (mounted) {
         setState(() {
-          _submitting = false;
           _loading = false;
-          _packagePhotoUploadProgress = 0;
         });
-      } else {
-        _packagePhotoUploadProgress = 0;
       }
     }
   }
@@ -1804,11 +2564,15 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
       _activeRequestId = null;
       _activeRequest = null;
       _dispatchFarePreview = null;
+      _deliveryDiscountOptions = <RiderDiscountOption>[];
+      _selectedDeliveryDiscountId = null;
       _packagePhotoAsset = null;
       _packagePhotoUploadProgress = 0;
     });
     _pickupController.clear();
     _dropoffController.clear();
+    _pickupLocation = null;
+    _dropoffLocation = null;
     _packageController.clear();
     _recipientNameController.clear();
     _recipientPhoneController.clear();
@@ -1883,7 +2647,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
               style: TextStyle(color: Colors.black.withValues(alpha: 0.56)),
             ),
           ],
-          if (_submitting && selectedAsset != null) ...<Widget>[
+          if (_uploadingPackagePhoto && selectedAsset != null) ...<Widget>[
             const SizedBox(height: 14),
             ClipRRect(
               borderRadius: BorderRadius.circular(999),
@@ -1904,6 +2668,15 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                 fontWeight: FontWeight.w600,
               ),
             ),
+          ] else if (_submitting && selectedAsset != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              'Sending dispatch request...',
+              style: TextStyle(
+                color: Colors.black.withValues(alpha: 0.62),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ],
           const SizedBox(height: 16),
           SizedBox(
@@ -1917,7 +2690,9 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                   borderRadius: BorderRadius.circular(18),
                 ),
               ),
-              onPressed: _submitting ? null : _selectPackagePhoto,
+              onPressed: (_submitting || _uploadingPackagePhoto)
+                  ? null
+                  : _selectPackagePhoto,
               icon: const Icon(Icons.add_a_photo_outlined),
               label: const Text(
                 'Add item photo',
@@ -1941,7 +2716,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                         borderRadius: BorderRadius.circular(18),
                       ),
                     ),
-                    onPressed: _submitting
+                    onPressed: (_submitting || _uploadingPackagePhoto)
                         ? null
                         : () {
                             unawaited(
@@ -1962,7 +2737,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: TextButton(
-                    onPressed: _submitting
+                    onPressed: (_submitting || _uploadingPackagePhoto)
                         ? null
                         : () {
                             setState(() {
@@ -1981,6 +2756,97 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         ],
       ),
     );
+  }
+
+  void _syncDeliveryWaitFeePolling(
+    Map<String, dynamic>? data,
+    String deliveryId,
+  ) {
+    final state = DeliveryStateMachine.canonicalStateFromSnapshot(data);
+    final shouldPoll =
+        state == DeliveryLifecycleState.driverArrivingPickup;
+    if (!shouldPoll) {
+      _deliveryWaitFeePollTimer?.cancel();
+      _deliveryWaitFeePollTimer = null;
+      return;
+    }
+    _deliveryWaitFeePollTimer ??= Timer.periodic(
+      const Duration(seconds: 30),
+      (_) async {
+        try {
+          await _deliveryCloud.applyDeliveryWaitFee(deliveryId: deliveryId);
+        } catch (e) {
+          debugPrint(
+            'DELIVERY_WAIT_FEE_POLL_FAIL deliveryId=$deliveryId reason=$e',
+          );
+        }
+      },
+    );
+    unawaited(
+      _deliveryCloud.applyDeliveryWaitFee(deliveryId: deliveryId).catchError(
+        (Object e) {
+          debugPrint(
+            'DELIVERY_WAIT_FEE_POLL_FAIL deliveryId=$deliveryId reason=$e',
+          );
+          return <String, dynamic>{};
+        },
+      ),
+    );
+  }
+
+  Future<String?> _sendDeliveryChatImage(
+    String deliveryId,
+    RideChatImageSource source,
+  ) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return 'Please log in before sending a photo.';
+    }
+    final useCamera = source == RideChatImageSource.camera;
+    if (useCamera) {
+      final cameraPermission = await Permission.camera.request();
+      if (!cameraPermission.isGranted) {
+        return 'Camera permission is required to take a photo.';
+      }
+    }
+    final picked = await _dispatchPhotoPicker.pickImage(
+      source: useCamera ? ImageSource.camera : ImageSource.gallery,
+      maxWidth: 1600,
+      imageQuality: 86,
+    );
+    if (picked == null) {
+      return null;
+    }
+    logChatImagePicked(
+      chatKind: 'delivery_chat',
+      threadId: deliveryId,
+      source: useCamera ? 'camera' : 'gallery',
+      localPath: picked.path,
+      actorId: user.uid,
+    );
+    try {
+      final uploaded = await _dispatchPhotoUploadService.uploadDeliveryChatPhoto(
+        deliveryId: deliveryId,
+        actorId: user.uid,
+        asset: DispatchPhotoSelectedAsset(
+          localPath: picked.path,
+          fileName: picked.name.isNotEmpty
+              ? picked.name
+              : picked.path.split('/').last,
+          mimeType: picked.path.toLowerCase().endsWith('.png')
+              ? 'image/png'
+              : 'image/jpeg',
+          fileSizeBytes: await picked.length(),
+          source: useCamera ? 'camera' : 'gallery',
+        ),
+      );
+      return _deliveryChatService.sendImage(
+        deliveryId: deliveryId,
+        imageUrl: uploaded.fileUrl,
+      );
+    } catch (e) {
+      return 'Unable to send this image right now.';
+    }
   }
 
   void _startDeliveryChatListener(String deliveryId) {
@@ -2029,6 +2895,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
               text: msg.text,
               retryMessageId: msg.id,
             ),
+            onSendImage: _sendDeliveryChatImage,
             onStartVoiceCall: () => unawaited(_startDeliveryCall()),
             showCallButton: DeliveryStateMachine.snapshotShowsAssignedDriver(
               _activeRequest,
@@ -2041,37 +2908,71 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     );
   }
 
-  Future<void> _startDeliveryCall() async {
-    final deliveryId = _activeRequestId;
+  void _ensureDeliveryCallListener(String deliveryId) {
     final user = FirebaseAuth.instance.currentUser;
-    if (deliveryId == null || user == null || _isStartingDeliveryCall) {
+    final driverId = DeliveryStateMachine.canonicalAssignedDriverId(
+      _activeRequest,
+    );
+    if (user == null || driverId.isEmpty) {
       return;
     }
-    setState(() => _isStartingDeliveryCall = true);
+    _deliveryCallUi.attach(
+      deliveryId: deliveryId,
+      riderUid: user.uid,
+      driverId: driverId,
+    );
+  }
+
+  Future<void> _startDeliveryCall() async {
+    final deliveryId = _activeRequestId;
+    if (deliveryId == null ||
+        _isStartingDeliveryCall ||
+        !isActiveDeliveryCallEligible(
+          deliveryId: deliveryId,
+          delivery: _activeRequest,
+        )) {
+      _showMessage('In-app call is not available yet.');
+      return;
+    }
     try {
-      await _callService.prefetchAgoraToken(
-        channelId: deliveryId,
-        uid: user.uid,
+      await _deliveryCallUi.startOutgoingCall(
+        deliveryId: deliveryId,
+        delivery: _activeRequest,
       );
-      final driverId =
-          DeliveryStateMachine.canonicalAssignedDriverId(_activeRequest);
-      if (driverId.isEmpty) {
-        _showMessage('Driver is not assigned yet.');
+    } on RideCallException catch (e) {
+      debugPrint('DELIVERY_CALL_FAIL deliveryId=$deliveryId reason=$e');
+      _showMessage(e.message);
+    } catch (e) {
+      debugPrint('DELIVERY_CALL_FAIL deliveryId=$deliveryId reason=$e');
+      final phone = _dispatchDriverPhone(_activeRequest);
+      if (!mounted) {
         return;
       }
-      await _callService.requestOutgoingVoiceCall(
-        rideId: deliveryId,
-        riderId: user.uid,
-        driverId: driverId,
-        startedBy: 'rider',
-      );
-    } catch (e) {
-      if (mounted) {
+      final usePhone = phone.isNotEmpty
+          ? await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('In-app call failed'),
+                content: Text(
+                  'Could not connect in the app ($e). Call the driver by phone instead?',
+                ),
+                actions: <Widget>[
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Call by phone'),
+                  ),
+                ],
+              ),
+            )
+          : false;
+      if (usePhone == true) {
+        await _callDispatchDriverPhone();
+      } else {
         _showMessage('Call could not start: $e');
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isStartingDeliveryCall = false);
       }
     }
   }
@@ -2100,6 +3001,24 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
     }
   }
 
+  Future<void> _reportVehicleMismatch({
+    required String driverId,
+    required String referenceId,
+    required Map<String, dynamic> request,
+    required DriverVehicleIdentity identity,
+  }) async {
+    final city = (request['city'] ?? request['market'] ?? '').toString().trim();
+    await VehicleMismatchReportService.report(
+      context: context,
+      riderId: FirebaseAuth.instance.currentUser?.uid ?? '',
+      driverId: driverId,
+      referenceId: referenceId,
+      isDelivery: true,
+      identity: identity,
+      city: city,
+    );
+  }
+
   Widget _buildActiveRequestCard() {
     final activeRequest = _activeRequest ?? <String, dynamic>{};
     final status = TripStateMachine.uiStatusFromSnapshot(activeRequest);
@@ -2107,12 +3026,22 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
         DeliveryStateMachine.canonicalStateFromSnapshot(activeRequest);
     final assignedDriverId =
         DeliveryStateMachine.canonicalAssignedDriverId(activeRequest);
-    final driverName = activeRequest['driver_name']?.toString().trim() ?? '';
     final dispatchDetails = _asStringDynamicMap(
       activeRequest['dispatch_details'],
     );
     final recipientSummary = _dispatchRecipientSummary(activeRequest);
     final packagePhotoUrl = _dispatchPackagePhotoUrl(activeRequest);
+    final proofUrl = (activeRequest['delivery_proof_photo_url'] ??
+            activeRequest['deliveryProofPhotoUrl'] ??
+            '')
+        .toString()
+        .trim();
+    final paymentPending = assignedDriverId.isNotEmpty &&
+        !_deliveryPaymentVerified(activeRequest);
+    final paymentBanner = paymentPending
+        ? 'Driver assigned — complete payment to continue.'
+        : null;
+    final requestId = _activeRequestId ?? '';
 
     return Container(
       padding: const EdgeInsets.all(22),
@@ -2160,6 +3089,25 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             ],
           ),
           const SizedBox(height: 14),
+          if (_activeRequestId != null)
+            OutlinedButton.icon(
+              onPressed: _sharingDeliveryLink
+                  ? null
+                  : () => unawaited(
+                        _shareActiveDeliveryLink(
+                          sharePositionOrigin: safeShareOrigin(context),
+                        ),
+                      ),
+              icon: _sharingDeliveryLink
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.share_outlined),
+              label: const Text('Share live tracking'),
+            ),
+          const SizedBox(height: 14),
           Text(
             'Request ID: ${_activeRequestId ?? ''}',
             style: TextStyle(
@@ -2167,20 +3115,49 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
               color: Colors.black.withValues(alpha: 0.55),
             ),
           ),
+          if (_deliveryWaitFeeNgn(activeRequest) > 0) ...<Widget>[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF8E1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFFE082)),
+              ),
+              child: Text(
+                'Waiting fee: ₦${_deliveryWaitFeeNgn(activeRequest)} '
+                '(added to your delivery total)',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF5D4037),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           DeliveryLiveTrackingPanel(
             deliveryData: activeRequest,
-            statusLabel: DeliveryStateMachine.uiStatusLabel(deliveryCanon),
-            driverName: driverName.isNotEmpty ? driverName : 'Driver',
-            driverRating: (activeRequest['rating'] is num)
-                ? (activeRequest['rating'] as num).toDouble()
-                : null,
-            vehicleLabel: activeRequest['car']?.toString() ?? '',
-            plate: activeRequest['plate']?.toString() ?? '',
+            statusLabel: _dispatchMatchingStatusLabel(activeRequest),
+            fleetBusinessName:
+                activeRequest['fleet_business_name']?.toString() ??
+                    activeRequest['fleetBusinessName']?.toString(),
+            fleetOperatorLabel: _fleetOperatorLabel(activeRequest),
             pickupLabel: activeRequest['pickup_address']?.toString() ?? '',
             dropoffLabel: activeRequest['destination_address']?.toString() ?? '',
             etaMinutes: activeRequest['eta_minutes'] is num
                 ? (activeRequest['eta_minutes'] as num).toInt()
+                : null,
+            paymentPendingBanner: paymentBanner,
+            deliveryProofPhotoUrl:
+                deliveryCanon == DeliveryLifecycleState.completed &&
+                        proofUrl.startsWith('https')
+                    ? proofUrl
+                    : null,
+            onPayNow: paymentPending && requestId.isNotEmpty
+                ? () => unawaited(
+                      _collectPaymentAfterDriverAssigned(requestId, activeRequest),
+                    )
                 : null,
             showChat: DeliveryStateMachine.isChatEligible(activeRequest),
             showCall: assignedDriverId.isNotEmpty,
@@ -2188,6 +3165,35 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
             onCall: () => unawaited(_startDeliveryCall()),
             onReport: _reportDeliveryIssue,
           ),
+          if (assignedDriverId.isNotEmpty &&
+              deliveryCanon != DeliveryLifecycleState.completed &&
+              deliveryCanon != DeliveryLifecycleState.cancelled) ...<Widget>[
+            const SizedBox(height: 12),
+            DriverSafetyCard(
+              driverId: assignedDriverId,
+              rideRecord: Map<String, dynamic>.from(activeRequest),
+              isDelivery: true,
+              onReportMismatch: (DriverVehicleIdentity identity) =>
+                  unawaited(_reportVehicleMismatch(
+                driverId: assignedDriverId,
+                referenceId: requestId,
+                request: activeRequest,
+                identity: identity,
+              )),
+            ),
+          ],
+          if (deliveryCanon != DeliveryLifecycleState.completed &&
+              deliveryCanon != DeliveryLifecycleState.cancelled) ...<Widget>[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _cancelActiveDispatchDelivery,
+              icon: const Icon(Icons.cancel_outlined, color: Colors.redAccent),
+              label: const Text(
+                'Cancel delivery',
+                style: TextStyle(color: Colors.redAccent),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           Builder(
             builder: (context) {
@@ -2283,14 +3289,6 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
               activeRequest['updated_at'] ?? activeRequest['created_at'],
             ),
           ),
-          if (driverName.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 12),
-            _DispatchInfoRow(
-              icon: Icons.person_outline,
-              label: 'Driver',
-              value: driverName,
-            ),
-          ],
           if (!_hasActiveRequest) ...<Widget>[
             const SizedBox(height: 18),
             SizedBox(
@@ -2319,7 +3317,18 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: !_submitting && !_uploadingPackagePhoto,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (didPop) {
+          return;
+        }
+        if (_submitting || _uploadingPackagePhoto) {
+          debugPrint('DISPATCH_NAVIGATION_LOCK_GUARD back_blocked');
+          _showMessage('Please wait — your request is still in progress.');
+        }
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFFF7F2EA),
       appBar: AppBar(
         backgroundColor: _gold,
@@ -2526,22 +3535,42 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                       ),
                       child: Column(
                         children: <Widget>[
-                          TextField(
+                          NativePlacesAutocompleteField(
                             controller: _pickupController,
-                            textInputAction: TextInputAction.next,
-                            decoration: _inputDecoration(
-                              label: 'Pickup address',
-                              icon: Icons.my_location,
-                            ),
+                            hintText: 'Pickup address',
+                            countryCode: RiderLaunchScope.countryCode,
+                            searchScopeLabel: RiderLaunchScope.launchCitiesLabel,
+                            queryTransform: (String query) =>
+                                RiderLaunchScope.normalizeAddressQuery(
+                                  query,
+                                  preferredCity: _selectedLaunchCity,
+                                ),
+                            fallbackSuggestionsBuilder: _fallbackPlaceSuggestions,
+                            onSelected: (suggestion) async {
+                              await _handleDispatchPlaceSelection(
+                                suggestion: suggestion,
+                                isPickup: true,
+                              );
+                            },
                           ),
                           const SizedBox(height: 14),
-                          TextField(
+                          NativePlacesAutocompleteField(
                             controller: _dropoffController,
-                            textInputAction: TextInputAction.next,
-                            decoration: _inputDecoration(
-                              label: 'Dropoff address',
-                              icon: Icons.location_on_outlined,
-                            ),
+                            hintText: 'Dropoff address',
+                            countryCode: RiderLaunchScope.countryCode,
+                            searchScopeLabel: RiderLaunchScope.launchCitiesLabel,
+                            queryTransform: (String query) =>
+                                RiderLaunchScope.normalizeAddressQuery(
+                                  query,
+                                  preferredCity: _selectedLaunchCity,
+                                ),
+                            fallbackSuggestionsBuilder: _fallbackPlaceSuggestions,
+                            onSelected: (suggestion) async {
+                              await _handleDispatchPlaceSelection(
+                                suggestion: suggestion,
+                                isPickup: false,
+                              );
+                            },
                           ),
                           const SizedBox(height: 14),
                           TextField(
@@ -2649,8 +3678,20 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                             const SizedBox(height: 12),
                             RiderBackendPricingBreakdown(
                               quote: _dispatchFarePreview!,
-                              tripFareLabel: 'Delivery fare',
+                              tripFareLabel: 'Delivery fee',
                               compact: true,
+                            ),
+                          ],
+                          if (_pickupLocation != null && _dropoffLocation != null) ...<Widget>[
+                            const SizedBox(height: 12),
+                            RiderDiscountSelector(
+                              discounts: _deliveryDiscountOptions,
+                              selectedDiscountId: _selectedDeliveryDiscountId,
+                              appliedQuote: _dispatchFarePreview,
+                              busy: _deliveryDiscountsLoading || _dispatchQuoteLoading,
+                              applyLabel: 'Apply delivery discount',
+                              onSelect: _handleSelectDeliveryDiscount,
+                              onClear: _handleClearDeliveryDiscount,
                             ),
                           ],
                           const SizedBox(height: 20),
@@ -2693,6 +3734,7 @@ class _DispatchRequestScreenState extends State<DispatchRequestScreen> {
                 ],
               ),
       ),
+    ),
     );
   }
 

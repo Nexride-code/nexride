@@ -20,6 +20,7 @@ import 'config/rider_trip_status_messages.dart';
 import 'config/rtdb_ride_request_contract.dart';
 import 'services/call_permissions.dart';
 import 'services/call_service.dart';
+import 'support/shared_call_listener_support.dart';
 import 'support/call_trace_support.dart';
 import 'services/dispatch_photo_upload_service.dart';
 import 'services/native_places_service.dart';
@@ -29,23 +30,33 @@ import 'services/rider_active_trip_session_service.dart';
 import 'services/rider_trust_bootstrap_service.dart';
 import 'services/rider_trust_rules_service.dart';
 import 'services/rider_ride_cloud_functions_service.dart';
+import 'services/rider_in_app_notification_service.dart';
 import 'services/rider_push_notification_service.dart';
 import 'services/rider_android_notification_permission.dart';
 import 'services/rider_pending_trip_notification_store.dart';
 import 'services/rider_trip_status_notification_service.dart';
 import 'services/rider_prepaid_intent_recovery_store.dart';
 import 'services/trip_safety_service.dart';
+import 'services/vehicle_mismatch_report_service.dart';
 import 'services/payment_methods_service.dart';
+import 'support/driver_vehicle_display.dart';
+import 'widgets/driver_safety_card.dart';
 import 'payment_methods_screen.dart';
 import 'bank_transfer_receipt_screen.dart';
 import 'widgets/rider_flutterwave_va_payment_sheet.dart';
+import 'widgets/rider_outstanding_balance_sheet.dart';
 import 'service_type.dart';
 import 'share_trip_rtdb.dart';
 import 'safe_share_origin.dart';
 import 'sos/sos_report_screen.dart';
 import 'support/rider_backend_pricing.dart';
 import 'support/rider_fare_support.dart';
+import 'support/chat_image_debug.dart';
 import 'support/ride_chat_support.dart';
+import 'support/rtdb_read_support.dart';
+import 'support/phone_requirement.dart';
+import 'screens/rider_profile_edit_screen.dart';
+import 'widgets/profile_avatar.dart';
 import 'support/ride_pipeline_guard.dart';
 import 'support/rtdb_resource_guard.dart';
 import 'support/realtime_database_write_queue.dart';
@@ -58,14 +69,19 @@ import 'support/friendly_firebase_errors.dart';
 import 'support/nexride_contact_constants.dart';
 import 'support/production_user_messages.dart';
 import 'support/startup_rtdb_support.dart';
+import 'support/help_support_navigation.dart';
 import 'trip_sync/trip_state_machine.dart';
-import 'widgets/native_places_autocomplete_field.dart';
+import 'widgets/rider_place_search_sheet.dart';
+import 'services/rider_saved_places_store.dart';
 import 'widgets/ride_chat_sheet.dart';
 import 'onboarding/rider_selfie_verification_screen.dart';
 import 'legal/legal_policy_registry_service.dart';
 import 'services/rider_compliance_service.dart';
 import 'services/region_pricing_service.dart';
+import 'services/rider_nearby_drivers_preview_service.dart';
 import 'widgets/rider_identity_verification_banner.dart';
+import 'widgets/rider_request_preview_ui.dart';
+import 'widgets/rider_discount_selector.dart';
 import 'widgets/rider_updated_terms_dialog.dart';
 import 'widgets/rider_rollout_area_sheet.dart';
 
@@ -132,12 +148,15 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     'users',
   );
   final CallService _callService = CallService(callTraceRole: 'rider');
+  late final SharedCallStateListener _sharedCallListener =
+      SharedCallStateListener(_callService);
   final CallPermissions _callPermissions = const CallPermissions();
   final RiderAlertSoundService _alertSoundService = RiderAlertSoundService();
   final RiderActiveTripSessionService _activeTripSessionService =
       RiderActiveTripSessionService.instance;
   static const Duration _staleSearchingRestoreTimeout = Duration(minutes: 3);
   String _lastRequestUiStateLog = '';
+  String? _queuedNoticeLoggedRideId;
   final Map<String, ShareTripLink> _cachedShareLinkByRideId =
       <String, ShareTripLink>{};
   final GlobalKey _shareTripButtonKey = GlobalKey();
@@ -198,12 +217,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   double _distanceKm = 0;
   double _estimatedDurationMin = 0;
   double _fare = 0;
+  RiderBackendPricingQuote? _rideServerPricingQuote;
+  bool _ridePricingQuoteLoading = false;
+  String? _ridePricingQuoteError;
+  List<RiderDiscountOption> _rideDiscountOptions = <RiderDiscountOption>[];
+  String? _selectedRideDiscountId;
+  bool _rideDiscountsLoading = false;
   double _lastBearing = 0;
   String? _routePreviewError;
 
   bool _isCreatingRide = false;
   bool _isSubmittingRideRequest = false;
   bool _isCancellingRide = false;
+  bool _ridePaymentCheckInFlight = false;
   /// Rider tapped cancel while [createRideRequest] is in flight (write / verify).
   bool _rideRequestUserAborted = false;
   bool _searchingDriver = false;
@@ -242,6 +268,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   Map<String, dynamic>? _driverData;
   Map<String, dynamic>? _currentRideSnapshot;
+  String? _rideIdentityRefreshScheduledForRideId;
   Marker? _driverMarker;
   DateTime? _lastMoveTime;
   DateTime? _lastSafetyPromptAt;
@@ -259,12 +286,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool? _pendingCallForeground;
   StreamSubscription<rtdb.DatabaseEvent>? _rideListener;
   StreamSubscription<rtdb.DatabaseEvent>? _driversSubscription;
+  final RiderNearbyDriversPreviewService _nearbyDriversPreviewService =
+      RiderNearbyDriversPreviewService();
+  List<RiderNearbyDriverPreview> _nearbyDriversPreview =
+      const <RiderNearbyDriverPreview>[];
+  Timer? _nearbyDriverMarkerAnimationTimer;
+  final Map<String, LatLng> _nearbyDriverAnimatedPositions = <String, LatLng>{};
+  BitmapDescriptor? _nearbyDriverCarMarkerIcon;
+  Future<BitmapDescriptor>? _nearbyDriverCarMarkerIconLoad;
+  Offset? _pickupEtaChipScreenOffset;
+  Offset? _dropoffEtaChipScreenOffset;
   final List<StreamSubscription<rtdb.DatabaseEvent>> _riderChatSubscriptions =
       <StreamSubscription<rtdb.DatabaseEvent>>[];
   final Map<String, RideChatMessage> _riderChatMessagesById =
       <String, RideChatMessage>{};
   final Map<String, String> _riderChatDraftByRide = <String, String>{};
   StreamSubscription<rtdb.DatabaseEvent>? _callSubscription;
+  StreamSubscription<rtdb.DatabaseEvent>? _rideCallMirrorSubscription;
   StreamSubscription<rtdb.DatabaseEvent>? _incomingCallSubscription;
   String? _incomingCallListenerUid;
   final Set<String> _riderPaymentConfirmedPopupShownRideIds = <String>{};
@@ -289,6 +327,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   String? _callUiActiveRideId;
   bool _callLocalCleanupInProgress = false;
   bool _isRiderTripSheetExpanded = false;
+  static const double _planRidePanelHeightFraction = 0.34;
+  static const double _matchingRidePanelHeightFraction = 0.45;
+  double _planRideSheetExtent = _planRidePanelHeightFraction;
   bool _deviceLocationAvailable = false;
   bool _deviceLocationOutsideLaunchArea = false;
   bool _launchCityChosenManually = false;
@@ -328,6 +369,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   /// `flutterwave` / `bank_transfer` — must match Cloud Function allow-list.
   String _riderTripPaymentMethod = 'flutterwave';
 
+  static const double _previewEtaChipEstimatedHeight = 58;
+  static const double _previewEtaChipBottomInset = 0.18;
+  static const double _previewEtaChipSheetClearance = 12;
   static const Color _gold = Color(0xFFD4AF37);
   static const Color _routeGold = Color(0xFFB8892D);
   static const Color _routeShadow = Color(0xFF8A6424);
@@ -555,6 +599,39 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     debugPrint('[RiderRTDB] $message');
   }
 
+  String _riderWhatsAppSupportCity() {
+    final dispatchMarket = (_rolloutDispatchMarketId ?? '').trim();
+    if (dispatchMarket.isNotEmpty) {
+      return dispatchMarket;
+    }
+    final cityId = (_rolloutCityId ?? '').trim();
+    if (cityId.isNotEmpty) {
+      return cityId;
+    }
+    return 'Unknown';
+  }
+
+  String _riderWhatsAppTripId() {
+    final rideId = (_currentRideId ?? _activeRideInteractionId ?? '').trim();
+    return rideId.isEmpty ? 'N/A' : rideId;
+  }
+
+  Future<void> _openWhatsAppSupportFromMap() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (!mounted) {
+      return;
+    }
+    final rideId = _riderWhatsAppTripId();
+    await HelpSupportNavigation.openRider(
+      context,
+      userId: uid,
+      city: _riderWhatsAppSupportCity(),
+      rideId: rideId == 'N/A' ? null : rideId,
+      tripId: rideId == 'N/A' ? null : rideId,
+      initialCategory: 'Trip Issue',
+    );
+  }
+
   void _resetRiderListenerApplyDedup() {
     _lastAppliedRiderListenerRideId = null;
     _lastAppliedRiderListenerStatus = null;
@@ -680,6 +757,27 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     safeShowSnackBar(context, message);
   }
 
+  /// Shows a profile-completion block with a direct "Edit profile" action.
+  void _promptCompleteProfile(String riderId, String message) {
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 6),
+        action: SnackBarAction(
+          label: 'Edit profile',
+          onPressed: () {
+            RiderProfileEditScreen.open(context, riderId: riderId);
+          },
+        ),
+      ),
+    );
+  }
+
   Future<void> _performRiderLogout() async {
     _timer?.cancel();
     _rideSearchTimeoutTimer?.cancel();
@@ -688,6 +786,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _rideListener = null;
     _driversSubscription?.cancel();
     _driversSubscription = null;
+    _stopNearbyDriversPreviewListener();
     await RiderSessionService.instance.signOut(reason: 'rider_menu');
     if (!mounted) {
       return;
@@ -1276,7 +1375,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       await _clearStaleActiveTripArtifacts(
         rideId: rideId,
         reason: 'expired_assignment_$source',
-        clearRideRequestNode: false,
       );
       return true;
     }
@@ -1298,7 +1396,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _clearStaleActiveTripArtifacts(
           rideId: rideId,
           reason: 'unconfirmed_assignment_stale_$source',
-          clearRideRequestNode: false,
         );
         return true;
       }
@@ -1312,10 +1409,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required Map<String, dynamic> rideData,
     required String status,
   }) async {
-    final canonicalState = TripStateMachine.canonicalStateFromSnapshot(rideData);
     final driverId = _valueAsText(rideData['driver_id']);
-    if (driverId.isEmpty || driverId == 'waiting') {
+    if (driverId.isEmpty || driverId.toLowerCase() == 'waiting') {
       return 'driver_missing';
+    }
+
+    // Rider reads ride_requests + driver_public_profiles only — never drivers/{id}.
+    final canonicalState = TripStateMachine.canonicalStateFromSnapshot(rideData);
+    if (TripStateMachine.isDriverActiveState(canonicalState) ||
+        _rideSnapshotShowsAssignedDriver(rideData)) {
+      return null;
     }
 
     final lifecycleProofReason = TripStateMachine.lifecycleProofReason(
@@ -1326,53 +1429,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return lifecycleProofReason;
     }
 
-    final snapshots = await Future.wait(<Future<rtdb.DataSnapshot>>[
-      _driversRef.child(driverId).get(),
-      _driverActiveRideRef.child(driverId).get(),
-    ]);
-
-    final driverRecord = _asStringDynamicMap(snapshots[0].value);
-    final activeRideRecord = _asStringDynamicMap(snapshots[1].value);
-    if (driverRecord == null) {
-      return 'driver_record_missing';
-    }
-
-    final isOnline =
-        _asBool(driverRecord['isOnline']) || _asBool(driverRecord['online']);
-    if (!isOnline) {
-      return 'driver_offline';
-    }
-
-    final driverAvailabilityFlagPresent =
-        driverRecord.containsKey('isAvailable') ||
-        driverRecord.containsKey('available');
-    final isAvailable = driverAvailabilityFlagPresent
-        ? (_asBool(driverRecord['isAvailable']) ||
-              _asBool(driverRecord['available']))
-        : false;
-    if (TripStateMachine.isDriverActiveState(canonicalState) && isAvailable) {
-      return 'driver_marked_available_during_active_trip';
-    }
-
-    final activeRideId = _firstNonEmptyText(<dynamic>[
-      activeRideRecord?['ride_id'],
-      driverRecord['activeRideId'],
-      driverRecord['currentRideId'],
-    ]);
-    if (activeRideId != rideId) {
-      return 'driver_active_rides_mismatch';
-    }
-
-    final driverStatus = _normalizedRideStatus(
-      _valueAsText(driverRecord['status']),
-    );
-    if (driverStatus == 'offline' ||
-        driverStatus == 'inactive' ||
-        driverStatus == 'suspended') {
-      return 'driver_status_offline';
-    }
-
-    return null;
+    return 'assignment_not_confirmed_on_ride';
   }
 
   Future<_RiderRideStatusDecision> _resolveVisibleRideStatus({
@@ -1670,6 +1727,31 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Fixed-height bottom sheet during create/search/match — never full-screen draggable.
+  bool get _shouldUseFixedMatchingBottomSheet {
+    if (_isCreatingRide ||
+        _isSubmittingRideRequest ||
+        _hostedCheckoutProcessing) {
+      return true;
+    }
+    if (_isRiderRequestMatchingPhase) {
+      return true;
+    }
+    if (_searchingDriver && !_driverFound) {
+      return true;
+    }
+    final snap = _currentRideSnapshot;
+    if (snap != null &&
+        snap.isNotEmpty &&
+        !_rideSnapshotShowsAssignedDriver(snap)) {
+      final canonical = TripStateMachine.canonicalStateFromSnapshot(snap);
+      if (canonical == TripLifecycleState.searching) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Open-pool / driver-assignment phase (not yet an accepted on-trip ride for controls).
   bool get _isRiderRequestMatchingPhase {
     final hasRideContext =
@@ -1689,6 +1771,331 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     // Only true "pool search" — not driver_assigned (aliases like [pendingDriverAction]
     // point at the same string as [driverAssigned]).
     return canonical == TripLifecycleState.searching;
+  }
+
+  int _payableTotalNgn({Map<String, dynamic>? rideData}) {
+    final quote = RiderBackendPricingQuote.tryFromMap(rideData);
+    if (quote != null && quote.totalNgn > 0) {
+      return quote.totalNgn;
+    }
+    final activeQuote = _rideServerPricingQuote;
+    if (activeQuote != null && activeQuote.hasAuthoritativeTotal) {
+      return activeQuote.totalNgn;
+    }
+    return 0;
+  }
+
+  RiderBackendPricingQuote? get _latestServerPricingQuote =>
+      (_rideServerPricingQuote != null &&
+              _rideServerPricingQuote!.hasAuthoritativeTotal)
+          ? _rideServerPricingQuote
+          : null;
+
+  /// Server-authoritative quote only — never local preview policy.
+  RiderBackendPricingQuote? get _displayPricingQuote => _latestServerPricingQuote;
+
+  int get _displayPayableTotalNgn => _latestServerPricingQuote?.totalNgn ?? 0;
+
+  int get _displayTripFareNgn =>
+      _latestServerPricingQuote?.tripFareNgn ?? _fare.round();
+
+  String _resolveDispatchMarketSlug([String? cityHint]) {
+    final rollout = (_rolloutDispatchMarketId ?? '').trim().toLowerCase();
+    if (_rolloutSelectionComplete && rollout.isNotEmpty) {
+      return rollout;
+    }
+    final city = (cityHint ?? '').trim().toLowerCase();
+    var dispatchMarket = city.isNotEmpty
+        ? RiderServiceAreaConfig.marketForCity(city).city.trim().toLowerCase()
+        : '';
+    if (dispatchMarket.isEmpty) {
+      dispatchMarket = 'lagos';
+    }
+    return dispatchMarket;
+  }
+
+  RiderPricingQuoteLog _buildPricingQuoteLog({
+    required String source,
+    required RiderBackendPricingQuote quote,
+    required String market,
+    String? city,
+    bool isPreview = false,
+  }) {
+    return RiderPricingQuoteLog(
+      source: source,
+      pickupLat: _pickupLocation?.latitude,
+      pickupLng: _pickupLocation?.longitude,
+      dropoffLat: _destinationLocation?.latitude,
+      dropoffLng: _destinationLocation?.longitude,
+      distanceKm: _distanceKm,
+      durationMin: _estimatedDurationMin,
+      durationSec: (_estimatedDurationMin * 60).round(),
+      platformFeeNgn: quote.platformFeeNgn,
+      bookingFeeNgn: quote.platformFeeNgn,
+      subtotalNgn: quote.subtotalNgn > 0 ? quote.subtotalNgn : quote.tripFareNgn,
+      totalNgn: quote.totalNgn,
+      tripFareNgn: quote.tripFareNgn,
+      roundingMethod: 'round_ngn',
+      pricingVersion: isPreview ? 'client_preview_policy' : 'server_quote',
+      city: city ?? market,
+      market: market,
+      serviceArea: market,
+      rideType: RiderServiceType.ride.key,
+      isPreview: isPreview,
+    );
+  }
+
+  void _clearRideServerPricingQuote() {
+    _rideServerPricingQuote = null;
+    _ridePricingQuoteLoading = false;
+    _ridePricingQuoteError = null;
+    _rideDiscountOptions = <RiderDiscountOption>[];
+    _selectedRideDiscountId = null;
+  }
+
+  Future<void> _loadRideDiscountOptions() async {
+    final base = _rideServerPricingQuote?.preDiscountSubtotalNgn ??
+        _displayPayableTotalNgn;
+    if (base <= 0) {
+      return;
+    }
+    setState(() => _rideDiscountsLoading = true);
+    try {
+      final res = await _rideCloud.listRiderDiscounts(
+        appliesTo: 'ride',
+        baseAmountNgn: base,
+      );
+      if (!mounted) return;
+      if (res['success'] != true) {
+        setState(() => _rideDiscountsLoading = false);
+        return;
+      }
+      final rows = res['discounts'];
+      final options = <RiderDiscountOption>[];
+      if (rows is List) {
+        for (final row in rows) {
+          if (row is Map) {
+            final opt = RiderDiscountOption.fromMap(
+              Map<String, dynamic>.from(row),
+            );
+            if (opt.discountId.isNotEmpty) {
+              options.add(opt);
+            }
+          }
+        }
+      }
+      setState(() {
+        _rideDiscountOptions = options;
+        _rideDiscountsLoading = false;
+        if (_selectedRideDiscountId != null &&
+            !options.any((o) => o.discountId == _selectedRideDiscountId)) {
+          _selectedRideDiscountId = null;
+        }
+      });
+      if (_selectedRideDiscountId != null &&
+          _rideServerPricingQuote?.showsDiscount != true) {
+        await _handleClearRideDiscount();
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _rideDiscountsLoading = false);
+      }
+    }
+  }
+
+  Future<void> _handleSelectRideDiscount(RiderDiscountOption option) async {
+    setState(() => _selectedRideDiscountId = option.discountId);
+    final market = _dispatchMarketForRideQuote();
+    await _refreshRideServerPricingQuote(
+      source: 'discount_select',
+      dispatchMarket: market,
+    );
+  }
+
+  Future<void> _handleClearRideDiscount() async {
+    setState(() => _selectedRideDiscountId = null);
+    final market = _dispatchMarketForRideQuote();
+    await _refreshRideServerPricingQuote(
+      source: 'discount_clear',
+      dispatchMarket: market,
+    );
+  }
+
+  String _dispatchMarketForRideQuote() {
+    return _resolveDispatchMarketSlug(_selectedLaunchCity);
+  }
+
+  double _quoteDistanceKmForRequest() =>
+      double.parse(_distanceKm.toStringAsFixed(2));
+
+  double _quoteEtaMinForRequest() =>
+      double.parse(_estimatedDurationMin.toStringAsFixed(2));
+
+  Future<RiderBackendPricingQuote?> _refreshRideServerPricingQuote({
+    required String source,
+    required String dispatchMarket,
+    int? routeGeneration,
+  }) async {
+    if (_pickupLocation == null ||
+        _destinationLocation == null ||
+        _distanceKm <= 0 ||
+        _estimatedDurationMin <= 0) {
+      return null;
+    }
+    final orderedStops = _buildStopsPayload();
+    if (orderedStops.isEmpty) {
+      return null;
+    }
+    final finalStop = orderedStops.last;
+    final finalLat = _asDouble(finalStop['lat']);
+    final finalLng = _asDouble(finalStop['lng']);
+    if (finalLat == null || finalLng == null) {
+      return null;
+    }
+    final intermediateStops = orderedStops.length > 1
+        ? orderedStops.sublist(0, orderedStops.length - 1)
+        : <Map<String, dynamic>>[];
+    final routeStopsHash = RiderBackendPricingQuote.buildRouteStopsHash(
+      pickupLat: _pickupLocation!.latitude,
+      pickupLng: _pickupLocation!.longitude,
+      orderedStops: orderedStops,
+    );
+    if (routeStopsHash.isNotEmpty) {
+      debugPrint(
+        'ROUTE_QUOTE_HASH_CLIENT hash=$routeStopsHash stops=${orderedStops.length}',
+      );
+    }
+    final generation = routeGeneration ?? _routePreviewComputationGeneration;
+    if (!_isRoutePreviewComputationCurrent(generation)) {
+      return null;
+    }
+    final quoteDistanceKm = _quoteDistanceKmForRequest();
+    final quoteEtaMin = _quoteEtaMinForRequest();
+    if (mounted) {
+      setState(() {
+        _ridePricingQuoteLoading = true;
+        _ridePricingQuoteError = null;
+      });
+    } else {
+      _ridePricingQuoteLoading = true;
+      _ridePricingQuoteError = null;
+    }
+
+    try {
+      final quoteRes = await _rideCloud
+          .quoteRideFare(
+            market: dispatchMarket,
+            distanceKm: quoteDistanceKm,
+            etaMin: quoteEtaMin,
+            pickupLat: _pickupLocation!.latitude,
+            pickupLng: _pickupLocation!.longitude,
+            dropoffLat: finalLat,
+            dropoffLng: finalLng,
+            stops: intermediateStops.isEmpty ? null : intermediateStops,
+            routeStopsHash: routeStopsHash.isEmpty ? null : routeStopsHash,
+            discountId: _selectedRideDiscountId,
+          )
+          .timeout(const Duration(seconds: 20));
+      if (!_isRoutePreviewComputationCurrent(generation)) {
+        return null;
+      }
+      final serverQuote = RiderBackendPricingQuote.tryFromRideQuoteResponse(
+        quoteRes,
+        market: dispatchMarket,
+        distanceKm: quoteDistanceKm,
+        etaMin: quoteEtaMin,
+      );
+      if (serverQuote == null || serverQuote.tripFareNgn <= 0) {
+        debugPrint(
+          '[RIDER_RIDE_QUOTE_FAIL] market=$dispatchMarket '
+          'distance_km=$_distanceKm eta_min=$_estimatedDurationMin response=$quoteRes',
+        );
+        if (mounted) {
+          setState(() {
+            _clearRideServerPricingQuote();
+            _ridePricingQuoteError =
+                'Could not load ride pricing. Check your connection and try again.';
+          });
+        } else {
+          _clearRideServerPricingQuote();
+          _ridePricingQuoteError =
+              'Could not load ride pricing. Check your connection and try again.';
+        }
+        return null;
+      }
+
+      final loggedMarket = serverQuote.quoteMarket ?? dispatchMarket;
+      final quoteLog = _buildPricingQuoteLog(
+        source: source,
+        quote: serverQuote,
+        market: loggedMarket,
+        city: loggedMarket,
+      );
+      RiderPricingQuoteLog.emitServer(quoteLog);
+      RiderPricingQuoteLog.emitQuoteTotalDynamic(quoteLog);
+
+      if (mounted) {
+        setState(() {
+          if (_selectedRideDiscountId != null && !serverQuote.showsDiscount) {
+            _selectedRideDiscountId = null;
+          }
+          _rideServerPricingQuote = serverQuote;
+          _ridePricingQuoteLoading = false;
+          _ridePricingQuoteError = null;
+          _fare = serverQuote.tripFareNgn.toDouble();
+        });
+        unawaited(_loadRideDiscountOptions());
+      } else {
+        if (_selectedRideDiscountId != null && !serverQuote.showsDiscount) {
+          _selectedRideDiscountId = null;
+        }
+        _rideServerPricingQuote = serverQuote;
+        _ridePricingQuoteLoading = false;
+        _ridePricingQuoteError = null;
+        _fare = serverQuote.tripFareNgn.toDouble();
+      }
+      return serverQuote;
+    } catch (error) {
+      debugPrint(
+        '[RIDER_RIDE_QUOTE_FAIL] market=$dispatchMarket '
+        'distance_km=$quoteDistanceKm eta_min=$quoteEtaMin error=$error',
+      );
+      if (mounted) {
+        setState(() {
+          _clearRideServerPricingQuote();
+          _ridePricingQuoteError =
+              'Could not load ride pricing. Check your connection and try again.';
+        });
+      } else {
+        _clearRideServerPricingQuote();
+        _ridePricingQuoteError =
+            'Could not load ride pricing. Check your connection and try again.';
+      }
+      return null;
+    }
+  }
+
+  void _logPaymentAmountSelected({
+    required String source,
+    required int payableTotalNgn,
+    int? tripFareNgn,
+    int? platformFeeNgn,
+    String? rideId,
+    String? paymentMethod,
+  }) {
+    debugPrint(
+      'PAYMENT_AMOUNT_SELECTED source=$source rideId=${rideId ?? 'pending'} '
+      'payable_total_ngn=$payableTotalNgn trip_fare_ngn=${tripFareNgn ?? _fare.round()}',
+    );
+    debugPrint(
+      'PAYMENT_EXPECTED_TOTAL '
+      'rideId=${rideId ?? 'pending'} '
+      'total_ngn=$payableTotalNgn '
+      'trip_fare_ngn=${tripFareNgn ?? _fare.round()} '
+      'platform_fee_ngn=${platformFeeNgn ?? _latestServerPricingQuote?.platformFeeNgn ?? 0} '
+      'payment_method=${paymentMethod ?? _riderTripPaymentMethod} '
+      'source=$source',
+    );
   }
 
   /// Hide the primary ride control during matching so only **Cancel request** shows.
@@ -1727,7 +2134,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       ride[RtdbRideRequestFields.paymentStatus] ?? ride['payment_status'],
     ).toLowerCase();
     final ptid = _valueAsText(ride['payment_transaction_id']);
-    return (ps == 'verified' || ps == 'paid') && ptid.isNotEmpty;
+    if (ps == 'paid_verified' && ptid.isNotEmpty) {
+      return ride['payment_verified'] == true;
+    }
+    return (ps == 'verified' || ps == 'paid') &&
+        ptid.isNotEmpty &&
+        ride['payment_verified'] == true;
   }
 
   bool _isDriverBankTransferPaymentConfirmed(Map<String, dynamic> ride) {
@@ -1756,10 +2168,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
     _logRideFlow(
-      'RIDER_PAYMENT_CONFIRMED_POPUP_SHOW rideId=$normalizedRideId',
+      'RIDER_PAYMENT_VERIFICATION_PENDING rideId=$normalizedRideId',
     );
     _showSnackBar(
-      'Thanks, your bank transfer has been confirmed by your driver.',
+      'We received your driver\'s note. Waiting for NexRide payment confirmation.',
     );
   }
 
@@ -1841,7 +2253,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final fare = _asDouble(rideData['fare']) ?? _fare;
     final amountNgn = (pricingQuote?.totalNgn ?? 0) > 0
         ? pricingQuote!.totalNgn
-        : fare.round() + RiderBackendPricingQuote.policyPlatformFeeNgn;
+        : _payableTotalNgn();
     final fields = _vaBankFieldsFromRideData(rideData);
     final bankName = fields['bank_name'] ?? '';
     final accountNumber = fields['account_number'] ?? '';
@@ -1856,6 +2268,108 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'account_number': accountNumber,
       'reference': reference,
     };
+  }
+
+  bool get _shouldShowRidePaymentVerificationRetry {
+    final snap = _currentRideSnapshot;
+    if (snap == null || !_hasActiveRide) {
+      return false;
+    }
+    if (!_rideSnapshotShowsAssignedDriver(snap)) {
+      return false;
+    }
+    if (_ridePaymentVerified(snap)) {
+      return false;
+    }
+    if (TripStateMachine.isTerminal(
+      TripStateMachine.canonicalStateFromSnapshot(snap),
+    )) {
+      return false;
+    }
+    return _bankTransferReferenceFromRide(snap).isNotEmpty;
+  }
+
+  Future<void> _checkRidePaymentStatusFromPanel() async {
+    final snap = _currentRideSnapshot;
+    final rideId = _currentRideId?.trim() ?? '';
+    if (snap == null || rideId.isEmpty) {
+      return;
+    }
+    final reference = _bankTransferReferenceFromRide(snap);
+    if (reference.isEmpty) {
+      _showSnackBar('No payment reference to check yet.');
+      return;
+    }
+    setState(() => _ridePaymentCheckInFlight = true);
+    try {
+      final vr = await _rideCloud.verifyFlutterwavePayment(
+        rideId: rideId,
+        reference: reference,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (vr['success'] == true) {
+        _showSnackBar(
+          'Payment confirmed by NexRide. Your trip can proceed when a driver is ready.',
+        );
+      } else {
+        _showSnackBar(
+          'Still waiting for payment confirmation from Flutterwave/NexRide.',
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        _showSnackBar('Could not check payment status. Try again in a moment.');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _ridePaymentCheckInFlight = false);
+      }
+    }
+  }
+
+  Widget _buildRidePaymentVerificationCard() {
+    return _buildPanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Waiting for payment confirmation from Flutterwave/NexRide',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Your driver cannot start this trip until NexRide verifies payment. '
+            'If checkout was slow, tap below to refresh status.',
+            style: TextStyle(height: 1.35, color: Colors.black54),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: _ridePaymentCheckInFlight
+                  ? null
+                  : () {
+                      unawaited(_checkRidePaymentStatusFromPanel());
+                    },
+              icon: _ridePaymentCheckInFlight
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh_rounded),
+              label: Text(
+                _ridePaymentCheckInFlight
+                    ? 'Checking payment…'
+                    : 'Check payment status',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   bool get _shouldShowAcceptedRideBankTransferDetails {
@@ -1967,7 +2481,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final fare = _asDouble(rideData['fare']) ?? _fare;
     final amountNgn = (pricingQuote?.totalNgn ?? 0) > 0
         ? pricingQuote!.totalNgn
-        : fare.round() + RiderBackendPricingQuote.policyPlatformFeeNgn;
+        : _payableTotalNgn();
 
     var bankName = '';
     var accountName = '';
@@ -2194,9 +2708,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
-    final fare =
-        _asDouble(rideData['fare']) ?? _asDouble(rideData['estimated_fare']) ?? 0;
-    final amountText = '₦${fare.toStringAsFixed(0)}';
+    final payableTotal = _payableTotalNgn(rideData: rideData);
+    final amountText = '₦$payableTotal';
+    _logPaymentAmountSelected(
+      source: 'trip_start_bank_reminder',
+      payableTotalNgn: payableTotal,
+      rideId: rideId,
+    );
 
     final autoVa =
         rideData['bank_transfer_automated'] == true ||
@@ -2595,7 +3113,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               '[RiderPayment][prepaid_recovery] createRideRequest failed reason=$reason',
             );
           }
-          if (!_handleRideCreateStructuredFailure(
+          if (!await _handleRideCreateStructuredFailure(
             Map<String, dynamic>.from(createRes),
           )) {
             _showSnackBar(
@@ -2672,8 +3190,22 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     bool showAccountSheet = true,
   }) async {
     final normalizedRideId = rideId.trim();
+    final payableTotal = _payableTotalNgn();
+    _logPaymentAmountSelected(
+      source: 'bank_transfer_init',
+      payableTotalNgn: payableTotal,
+      rideId: normalizedRideId,
+    );
+    debugPrint(
+      'PAYMENT_INIT_START rideId=$normalizedRideId method=bank_transfer '
+      'payable_total_ngn=$payableTotal',
+    );
     _logRideFlow(
-      'PAYMENT_SETUP_START rideId=$normalizedRideId method=bank_transfer',
+      'PAYMENT_SETUP_START rideId=$normalizedRideId method=bank_transfer '
+      'payable_total_ngn=$payableTotal',
+    );
+    debugPrint(
+      'PAYMENT_INTENT_CREATE_START rideId=$normalizedRideId method=bank_transfer',
     );
     final setupStartedMs = DateTime.now().millisecondsSinceEpoch;
     Map<String, dynamic> reg;
@@ -2681,6 +3213,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       reg = await _rideCloud.registerBankTransferPayment(rideId: normalizedRideId);
     } catch (error) {
       final durationMs = DateTime.now().millisecondsSinceEpoch - setupStartedMs;
+      debugPrint(
+        'PAYMENT_INTENT_CREATE_FAIL rideId=$normalizedRideId reason=callable_exception '
+        'error=$error durationMs=$durationMs',
+      );
       _logRideFlow(
         'PAYMENT_SETUP_FAIL rideId=$normalizedRideId reason=callable_exception '
         'durationMs=$durationMs error=$error',
@@ -2691,6 +3227,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return false;
     }
     if (reg['success'] == true) {
+      debugPrint(
+        'PAYMENT_INTENT_CREATE_OK rideId=$normalizedRideId '
+        'tx_ref=${reg['tx_ref'] ?? reg['reference'] ?? ''}',
+      );
+      final regTotal = _asDouble(reg['total_ngn']) ?? _asDouble(reg['amount']);
+      if (regTotal != null &&
+          regTotal.round() > 0 &&
+          regTotal.round() != payableTotal) {
+        debugPrint(
+          'PAYMENT_AMOUNT_MISMATCH rideId=$normalizedRideId '
+          'expected=$payableTotal actual=${regTotal.round()}',
+        );
+        _showSnackBar(
+          'Payment amount mismatch. Please refresh your fare and try again.',
+        );
+        return false;
+      }
       _rememberVaDetailsForRide(
         rideId: rideId,
         source: Map<String, dynamic>.from(reg),
@@ -2699,6 +3252,22 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (reg['success'] != true) {
       final reason = riderRideCallableReason(reg);
       final durationMs = DateTime.now().millisecondsSinceEpoch - setupStartedMs;
+      final serverTotal = _asDouble(reg['total_ngn']) ?? _asDouble(reg['amount']);
+      if (serverTotal != null &&
+          serverTotal.round() > 0 &&
+          serverTotal.round() != payableTotal) {
+        debugPrint(
+          'PAYMENT_AMOUNT_MISMATCH rideId=$normalizedRideId '
+          'expected=$payableTotal actual=${serverTotal.round()}',
+        );
+      }
+      debugPrint(
+        'PAYMENT_INIT_FAIL rideId=$normalizedRideId reason=$reason '
+        'flutterwave_message=${reg['flutterwave_message'] ?? ''}',
+      );
+      debugPrint(
+        'PAYMENT_INTENT_CREATE_FAIL rideId=$normalizedRideId reason=$reason',
+      );
       _logRideFlow(
         'PAYMENT_SETUP_FAIL rideId=$normalizedRideId reason=$reason '
         'durationMs=$durationMs',
@@ -2858,7 +3427,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _expectedRoutePoints.length >= 2 &&
       _distanceKm > 0 &&
       _fare > 0 &&
-      _routePreviewError == null;
+      _routePreviewError == null &&
+      !_ridePricingQuoteLoading &&
+      _rideServerPricingQuote != null &&
+      _rideServerPricingQuote!.hasAuthoritativeTotal;
 
   /// Cancel the open matching / search request (mutually exclusive with trip cancel).
   bool get _showCancelRequestOnly =>
@@ -2931,11 +3503,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return 'TRIP IN PROGRESS';
     }
 
+    if (_hasRoutePreviewReady && !_hasActiveRide && !_isRiderRequestMatchingPhase) {
+      return 'SELECT NEXRIDE';
+    }
     return 'REQUEST RIDE';
   }
 
   bool get _primaryRideButtonEnabled {
-    return !_isSubmittingRideRequest && !_isCreatingRide;
+    if (_isSubmittingRideRequest || _isCreatingRide) {
+      return false;
+    }
+    if (!_hasActiveRide &&
+        !_isRiderRequestMatchingPhase &&
+        _pickupLocation != null &&
+        _destinationLocation != null) {
+      return _hasRoutePreviewReady;
+    }
+    return true;
   }
 
   bool get _isPrimaryRideButtonBusy =>
@@ -2955,6 +3539,47 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return TripLifecycleState.planning;
     }
     return TripStateMachine.canonicalStateFromSnapshot(snap);
+  }
+
+  bool _rideSnapshotIsQueuedDriverTrip(Map<String, dynamic>? snap) {
+    if (snap == null || snap.isEmpty) {
+      return false;
+    }
+    if (snap['queued_driver_trip'] == true) {
+      return true;
+    }
+    return snap['queued_status']?.toString().trim() ==
+        'driver_finishing_current_trip';
+  }
+
+  bool _rideSnapshotIsQueuedHeadingToPickup(Map<String, dynamic>? snap) {
+    if (snap == null || snap.isEmpty) {
+      return false;
+    }
+    final queuedStatus = snap['queued_status']?.toString().trim();
+    final tripPhase = snap['trip_phase']?.toString().trim();
+    return queuedStatus == 'driver_heading_to_pickup' ||
+        tripPhase == 'driver_heading_to_pickup';
+  }
+
+  bool get _isQueuedDriverTripWaiting =>
+      _rideSnapshotIsQueuedDriverTrip(_currentRideSnapshot);
+
+  bool get _isQueuedDriverHeadingToPickup =>
+      _rideSnapshotIsQueuedHeadingToPickup(_currentRideSnapshot);
+
+  void _maybeLogQueuedDriverNotice(String rideId, Map<String, dynamic> data) {
+    if (!_rideSnapshotIsQueuedDriverTrip(data)) {
+      return;
+    }
+    if (_queuedNoticeLoggedRideId == rideId) {
+      return;
+    }
+    _queuedNoticeLoggedRideId = rideId;
+    debugPrint(
+      'RIDER_QUEUED_DRIVER_NOTICE_SHOWN rideId=$rideId '
+      'queued_status=${_valueAsText(data['queued_status'])}',
+    );
   }
 
   String get _effectiveRideStatus {
@@ -3029,7 +3654,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _ => Icons.route_rounded,
   };
 
-  String get _rideStateEyebrow => switch (_currentCanonicalRideState) {
+  String get _rideStateEyebrow {
+    if (_isQueuedDriverTripWaiting) {
+      return 'DRIVER FINISHING TRIP';
+    }
+    if (_isQueuedDriverHeadingToPickup) {
+      return 'ON THE WAY';
+    }
+    return switch (_currentCanonicalRideState) {
     TripLifecycleState.searchingDriver => 'MATCHING YOUR RIDE',
     TripLifecycleState.driverAccepted => 'DRIVER ASSIGNED',
     TripLifecycleState.driverArriving => 'ON THE WAY',
@@ -3039,12 +3671,30 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     TripLifecycleState.tripCancelled => 'REQUEST CLOSED',
     TripLifecycleState.expired => 'REQUEST EXPIRED',
     _ => _hasRoutePreviewReady ? 'READY TO REQUEST' : 'PLAN YOUR RIDE',
-  };
+    };
+  }
 
   String get _rideStateSupportText {
     if ((_isSubmittingRideRequest || _isCreatingRide) &&
         !_rideSnapshotShowsAssignedDriver(_currentRideSnapshot ?? const {})) {
       return RiderTripStatusMessages.creatingRide;
+    }
+
+    final snap = _currentRideSnapshot;
+    if (snap != null &&
+        _rideSnapshotShowsAssignedDriver(snap) &&
+        !_ridePaymentVerified(snap) &&
+        !TripStateMachine.isTerminal(
+          TripStateMachine.canonicalStateFromSnapshot(snap),
+        )) {
+      return RiderTripStatusMessages.paymentAwaitingVerification;
+    }
+
+    if (_isQueuedDriverTripWaiting) {
+      return 'Please wait while your driver finishes the current ride. They will start coming to you after that trip ends.';
+    }
+    if (_isQueuedDriverHeadingToPickup) {
+      return 'Your driver has finished their previous trip and is now heading to your pickup point.';
     }
 
     return switch (_currentCanonicalRideState) {
@@ -3227,7 +3877,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
       if (error.message == 'total_mismatch' ||
           error.message == 'pricing_total_mismatch') {
-        return RiderBackendPricingQuote.pricingMismatchUserMessage();
+        return 'Order total does not match server pricing. Refresh and try again.';
+      }
+      if (error.message == 'outstanding_waiting_balance') {
+        return 'You have an outstanding balance to clear before booking another ride.';
       }
       final mapped = riderIdentityServerRejectionUserMessage(error.message);
       if (mapped != null) {
@@ -3352,6 +4005,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       'REQUEST RIDE state transition after request rideId=$rideId status=$_rideStatus',
     );
     _logRideFlow('rider moved to searching rideId=$rideId');
+    _stopNearbyDriversPreviewListener();
+    _markers.removeWhere(
+      (m) => m.markerId.value.startsWith('nearby_driver_'),
+    );
+    _nearbyDriverAnimatedPositions.clear();
     try {
       _startRiderChatListener(rideId);
       unawaited(
@@ -3683,6 +4341,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           return;
         }
         unawaited(
+          RiderInAppNotificationService.instance.attach(user.uid.trim()),
+        );
+        unawaited(
           _loadRolloutCatalogForRider().catchError((Object error, _) {
             startupError('rollout_catalog_auth', error);
           }),
@@ -3735,6 +4396,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       startupError('load_drivers', error);
     }
     _callService.phaseNotifier.addListener(_handleCallVoicePhaseChanged);
+    _callService.remotePeerJoinedNotifier.addListener(_handleCallVoicePhaseChanged);
+    _callService.remotePeerStatusNotifier.addListener(_refreshCallOverlayEntry);
     _startIncomingCallListener();
     unawaited(_resyncIncomingCallState().catchError((Object error, _) {
       startupError('resync_incoming_call', error);
@@ -4210,7 +4873,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _clearStaleActiveTripArtifacts(
           rideId: ptrRideId,
           reason: 'pointer_terminal_or_missing_$reason',
-          clearRideRequestNode: false,
         );
         _activeTripSessionService.clearSession(
           reason: 'terminal_pointer_stream',
@@ -4234,7 +4896,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _clearStaleActiveTripArtifacts(
           rideId: ptrRideId,
           reason: 'pointer_rider_mismatch',
-          clearRideRequestNode: false,
         );
         return;
       }
@@ -4307,7 +4968,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _clearStaleActiveTripArtifacts(
           rideId: rideId,
           reason: '${source}_not_hydratable',
-          clearRideRequestNode: false,
         );
         _activeTripSessionService.clearSession(
           reason: 'hydrate_not_hydratable',
@@ -4393,10 +5053,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _callForegroundDebounceTimer?.cancel();
     _pendingCallForeground = null;
     _callService.phaseNotifier.removeListener(_handleCallVoicePhaseChanged);
+    _callService.remotePeerJoinedNotifier.removeListener(_handleCallVoicePhaseChanged);
+    _callService.remotePeerStatusNotifier.removeListener(_refreshCallOverlayEntry);
     _rideListener?.cancel();
     _riderAuthRolloutSubscription?.cancel();
     _riderActiveRidePointerSubscription?.cancel();
     _driversSubscription?.cancel();
+    _stopNearbyDriversPreviewListener();
     _stopRiderChatListener();
     _callSubscription?.cancel();
     _incomingCallSubscription?.cancel();
@@ -4421,9 +5084,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appLifecycleState = state;
+    final foreground = state == AppLifecycleState.resumed;
+    _callService.notifyAppLifecycleForeground(foreground);
 
-    if (state != AppLifecycleState.resumed) {
-      unawaited(_handleCallAppBackgrounded());
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      unawaited(_syncCallForegroundState(foreground: false));
+      return;
+    }
+
+    if (!foreground) {
+      unawaited(_syncCallForegroundState(foreground: false));
       return;
     }
 
@@ -4961,7 +5632,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (rideId.isEmpty) {
       return;
     }
-    // Ride-scoped calls/{rideId} only — no root /calls query.
+    // Ride-scoped call_sessions/{rideId} only — no root /calls query.
     _startCallListener(rideId);
   }
 
@@ -5018,10 +5689,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     _callSubscription?.cancel();
     _callSubscription = null;
+    _rideCallMirrorSubscription?.cancel();
+    _rideCallMirrorSubscription = null;
+    _detachSharedCallListener();
     _callListenerRideId = rideId;
     RidePipelineGuard.assertCallListenerAttach(
       rideId: rideId,
       owner: 'MapScreen',
+    );
+
+    final path = CallService.sessionPath(rideId, kind: CallSessionKind.ride);
+    debugPrint(
+      'CALL_SESSION_PATH role=rider path=$path rideId=$rideId',
     );
 
     _callSubscription = _callService
@@ -5036,12 +5715,62 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               rideId,
               event.snapshot.value,
             );
+            final statusRaw = session?.status.name ??
+                (event.snapshot.value is Map
+                    ? _valueAsText(
+                        (event.snapshot.value as Map)['status'] ??
+                            (event.snapshot.value as Map)['state'],
+                      )
+                    : 'null');
+            debugPrint(
+              'CALL_SESSION_SNAPSHOT path=${CallService.sessionPath(rideId, kind: CallSessionKind.ride)} '
+              'rideId=$rideId status=$statusRaw listener_role=rider',
+            );
             unawaited(_handleCallSnapshotUpdate(rideId, session));
           },
           onError: (Object error) {
             _logRideCall('listener error rideId=$rideId error=$error');
           },
         );
+
+    _rideCallMirrorSubscription?.cancel();
+    _rideCallMirrorSubscription =
+        _callService.observeRideCallMirror(rideId).listen(
+      (event) {
+        if (_callListenerRideId != rideId) {
+          return;
+        }
+        final value = event.snapshot.value;
+        if (value is! Map) {
+          return;
+        }
+        for (final entry in value.entries) {
+          final row = entry.value;
+          if (row is! Map) {
+            continue;
+          }
+          final mirrorStatus =
+              (row['status'] ?? '').toString().trim().toLowerCase();
+          if (mirrorStatus != 'ended') {
+            continue;
+          }
+          debugPrint(
+            'CALL_SESSION_ENDED_SYNCED rideId=$rideId callId=${entry.key} '
+            'listener_role=rider source=ride_calls',
+          );
+          unawaited(() async {
+            final session = await _callService.fetchCall(rideId);
+            if (session != null && session.isTerminal) {
+              await _handleCallSnapshotUpdate(rideId, session);
+            }
+          }());
+          break;
+        }
+      },
+      onError: (Object error) {
+        _logRideCall('ride_calls mirror listener error rideId=$rideId error=$error');
+      },
+    );
   }
 
   Future<void> _resyncCallState(String rideId) async {
@@ -5092,12 +5821,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   void _handleCallVoicePhaseChanged() {
     if (!_callService.isVoiceConnected) {
+      if (_callService.isLocalVoiceJoined) {
+        _refreshCallOverlayEntry();
+      }
       return;
     }
     final rideId = _activeCallRideId;
     if (rideId.isEmpty) {
       return;
     }
+    _ensureCallDurationTimerStarted(
+      rideId: rideId,
+      source: 'CALL_REMOTE_JOINED',
+    );
     _ensureActiveCallUiVisible(
       rideId: rideId,
       source: 'CALL_REMOTE_JOINED',
@@ -5165,6 +5901,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (normalizedRideId.isEmpty) {
       return;
     }
+    if (_shouldAbortCallUiForRide(normalizedRideId)) {
+      _logRideCall(
+        'CALL_UI_ACTIVE_SUPPRESSED rideId=$normalizedRideId source=$source '
+        'reason=terminal_or_cleanup_done',
+      );
+      return;
+    }
     if (_callLocallyEndedRideIds.contains(normalizedRideId)) {
       final activeSession = _currentCallSession;
       if ((activeSession == null || activeSession.isTerminal) &&
@@ -5193,7 +5936,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _logRideCall(
           'CALL_UI_ACTIVE_ALREADY_VISIBLE rideId=$normalizedRideId source=$source',
         );
-        if (source == 'CALL_JOIN_OK' || source == 'CALL_REMOTE_JOINED') {
+        if (source == 'CALL_REMOTE_JOINED') {
           _ensureCallDurationTimerStarted(
             rideId: normalizedRideId,
             source: source,
@@ -5216,7 +5959,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     _callUiActiveRideId = normalizedRideId;
     _logRideCall('CALL_UI_ACTIVE_SHOW rideId=$normalizedRideId source=$source');
-    if (source == 'CALL_JOIN_OK' || source == 'CALL_REMOTE_JOINED') {
+    if (source == 'CALL_REMOTE_JOINED') {
       _ensureCallDurationTimerStarted(
         rideId: normalizedRideId,
         source: source,
@@ -5250,23 +5993,29 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final previousSession = _currentCallSession;
     final previousStatus = previousSession?.status;
 
-    if (nextSession != null && !_callMatchesCurrentRide(nextSession)) {
+    if (nextSession != null &&
+        !nextSession.isTerminal &&
+        !_callMatchesCurrentRide(nextSession)) {
       return;
     }
 
     _currentCallSession = nextSession;
 
+    if (nextSession != null && !nextSession.isTerminal) {
+      _attachSharedCallListener(nextSession);
+    }
+
     if (nextSession != null && nextSession.isTerminal) {
-      if (_callCleanupDoneRideIds.contains(rideId.trim())) {
-        _logRideCall(
-          'CALL_TERMINAL_CLEANUP_SKIPPED_DUPLICATE rideId=$rideId '
-          'status=${nextSession.status.name}',
-        );
-        _resetCallButtonLoading(reason: 'terminal_snapshot_duplicate');
-        return;
-      }
-      _callNullGraceUntilByRideId.remove(rideId.trim());
-      _callLocallyEndedRideIds.remove(rideId.trim());
+      final rideKey = rideId.trim();
+      _logCallTerminalSnapshotReceived(
+        nextSession,
+        source: 'remote_terminal',
+      );
+      debugPrint(
+        'CALL_SESSION_TERMINAL_REMOTE rideId=$rideKey '
+        'status=${nextSession.status.name} ended_by=${nextSession.endedBy ?? ''}',
+      );
+      _logCallTerminalObeyed(nextSession, source: 'remote_terminal');
       if (previousStatus != nextSession.status) {
         if (nextSession.status == RideCallStatus.ended) {
           _logRideCall(
@@ -5279,11 +6028,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'status=${nextSession.status.name} endedBy=${nextSession.endedBy ?? ''}',
         );
       }
-      _callJoinAttemptCount = 0;
-      await _performLocalCallCleanup(
+      await _forceCallTerminalCleanup(
         rideId: rideId,
-        cleanupSource: 'call_snapshot_terminal',
+        source: 'remote_terminal',
         endReason: 'rtdb_status_${nextSession.status.name}',
+        session: nextSession,
       );
       callTraceLog(
         'CALL_END_REMOTE_CLEANUP_OK',
@@ -5294,7 +6043,30 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     if (_callLocallyEndedRideIds.contains(rideId.trim())) {
-      if (nextSession == null || nextSession.isTerminal) {
+      if (nextSession == null) {
+        return;
+      }
+      if (nextSession.isTerminal) {
+        debugPrint(
+          'CALL_SESSION_TERMINAL_REMOTE rideId=${rideId.trim()} '
+          'status=${nextSession.status.name} ended_by=${nextSession.endedBy ?? ''}',
+        );
+        _logCallTerminalSnapshotReceived(
+          nextSession,
+          source: 'remote_terminal_local_end_guard',
+        );
+        if (_shouldObeyRemoteCallTerminal(nextSession)) {
+          _logCallTerminalObeyed(
+            nextSession,
+            source: 'remote_terminal_local_end_guard',
+          );
+          await _forceCallTerminalCleanup(
+            rideId: rideId,
+            source: 'remote_terminal_local_end_guard',
+            endReason: 'rtdb_status_${nextSession.status.name}',
+            session: nextSession,
+          );
+        }
         return;
       }
       _resetCallGuardsForNewSession(
@@ -5338,11 +6110,22 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             'CALL_REMOTE_TERMINAL_RECEIVED rideId=$rideId '
             'status=${confirmed.status.name} endedBy=${confirmed.endedBy ?? ''}',
           );
-          await _performLocalCallCleanup(
-            rideId: rideId,
-            cleanupSource: 'call_snapshot_terminal',
-            endReason: 'rtdb_status_${confirmed.status.name}',
+          _logCallTerminalSnapshotReceived(
+            confirmed,
+            source: 'remote_terminal_refetch',
           );
+          if (_shouldObeyRemoteCallTerminal(confirmed)) {
+            _logCallTerminalObeyed(
+              confirmed,
+              source: 'remote_terminal_refetch',
+            );
+            await _forceCallTerminalCleanup(
+              rideId: rideId,
+              source: 'remote_terminal_refetch',
+              endReason: 'rtdb_status_${confirmed.status.name}',
+              session: confirmed,
+            );
+          }
           callTraceLog(
             'CALL_END_REMOTE_CLEANUP_OK',
             rideId: rideId,
@@ -5441,7 +6224,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (nextSession.isAccepted) {
       _extendCallNullGrace(rideId);
       _cancelCallRingTimeout();
-      _startCallDurationTicker(nextSession.acceptedAtDateTime);
       await _alertSoundService.stopIncomingCallAlert();
 
       if (previousStatus != RideCallStatus.accepted) {
@@ -5507,7 +6289,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _logRideCall('CALL_JOIN_SKIPPED_DUPLICATE rideId=$normalizedRideId');
       return;
     }
-    if (_callJoinedChannel && _callService.isVoiceConnected) {
+    if (_callJoinedChannel && _callService.isLocalVoiceJoined) {
       _logRideCall(
         'CALL_JOIN_SKIPPED_DUPLICATE rideId=$normalizedRideId reason=already_joined',
       );
@@ -5528,9 +6310,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         speakerOn: _callSpeakerOn,
         muted: _callMuted,
       );
+      if (_shouldAbortCallUiForRide(normalizedRideId)) {
+        await _callService.leaveVoiceChannel();
+        return;
+      }
       await _callService.waitForVoiceJoinConnected(
         timeout: const Duration(seconds: 15),
       );
+      if (_shouldAbortCallUiForRide(normalizedRideId)) {
+        await _callService.leaveVoiceChannel();
+        return;
+      }
       _callJoinedChannel = true;
       await _callService.updateParticipantState(
         rideId: normalizedRideId,
@@ -5543,9 +6333,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         force: true,
       );
       _logRideCall('CALL_UI_ACTIVE_SHOW rideId=$rideId source=CALL_JOIN_OK');
-      _ensureCallDurationTimerStarted(rideId: rideId, source: 'CALL_JOIN_OK');
       _ensureActiveCallUiVisible(rideId: rideId, source: 'CALL_JOIN_OK');
     } catch (error) {
+      if (_shouldAbortCallUiForRide(normalizedRideId)) {
+        _callJoinedChannel = false;
+        return;
+      }
       _callJoinAttemptCount++;
       _logRideCall(
         '[CALL_JOIN_FAIL] rideId=$rideId attempt=$_callJoinAttemptCount error=$error',
@@ -5614,7 +6407,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _handleCallAppBackgrounded() async {
-    _removeCallOverlayEntry();
     await _syncCallForegroundState(foreground: false);
   }
 
@@ -5661,6 +6453,119 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
+  void _logCallTerminalSnapshotReceived(
+    RideCallSession session, {
+    required String source,
+  }) {
+    debugPrint(
+      'CALL_TERMINAL_SNAPSHOT_RECEIVED path=call_sessions/${session.rideId} '
+      'rideId=${session.rideId} status=${session.status.name} '
+      'callerId=${session.callerId} receiverId=${session.receiverId} '
+      'ended_by=${session.endedBy ?? ''} source=$source',
+    );
+  }
+
+  void _logCallTerminalObeyed(
+    RideCallSession session, {
+    required String source,
+  }) {
+    debugPrint(
+      'CALL_TERMINAL_OBEYED rideId=${session.rideId} status=${session.status.name} '
+      'callerId=${session.callerId} receiverId=${session.receiverId} source=$source',
+    );
+  }
+
+  void _logCallCleanupDone({
+    required String rideId,
+    required String source,
+    required String endReason,
+    RideCallSession? session,
+  }) {
+    final status = session?.status.name ??
+        _currentCallSession?.status.name ??
+        'cleared';
+    final callerId =
+        session?.callerId ?? _currentCallSession?.callerId ?? '';
+    final receiverId =
+        session?.receiverId ?? _currentCallSession?.receiverId ?? '';
+    debugPrint(
+      'CALL_CLEANUP_DONE rideId=$rideId status=$status callerId=$callerId '
+      'receiverId=$receiverId source=$source reason=$endReason',
+    );
+  }
+
+  bool _shouldAbortCallUiForRide(String rideId) {
+    final normalizedRideId = rideId.trim();
+    if (normalizedRideId.isEmpty) {
+      return true;
+    }
+    if (_callCleanupDoneRideIds.contains(normalizedRideId)) {
+      return true;
+    }
+    final session = _currentCallSession;
+    if (session != null &&
+        session.rideId.trim() == normalizedRideId &&
+        session.isTerminal) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _shouldObeyRemoteCallTerminal(RideCallSession session) {
+    // Terminal snapshots (ended/cancelled/failed/timeout) are obeyed
+    // unconditionally. We must never gate local cleanup on Agora join state,
+    // connecting/ringing phase, overlay visibility, or end timestamp ordering:
+    // doing so left the peer stuck on the call screen when the other party
+    // tapped End while still "Connecting to other party…".
+    return true;
+  }
+
+  Future<void> _forceCallTerminalCleanup({
+    required String rideId,
+    required String source,
+    String endReason = 'terminal',
+    RideCallSession? session,
+  }) async {
+    final rideKey = rideId.trim();
+    if (rideKey.isEmpty) {
+      return;
+    }
+    debugPrint('CALL_CLEANUP_FORCE rideId=$rideKey source=$source');
+    _detachSharedCallListener();
+    _callNullGraceUntilByRideId.remove(rideKey);
+    _callLocallyEndedRideIds.remove(rideKey);
+    _callJoinAttemptCount = 0;
+    _cancelCallRingTimeout();
+    _stopCallDurationTicker();
+    _currentCallSession = null;
+    _callAcceptedAt = null;
+    _activeCallStartedAt = null;
+    _callDuration = Duration.zero;
+    _removeCallOverlayEntry();
+    _callMuted = false;
+    _callSpeakerOn = true;
+    _isEndingCall = false;
+    _callJoinInFlightRideId = null;
+    try {
+      await _callService.leaveVoiceChannel();
+      debugPrint('CALL_LEAVE_CHANNEL rideId=$rideKey source=$source');
+    } catch (error) {
+      _logRideCall(
+        'CALL_LEAVE_CHANNEL_FAIL rideId=$rideKey source=$source error=$error',
+      );
+    }
+    _callJoinedChannel = false;
+    _callCleanupDoneRideIds.add(rideKey);
+    debugPrint('CALL_OVERLAY_CLOSE rideId=$rideKey source=$source');
+    _logCallCleanupDone(
+      rideId: rideKey,
+      source: source,
+      endReason: endReason,
+      session: session,
+    );
+    _resetCallButtonLoading(reason: 'force_terminal_$source');
+  }
+
   Future<void> _performLocalCallCleanup({
     required String rideId,
     required String cleanupSource,
@@ -5669,6 +6574,27 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     bool force = false,
   }) async {
     if (_callLocalCleanupInProgress) {
+      if (force || cleanupSource == 'call_snapshot_terminal') {
+        final rideKey = rideId.trim();
+        _tearDownCallUiImmediately(rideKey);
+        try {
+          await _callService.leaveVoiceChannel();
+          debugPrint(
+            'CALL_LEAVE_CHANNEL rideId=$rideKey source=forced_terminal_while_in_progress',
+          );
+        } catch (error) {
+          _logRideCall(
+            'CALL_LEAVE_CHANNEL_FAIL rideId=$rideKey source=forced_terminal error=$error',
+          );
+        }
+        _callJoinedChannel = false;
+        _removeCallOverlayEntry();
+        _isEndingCall = false;
+        _callCleanupDoneRideIds.add(rideKey);
+        debugPrint(
+          'CALL_OVERLAY_CLOSE rideId=$rideKey source=forced_terminal_while_in_progress',
+        );
+      }
       return;
     }
     _callLocalCleanupInProgress = true;
@@ -5732,7 +6658,49 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     _callSubscription?.cancel();
     _callSubscription = null;
+    _rideCallMirrorSubscription?.cancel();
+    _rideCallMirrorSubscription = null;
+    _detachSharedCallListener();
     _callListenerRideId = null;
+  }
+
+  void _attachSharedCallListener(RideCallSession session) {
+    final callId = session.callId?.trim() ?? '';
+    final contextId = session.rideId.trim();
+    if (callId.isEmpty || contextId.isEmpty || session.isTerminal) {
+      return;
+    }
+    final uid = _currentRiderUid?.trim() ?? '';
+    _sharedCallListener.attach(
+      callId: callId,
+      contextId: contextId,
+      uid: uid,
+      onTerminal: ({
+        required String callId,
+        required String contextId,
+        required String status,
+        String? endedBy,
+      }) async {
+        if (!mounted || _callListenerRideId != contextId) {
+          return;
+        }
+        final confirmed = await _callService.fetchCall(contextId);
+        if (confirmed != null && confirmed.isTerminal) {
+          await _handleCallSnapshotUpdate(contextId, confirmed);
+          return;
+        }
+        await _forceCallTerminalCleanup(
+          rideId: contextId,
+          source: 'shared_call_$status',
+          endReason: 'shared_call_$status',
+          session: _currentCallSession,
+        );
+      },
+    );
+  }
+
+  void _detachSharedCallListener() {
+    _sharedCallListener.detach();
   }
 
   void _dismissOpenModalRoutes({int maxPops = 6}) {
@@ -5822,15 +6790,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final hadVisibleCallState =
         _currentCallSession != null ||
         _callJoinedChannel ||
+        _callJoinInFlightRideId == rideId.trim() ||
         _callOverlayEntry != null ||
         _callDurationTimer != null ||
         _callRingTimeoutTimer != null;
-    if (!hadVisibleCallState) {
+    if (!hadVisibleCallState &&
+        !force &&
+        !_callService.isVoiceConnected &&
+        !_callJoinedChannel) {
       return;
     }
 
     RideCallSession? rtdbSession;
-    if (cleanupSource != 'end_tap') {
+    if (cleanupSource != 'end_tap' && cleanupSource != 'call_snapshot_terminal') {
       try {
         rtdbSession = await _callService.fetchCall(rideId);
       } catch (error) {
@@ -5848,6 +6820,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       rtdbState: rtdbSession?.status.name ?? 'null',
       remoteState: remoteState,
     );
+    final sessionForLog = rtdbSession ?? _currentCallSession;
 
     _callCleanupDoneRideIds.add(rideId);
     _callNullGraceUntilByRideId.remove(rideId.trim());
@@ -5874,6 +6847,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     try {
       await _callService.leaveVoiceChannel();
+      debugPrint('CALL_LEAVE_CHANNEL rideId=$rideId source=$cleanupSource');
     } catch (error) {
       _logRideCall('leave failed rideId=$rideId error=$error');
     }
@@ -5882,6 +6856,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     unawaited(_alertSoundService.stopIncomingCallAlert());
     _logRideCall(
       'CALL_UI_CLOSE rideId=$rideId reason=local_cleanup source=$cleanupSource',
+    );
+    _logCallCleanupDone(
+      rideId: rideId,
+      source: cleanupSource,
+      endReason: endReason,
+      session: sessionForLog,
     );
 
     if (hadVisibleCallState) {
@@ -6089,39 +7069,48 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
     final voiceLive = _callJoinedChannel || _callService.isVoiceConnected;
-    if (session == null || (!session.isAccepted && !voiceLive)) {
+    final joinInFlight = _callJoinInFlightRideId == rideId;
+    final overlayVisible =
+        _callOverlayEntry != null && _callOverlayEntry!.mounted;
+    final canEndDuringSetup = joinInFlight ||
+        overlayVisible ||
+        (session != null && (session.isAccepted || session.isRinging));
+    if (!voiceLive && !canEndDuringSetup) {
       return;
     }
 
     _isEndingCall = true;
     callTraceLog('CALL_END_TAP', rideId: rideId, role: 'rider');
-    _tearDownCallUiImmediately(rideId);
     _callOverlayEntry?.markNeedsBuild();
 
+    final riderUid = _currentRiderUid ?? '';
+    final endSession = session;
     unawaited(() async {
-      try {
-        await _performLocalCallCleanup(
-          rideId: rideId,
-          cleanupSource: 'end_tap',
-          endReason: 'user_end_tap',
-        );
-      } catch (error) {
-        _logRideCall('CALL_END_LOCAL_CLEANUP_FAIL rideId=$rideId error=$error');
-        _isEndingCall = false;
-      }
-
       try {
         final committed = await _callService.endCallFromUserTap(
           rideId: rideId,
-          endedBy: 'rider',
+          endedByUid: riderUid,
+          endedByRole: 'rider',
         );
         if (committed) {
           callTraceLog('CALL_END_RTDB_OK', rideId: rideId, role: 'rider');
         } else {
           _logRideCall('CALL_END_RTDB_FAIL rideId=$rideId reason=not_committed');
         }
+        await _forceCallTerminalCleanup(
+          rideId: rideId,
+          source: committed ? 'local_end_tap' : 'local_end_tap_fallback',
+          endReason: 'user_ended',
+          session: endSession,
+        );
       } catch (error) {
         _logRideCall('CALL_END_RTDB_FAIL rideId=$rideId error=$error');
+        await _forceCallTerminalCleanup(
+          rideId: rideId,
+          source: 'local_end_tap_error',
+          endReason: 'user_ended',
+          session: endSession,
+        );
       }
     }());
   }
@@ -6293,10 +7282,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         return ValueListenableBuilder<String?>(
           valueListenable: _callService.phaseErrorNotifier,
           builder: (context, phaseError, _) {
-            return _buildRideCallOverlayContent(
-              session: session,
-              phase: phase,
-              phaseError: phaseError,
+            return ValueListenableBuilder<String?>(
+              valueListenable: _callService.remotePeerStatusNotifier,
+              builder: (context, remotePeerStatus, _) {
+                return _buildRideCallOverlayContent(
+                  session: session,
+                  phase: phase,
+                  phaseError: phaseError,
+                  remotePeerStatus: remotePeerStatus,
+                );
+              },
             );
           },
         );
@@ -6308,6 +7303,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     required RideCallSession session,
     required AgoraConnectionPhase phase,
     required String? phaseError,
+    required String? remotePeerStatus,
   }) {
     final isIncoming = _isIncomingCall(session);
     final isOutgoing = _isOutgoingCall(session);
@@ -6318,6 +7314,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final title = _currentDriverNameForRide;
     final isFailed = phase == AgoraConnectionPhase.failed;
     final isReconnecting = phase == AgoraConnectionPhase.reconnecting;
+    final isWaitingForRemote = phase == AgoraConnectionPhase.waitingForRemote ||
+        (_callService.isLocalVoiceJoined && !_callService.remotePeerJoined);
     final isConnecting = phase == AgoraConnectionPhase.connecting ||
         (session.isAccepted &&
             !_callService.isVoiceConnected &&
@@ -6329,9 +7327,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             ? (phaseError ?? 'Could not connect call. Please try again.')
             : isReconnecting
                 ? 'Reconnecting...'
-                : isConnecting
-                    ? 'Connecting...'
-                    : _formatCallDuration(_callDuration);
+                : isWaitingForRemote
+                    ? (remotePeerStatus ?? 'Connecting to other party…')
+                    : isConnecting
+                        ? 'Connecting...'
+                        : _formatCallDuration(_callDuration);
 
     return Material(
       color: const Color(0xFF08111F),
@@ -6707,6 +7707,189 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
+  Widget _buildQueuedDriverTripBanner() {
+    return _buildPanelCard(
+      backgroundColor: const Color(0xFFFFF8E8),
+      borderColor: _gold.withValues(alpha: 0.35),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: _gold.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(
+                  Icons.hourglass_top_rounded,
+                  color: _gold,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Driver is completing another trip first',
+                      style: TextStyle(
+                        color: _panelInk,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                        height: 1.2,
+                      ),
+                    ),
+                    SizedBox(height: 6),
+                    Text(
+                      'Please wait while your driver finishes the current ride, or cancel to find another driver.',
+                      style: TextStyle(
+                        color: _panelMutedInk,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w500,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _isCancellingRide
+                      ? null
+                      : () {
+                          _showSnackBar(
+                            'We will notify you when your driver is on the way.',
+                          );
+                        },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _panelInk,
+                    side: BorderSide(color: _panelBorder),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  child: const Text(
+                    'Wait for driver',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: _isCancellingRide
+                      ? null
+                      : () {
+                          unawaited(_cancelQueuedRideForRematch());
+                        },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _panelDanger,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  child: _isCancellingRide
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text(
+                          'Cancel and find another driver',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                          textAlign: TextAlign.center,
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _cancelQueuedRideForRematch() async {
+    final rideId = await _resolveCancelRideIdForRider();
+    if (rideId == null || rideId.isEmpty) {
+      return;
+    }
+    callTraceLog('CANCEL_REQUEST_TAP', rideId: rideId, role: 'rider');
+    if (mounted) {
+      setState(() {
+        _isCancellingRide = true;
+      });
+    } else {
+      _isCancellingRide = true;
+    }
+    try {
+      Map<String, dynamic> currentRide;
+      if (_currentRideSnapshot != null && _currentRideId == rideId) {
+        currentRide = Map<String, dynamic>.from(_currentRideSnapshot!);
+      } else {
+        final snap = await _rideRequestsRef.child(rideId).get();
+        final remote = _asStringDynamicMap(snap.value);
+        if (remote == null) {
+          await _resetRideState(clearDestination: false);
+          return;
+        }
+        currentRide = remote;
+      }
+      final serviceType =
+          currentRide['service_type']?.toString() ?? RiderServiceType.ride.key;
+      final driverId = currentRide['driver_id']?.toString();
+      await _performRiderRtdbCancellationUpdate(
+        rideId: rideId,
+        currentRide: currentRide,
+        transitionSource: 'queued_rider_rematch',
+        cancelMetadataSource: 'queued_rider_rematch',
+        cancellationReasonDisplay: 'queued_rider_rematch',
+      );
+      final listenerAttached =
+          _rideListener != null && _activeRideListenerRideId == rideId;
+      if (!listenerAttached) {
+        await _resetRideState(clearDestination: false);
+      }
+      if (mounted) {
+        _showSnackBar(
+          'Queued ride cancelled. You can request another ride now.',
+        );
+      }
+      final riderId = _currentRiderUid;
+      if (riderId != null && riderId.isNotEmpty) {
+        unawaited(
+          _trustRulesService.recordRideCancellation(
+            riderId: riderId,
+            rideId: rideId,
+            serviceType: serviceType,
+            statusBeforeCancel: _rideStatus,
+            driverId: driverId,
+          ),
+        );
+      }
+    } catch (error) {
+      _showSnackBar('Unable to cancel this ride right now.');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCancellingRide = false;
+        });
+      } else {
+        _isCancellingRide = false;
+      }
+    }
+  }
+
   Widget _buildRideStatusHeroCard(String headline) {
     final accent = _rideStateAccentColor;
     return _buildPanelCard(
@@ -6855,17 +8038,37 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               ),
               _buildMetricPill(
                 icon: Icons.credit_card_rounded,
-                label: 'Trip fare',
-                value: '₦${_fare.toStringAsFixed(0)}',
+                label: 'Total',
+                value: _displayPayableTotalNgn > 0
+                    ? '₦$_displayPayableTotalNgn'
+                    : (_ridePricingQuoteLoading ? '…' : '--'),
                 accentColor: _gold,
               ),
             ],
           ),
-          if (_fare > 0) ...[
+          if (_displayPricingQuote != null) ...[
             const SizedBox(height: 12),
             RiderBackendPricingBreakdown(
-              quote: RiderBackendPricingQuote.previewTripFare(_fare.round()),
+              quote: _displayPricingQuote!,
               compact: true,
+            ),
+          ] else if (_ridePricingQuoteLoading) ...[
+            const SizedBox(height: 12),
+            const Text(
+              'Confirming fare…',
+              style: TextStyle(
+                color: _panelMutedInk,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ] else if (_fare > 0) ...[
+            const SizedBox(height: 12),
+            const Text(
+              'Waiting for server fare…',
+              style: TextStyle(
+                color: _panelMutedInk,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ],
           if (stopAddresses.length > 1) ...[
@@ -7018,103 +8221,53 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildDriverAssignmentCard() {
-    final ratingText = '${_driverData!['rating'] ?? 5.0}';
-    final driverPhoneRaw = _firstNonEmptyText(<dynamic>[
-      _driverData!['phone'],
-      _currentRideSnapshot?['driver_phone'],
-      _currentRideSnapshot?['driverPhone'],
+  /// Safety card showing the assigned driver's vehicle identity (plate, type,
+  /// colour, make, model, photo, verification badge, rating) with the
+  /// confirm-before-entering warning and a Report Mismatch action.
+  Widget _buildDriverSafetyCard() {
+    final driverId = _firstNonEmptyText(<dynamic>[
+      _driverData?['driver_id'],
+      _driverData?['driverId'],
+      _driverData?['id'],
+      _currentRideSnapshot?['accepted_driver_id'],
+      _currentRideSnapshot?['matched_driver_id'],
+      _currentRideSnapshot?['driver_id'],
     ]);
-    final driverPhone = driverPhoneRaw.isNotEmpty
-        ? driverPhoneRaw
-        : 'Contact via chat';
-    return _buildPanelCard(
-      backgroundColor: Colors.white,
-      child: Row(
-        children: [
-          Container(
-            width: 54,
-            height: 54,
-            decoration: BoxDecoration(
-              color: _gold.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(18),
-            ),
-            child: const Icon(Icons.person_rounded, color: _gold, size: 28),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _firstNonEmptyText(
-                    <dynamic>[
-                      _driverData!['name'],
-                      _driverData!['driver_name'],
-                      _currentRideSnapshot?['driver_name'],
-                      _currentRideSnapshot?['driverName'],
-                    ],
-                    fallback: 'Driver',
-                  ),
-                  style: const TextStyle(
-                    color: _panelInk,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  _driverData!['car']?.toString() ?? '',
-                  style: const TextStyle(
-                    color: _panelMutedInk,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if ((_driverData!['plate']?.toString() ?? '').isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      _driverData!['plate']?.toString() ?? '',
-                      style: TextStyle(
-                        color: _routeShadow,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.35,
-                      ),
-                    ),
-                  ),
-                const SizedBox(height: 4),
-                Text(
-                  driverPhone,
-                  style: const TextStyle(
-                    color: _panelMutedInk,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFF5D8),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.star_rounded, color: _gold, size: 18),
-                const SizedBox(width: 6),
-                Text(
-                  ratingText,
-                  style: const TextStyle(
-                    color: _panelInk,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
+    // Prefer ride_requests denorm; driver profile is loaded inside DriverSafetyCard.
+    final rideRecord = Map<String, dynamic>.from(_currentRideSnapshot ?? const {});
+    return DriverSafetyCard(
+      driverId: driverId,
+      rideRecord: rideRecord,
+      isDelivery: false,
+      onReportMismatch: (DriverVehicleIdentity identity) =>
+          _reportVehicleMismatch(
+        driverId: driverId,
+        identity: identity,
       ),
+    );
+  }
+
+  Future<void> _reportVehicleMismatch({
+    required String driverId,
+    required DriverVehicleIdentity identity,
+  }) async {
+    final rideId = _firstNonEmptyText(<dynamic>[
+      _currentRideId,
+      _currentRideSnapshot?['ride_id'],
+      _currentRideSnapshot?['rideId'],
+    ]);
+    final city = _firstNonEmptyText(<dynamic>[
+      _currentRideSnapshot?['city'],
+      _currentRideSnapshot?['market_pool'],
+    ]);
+    await VehicleMismatchReportService.report(
+      context: context,
+      riderId: FirebaseAuth.instance.currentUser?.uid ?? '',
+      driverId: driverId,
+      referenceId: rideId,
+      isDelivery: false,
+      identity: identity,
+      city: city,
     );
   }
 
@@ -7391,6 +8544,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return 'This trip request expired.';
     }
 
+    if (_isQueuedDriverTripWaiting) {
+      return 'Driver is completing another trip first';
+    }
+    if (_isQueuedDriverHeadingToPickup) {
+      return 'Driver is now heading to your pickup';
+    }
+
     final canonicalState = TripStateMachine.canonicalStateFromSnapshot(
       _currentRideSnapshot ?? const <String, dynamic>{},
     );
@@ -7612,6 +8772,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     ].join('|');
   }
 
+  String _riderListenerIdentitySignature(Map<String, dynamic>? rideData) {
+    if (rideData == null || rideData.isEmpty) {
+      return '';
+    }
+    return <String>[
+      _valueAsText(rideData['driver_photo_url']),
+      _valueAsText(rideData['driverPhotoUrl']),
+      _valueAsText(rideData['profilePhotoUrl']),
+      _valueAsText(rideData['vehicleColor']),
+      _valueAsText(rideData['vehicleMake']),
+      _valueAsText(rideData['vehicleModel']),
+      _valueAsText(rideData['plateNumber']),
+      _valueAsText(rideData['plate_number']),
+      _valueAsText(rideData['plate']),
+      _valueAsText(rideData['driver_verification_status']),
+      _valueAsText(rideData['verificationStatus']),
+    ].join('|');
+  }
+
   String _rideUiSignature({
     required String rideId,
     required String status,
@@ -7626,6 +8805,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       rideData?['final_destination_address']?.toString().trim() ?? '',
       _stopsSignature(rideData?['stops']),
       _driverUiSignature(driverData),
+      _riderListenerIdentitySignature(rideData),
       _riderListenerLifecycleSignature(rideData),
     ].join('||');
   }
@@ -7821,6 +9001,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
 
     _notifyMapLayerChanged();
+    _schedulePreviewEtaChipPositionSync();
   }
 
   Future<void> _playChatNotificationSound() async {
@@ -8126,11 +9307,368 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return markerId == 'driver' ||
           markerId == 'pickup' ||
           markerId == 'destination' ||
-          markerId.startsWith('stop_');
+          markerId.startsWith('stop_') ||
+          markerId.startsWith('nearby_driver_');
     });
     _driverAnimationGeneration++;
     _driverMarker = null;
+    _nearbyDriverAnimatedPositions.clear();
     _syncTripLocationMarkers();
+  }
+
+  String get _riderDispatchMarketForPreview =>
+      _resolveDispatchMarketSlug(_selectedLaunchCity);
+
+  bool get _showBoltRequestPreview =>
+      !_hasActiveRide &&
+      !_isRiderRequestMatchingPhase &&
+      _hasRoutePreviewReady;
+
+  String get _riderTripPaymentMethodLabel {
+    final pm = _riderTripPaymentMethod
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[\s-]+'), '_');
+    if (pm == 'bank_transfer' || pm == 'flutterwave_va') {
+      return 'Bank transfer';
+    }
+    return 'Card';
+  }
+
+  IconData get _riderTripPaymentMethodIcon {
+    final pm = _riderTripPaymentMethod
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[\s-]+'), '_');
+    if (pm == 'bank_transfer' || pm == 'flutterwave_va') {
+      return Icons.account_balance_outlined;
+    }
+    return Icons.credit_card_outlined;
+  }
+
+  String get _pickupEtaPreviewLabel =>
+      RiderNearbyDriversPreviewService.pickupEtaPreviewLabel(
+        drivers: _nearbyDriversPreview,
+      );
+
+  String get _dropoffEtaPreviewLabel =>
+      RiderNearbyDriversPreviewService.dropoffEtaPreviewLabel(
+        _estimatedDurationMin,
+      );
+
+  Future<BitmapDescriptor> _nearbyDriverCarMarkerIconResolved() {
+    final cached = _nearbyDriverCarMarkerIcon;
+    if (cached != null) {
+      return Future<BitmapDescriptor>.value(cached);
+    }
+    _nearbyDriverCarMarkerIconLoad ??=
+        Future<BitmapDescriptor>.value(
+      BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+    ).then((BitmapDescriptor icon) {
+      _nearbyDriverCarMarkerIcon = icon;
+      return icon;
+    });
+    return _nearbyDriverCarMarkerIconLoad!;
+  }
+
+  void _schedulePreviewEtaChipPositionSync() {
+    if (!_showBoltRequestPreview) {
+      if (_pickupEtaChipScreenOffset != null ||
+          _dropoffEtaChipScreenOffset != null) {
+        setState(() {
+          _pickupEtaChipScreenOffset = null;
+          _dropoffEtaChipScreenOffset = null;
+        });
+      }
+      return;
+    }
+    unawaited(_syncPreviewEtaChipScreenPositions());
+  }
+
+  Offset? _raisePreviewEtaChipAboveBottomSheet(Offset? markerScreen) {
+    if (markerScreen == null || !mounted) {
+      return markerScreen;
+    }
+
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final sheetTopY = screenHeight * (1 - _planRideSheetExtent);
+    final chipBottomY = markerScreen.dy -
+        (_previewEtaChipBottomInset * _previewEtaChipEstimatedHeight);
+    final maxChipBottomY = sheetTopY - _previewEtaChipSheetClearance;
+    if (chipBottomY <= maxChipBottomY) {
+      return markerScreen;
+    }
+
+    return Offset(
+      markerScreen.dx,
+      markerScreen.dy - (chipBottomY - maxChipBottomY),
+    );
+  }
+
+  Future<void> _syncPreviewEtaChipScreenPositions() async {
+    if (!mounted ||
+        !_showBoltRequestPreview ||
+        !_mapReady ||
+        _mapController == null) {
+      return;
+    }
+
+    final controller = _mapController!;
+    Offset? pickupOffset;
+    Offset? dropoffOffset;
+
+    final pickup = _pickupLocation;
+    if (pickup != null) {
+      try {
+        final screenCoordinate = await controller.getScreenCoordinate(pickup);
+        pickupOffset = Offset(
+          screenCoordinate.x.toDouble(),
+          screenCoordinate.y.toDouble(),
+        );
+      } catch (error) {
+        debugPrint('RIDER_PREVIEW_ETA_CHIP pickup screen coord failed: $error');
+      }
+    }
+
+    final dropoff = _destinationLocation;
+    if (dropoff != null) {
+      try {
+        final screenCoordinate = await controller.getScreenCoordinate(dropoff);
+        dropoffOffset = Offset(
+          screenCoordinate.x.toDouble(),
+          screenCoordinate.y.toDouble(),
+        );
+      } catch (error) {
+        debugPrint('RIDER_PREVIEW_ETA_CHIP dropoff screen coord failed: $error');
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    pickupOffset = _raisePreviewEtaChipAboveBottomSheet(pickupOffset);
+    dropoffOffset = _raisePreviewEtaChipAboveBottomSheet(dropoffOffset);
+
+    if (pickupOffset == _pickupEtaChipScreenOffset &&
+        dropoffOffset == _dropoffEtaChipScreenOffset) {
+      return;
+    }
+
+    setState(() {
+      _pickupEtaChipScreenOffset = pickupOffset;
+      _dropoffEtaChipScreenOffset = dropoffOffset;
+    });
+  }
+
+  Widget _buildAnchoredPreviewEtaChip({
+    required Offset screenPosition,
+    required String label,
+    required String etaText,
+    required String previewCaption,
+    required Color accentColor,
+  }) {
+    return Positioned(
+      left: screenPosition.dx,
+      top: screenPosition.dy,
+      child: FractionalTranslation(
+        translation: const Offset(-0.5, -1.18),
+        child: IgnorePointer(
+          child: RiderRequestPreviewEtaChip(
+            label: label,
+            etaText: etaText,
+            previewCaption: previewCaption,
+            accentColor: accentColor,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Preview-only: stops map decoration listeners. Does not touch dispatch/matching.
+  void _onNearbyDriversPreviewUpdated(List<RiderNearbyDriverPreview> drivers) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _nearbyDriversPreview = drivers;
+    });
+    unawaited(
+      _applyNearbyDriverMarkers(drivers).whenComplete(
+        _schedulePreviewEtaChipPositionSync,
+      ),
+    );
+  }
+
+  void _syncNearbyDriversPreviewListener() {
+    final shouldListen = _showBoltRequestPreview && _pickupLocation != null;
+    if (!shouldListen) {
+      _stopNearbyDriversPreviewListener();
+      return;
+    }
+    _nearbyDriversPreviewService.start(
+      dispatchMarket: _riderDispatchMarketForPreview,
+      pickupAnchor: _pickupLocation!,
+      onUpdate: _onNearbyDriversPreviewUpdated,
+    );
+  }
+
+  /// Map markers prefixed `nearby_driver_` — UI decoration only, never written to RTDB.
+  Future<void> _applyNearbyDriverMarkers(
+    List<RiderNearbyDriverPreview> drivers,
+  ) async {
+    _nearbyDriverMarkerAnimationTimer?.cancel();
+    if (_blocksRideUiWithCreationOverlay || _searchingDriver) {
+      _markers.removeWhere(
+        (m) => m.markerId.value.startsWith('nearby_driver_'),
+      );
+      _nearbyDriverAnimatedPositions.clear();
+      _notifyMapLayerChanged();
+      return;
+    }
+    final targets = <String, LatLng>{
+      for (final d in drivers) d.driverId: d.position,
+    };
+
+    if (targets.isEmpty) {
+      _markers.removeWhere(
+        (m) => m.markerId.value.startsWith('nearby_driver_'),
+      );
+      _nearbyDriverAnimatedPositions.clear();
+      _notifyMapLayerChanged();
+      return;
+    }
+
+    BitmapDescriptor carIcon;
+    try {
+      carIcon = await _nearbyDriverCarMarkerIconResolved();
+    } catch (error) {
+      debugPrint('RIDER_PREVIEW_DRIVER_CAR_ICON failed: $error');
+      carIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+    }
+
+    void renderFrame() {
+      _markers.removeWhere(
+        (m) => m.markerId.value.startsWith('nearby_driver_'),
+      );
+      for (final driver in drivers) {
+        final id = driver.driverId;
+        final target = targets[id] ?? driver.position;
+        final previous = _nearbyDriverAnimatedPositions[id] ?? target;
+        final animated = LatLng(
+          previous.latitude + (target.latitude - previous.latitude) * 0.35,
+          previous.longitude + (target.longitude - previous.longitude) * 0.35,
+        );
+        _nearbyDriverAnimatedPositions[id] = animated;
+        _markers.add(
+          Marker(
+            markerId: MarkerId('nearby_driver_$id'),
+            position: animated,
+            rotation: driver.heading ?? 0,
+            flat: true,
+            anchor: const Offset(0.5, 0.5),
+            zIndexInt: 1,
+            icon: carIcon,
+          ),
+        );
+      }
+      _notifyMapLayerChanged();
+    }
+
+    renderFrame();
+    debugPrint(
+      'RIDER_PREVIEW_DRIVER_MARKERS_UPDATED count=${drivers.length} '
+      'preview_only=true car_icon=true',
+    );
+    var ticks = 0;
+    _nearbyDriverMarkerAnimationTimer =
+        Timer.periodic(const Duration(milliseconds: 150), (Timer timer) {
+      ticks += 1;
+      if (ticks > 6 || !mounted) {
+        timer.cancel();
+        _nearbyDriverMarkerAnimationTimer = null;
+        return;
+      }
+      renderFrame();
+    });
+  }
+
+  void _stopNearbyDriversPreviewListener() {
+    _nearbyDriverMarkerAnimationTimer?.cancel();
+    _nearbyDriverMarkerAnimationTimer = null;
+    _nearbyDriversPreviewService.stop();
+    _nearbyDriversPreview = const <RiderNearbyDriverPreview>[];
+    _nearbyDriverAnimatedPositions.clear();
+    _markers.removeWhere(
+      (m) => m.markerId.value.startsWith('nearby_driver_'),
+    );
+    _notifyMapLayerChanged();
+  }
+
+  Future<void> _handleSelectNexRideFromPreview() async {
+    debugPrint(
+      'RIDER_PREVIEW_SELECT_NEXRIDE routeReady=$_hasRoutePreviewReady '
+      'fare=$_fare nearbyPreviewCount=${_nearbyDriversPreview.length} '
+      'preview_only_markers=true',
+    );
+    await handlePrimaryRideAction();
+  }
+
+  Future<void> _showTripPaymentMethodPicker() async {
+    if (_isTripPaymentSelectionLocked) {
+      return;
+    }
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                const Text(
+                  'Payment for this trip',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                ListTile(
+                  leading: const Icon(Icons.credit_card_outlined),
+                  title: const Text('Card'),
+                  trailing: _riderTripPaymentMethodLabel == 'Card'
+                      ? const Icon(Icons.check_circle, color: _gold)
+                      : null,
+                  onTap: () {
+                    setState(() => _riderTripPaymentMethod = 'flutterwave');
+                    Navigator.pop(context);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.account_balance_outlined),
+                  title: const Text('Bank transfer'),
+                  trailing: _riderTripPaymentMethodLabel == 'Bank transfer'
+                      ? const Icon(Icons.check_circle, color: _gold)
+                      : null,
+                  onTap: () {
+                    setState(() => _riderTripPaymentMethod = 'bank_transfer');
+                    Navigator.pop(context);
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _loadDrivers() {
+    _syncNearbyDriversPreviewListener();
   }
 
   String _routeSignature(List<LatLng> route) {
@@ -8183,6 +9721,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
     final routeComputationGeneration = ++_routePreviewComputationGeneration;
+    _clearRideServerPricingQuote();
     final pickup = _pickupLocation;
     final dropOffs = List<LatLng>.from(_orderedDropOffLocations());
     if (pickup == null || dropOffs.isEmpty) {
@@ -8192,12 +9731,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _distanceKm = 0;
       _estimatedDurationMin = 0;
       _fare = 0;
+      _clearRideServerPricingQuote();
       _routePreviewError = null;
       _expectedRoutePoints.clear();
       _lastRenderedRouteSignature = '';
       _polylines = <Polyline>{};
       _syncTripLocationMarkers();
       _notifyMapLayerChanged();
+      _stopNearbyDriversPreviewListener();
 
       if (mounted) {
         setState(() {});
@@ -8288,11 +9829,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _distanceKm = 0;
       _estimatedDurationMin = 0;
       _fare = 0;
+      _clearRideServerPricingQuote();
       _expectedRoutePoints.clear();
       _lastRenderedRouteSignature = '';
       _polylines = <Polyline>{};
       _syncTripLocationMarkers();
       _notifyMapLayerChanged();
+      _stopNearbyDriversPreviewListener();
 
       if (mounted) {
         setState(() {});
@@ -8329,7 +9872,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _distanceKm = fareBreakdown.distanceKm;
       _estimatedDurationMin = fareBreakdown.durationMin;
       _fare =
-          fareBreakdown.totalFare +
+          fareBreakdown.rideSubtotalBeforeBookingFee +
           (_waitingCharged ? RiderFareSettings.waitingCharge : 0);
     } else {
       _distanceKm = double.parse(totalDistanceKm.toStringAsFixed(2));
@@ -8358,7 +9901,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _logRideFlow(
       'search route updated pickup=${_formatLatLng(pickup)} stops=${dropOffs.length} polylinePoints=${route.length} distanceKm=${_distanceKm.toStringAsFixed(2)} durationMin=${_estimatedDurationMin.toStringAsFixed(1)} fare=$_fare',
     );
+    unawaited(
+      _refreshRideServerPricingQuote(
+        source: 'route_preview',
+        routeGeneration: routeComputationGeneration,
+        dispatchMarket: _resolveDispatchMarketSlug(city),
+      ),
+    );
+    _syncNearbyDriversPreviewListener();
     _moveCamera();
+    _schedulePreviewEtaChipPositionSync();
   }
 
   Future<LatLng?> _resolvePlaceLocation({
@@ -8467,6 +10019,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _additionalStopAddresses[extraStopIndex] = description;
       _additionalStopLocations[extraStopIndex] = point;
       _additionalStopControllers[extraStopIndex].text = description;
+
+      await RiderSavedPlacesStore.instance.recordRecent(
+        suggestion,
+        latitude: point.latitude,
+        longitude: point.longitude,
+      );
       await _syncLaunchCityFromSelection(
         source: 'stop_${extraStopIndex + 2}',
         addressHint: description,
@@ -8521,6 +10079,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _destinationLocation = point;
         _destinationController.text = description;
       }
+
+      await RiderSavedPlacesStore.instance.recordRecent(
+        suggestion,
+        latitude: point.latitude,
+        longitude: point.longitude,
+      );
 
       await _syncLaunchCityFromSelection(
         source: isPickup ? 'pickup' : 'destination',
@@ -8920,7 +10484,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
-  bool _handleRideCreateStructuredFailure(Map<String, dynamic> res) {
+  Future<bool> _handleRideCreateStructuredFailure(
+    Map<String, dynamic> res,
+  ) async {
     final reason = riderRideCallableReason(res);
     if (reason == 'pickup_outside_selected_service_area') {
       final areaName = _firstNonEmptyText(<dynamic>[
@@ -8965,9 +10531,53 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       return true;
     }
-    if (RiderBackendPricingQuote.isPricingTotalMismatch(res)) {
-      _showSnackBar(RiderBackendPricingQuote.pricingMismatchUserMessage(res));
-      unawaited(_refreshRoutePreviewAfterPricingMismatch());
+    if (RiderBackendPricingQuote.isOutstandingWaitingBalance(res)) {
+      final outstandingNgn = RiderBackendPricingQuote.outstandingWaitingBalanceNgn(res);
+      debugPrint(
+        '[RIDER_OUTSTANDING_BALANCE] amount=$outstandingNgn '
+        'sources=${res['outstanding_sources']}',
+      );
+      if (mounted) {
+        setState(() {
+          _rideStatus = 'idle';
+          _searchingDriver = false;
+          _isCreatingRide = false;
+        });
+      } else {
+        _rideStatus = 'idle';
+        _searchingDriver = false;
+        _isCreatingRide = false;
+      }
+      if (mounted) {
+        final paid = await RiderOutstandingBalanceSheet.show(
+          context,
+          outstandingNgn: outstandingNgn,
+          serverMessage: RiderBackendPricingQuote.outstandingWaitingBalanceUserMessage(res),
+        );
+        if (paid == true && mounted) {
+          _showSnackBar('Outstanding balance cleared. You can request your ride again.');
+        }
+      }
+      return true;
+    }
+    final pricingMsg = RiderBackendPricingQuote.pricingMismatchUserMessage(res);
+    if (pricingMsg.isNotEmpty) {
+      debugPrint(
+        '[CREATE_RIDE_PRICING_REJECTED] reason=$reason '
+        'reason_code=${res['reason_code']} message=$pricingMsg',
+      );
+      if (mounted) {
+        setState(() {
+          _rideStatus = 'idle';
+          _searchingDriver = false;
+          _isCreatingRide = false;
+        });
+      } else {
+        _rideStatus = 'idle';
+        _searchingDriver = false;
+        _isCreatingRide = false;
+      }
+      _showSnackBar(pricingMsg);
       return true;
     }
     if (reason == 'card_authorization_failed' || reason == 'card_not_linked') {
@@ -9220,6 +10830,20 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return;
     }
 
+    final profileBlock = await RiderProfileRequirement.evaluate(user.uid);
+    if (profileBlock != RiderProfileBlock.none) {
+      final reason = profileBlock == RiderProfileBlock.missingPhone
+          ? 'missing_phone'
+          : 'missing_photo';
+      print('PROFILE_REQUIREMENT_BLOCKED reason=$reason');
+      _logRideFlow('createRideRequest blocked reason=$reason');
+      _promptCompleteProfile(
+        user.uid,
+        RiderProfileRequirement.messageFor(profileBlock, 'request a ride'),
+      );
+      return;
+    }
+
     if (await _blockIfBankTransferReceiptPending(user.uid)) {
       return;
     }
@@ -9247,17 +10871,32 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _logRideFlow('REQUEST RIDE precheck outcome=resumed_active_trip');
         return;
       }
+      final serverQuote = _latestServerPricingQuote;
+      if (serverQuote == null || !serverQuote.hasAuthoritativeTotal) {
+        print('BLOCKED_REASON: server_pricing_quote_unavailable');
+        _logCreateRideBlocked('server_pricing_quote_unavailable');
+        _showSnackBar(
+          _ridePricingQuoteError ??
+              'Could not confirm your fare. Check your connection and try again.',
+        );
+        if (mounted) {
+          setState(() {
+            _rideStatus = 'idle';
+            _searchingDriver = false;
+            _isCreatingRide = false;
+          });
+        } else {
+          _rideStatus = 'idle';
+          _searchingDriver = false;
+          _isCreatingRide = false;
+        }
+        return;
+      }
       // Canonical slug must match driver `orderByChild('market_pool').equalTo(...)` byte-for-byte.
       var dispatchMarket =
-          RiderServiceAreaConfig.marketForCity(city).city.trim().toLowerCase();
-      if (_rolloutSelectionComplete &&
-          (_rolloutDispatchMarketId ?? '').trim().isNotEmpty) {
-        dispatchMarket = RiderServiceAreaConfig.marketForCity(
-          _rolloutDispatchMarketId,
-        ).city.trim().toLowerCase();
-      }
+          (serverQuote.quoteMarket ?? '').trim().toLowerCase();
       if (dispatchMarket.isEmpty) {
-        dispatchMarket = 'lagos';
+        dispatchMarket = _resolveDispatchMarketSlug(city);
       }
       if (dispatchMarket != city) {
         _logRideFlow(
@@ -9348,19 +10987,30 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final searchTimeoutAt =
           DateTime.now().millisecondsSinceEpoch +
           _rideSearchTimeoutDuration.inMilliseconds;
-      RiderFareRule? livePricingRule;
-      try {
-        livePricingRule = await RegionPricingService.instance.ruleForCity(dispatchMarket);
-      } catch (_) {
-        livePricingRule = RiderFareSettings.maybeForCity(dispatchMarket);
-      }
-      final fareBreakdown = calculateRiderFare(
-        serviceKey: RiderServiceType.ride.key,
-        city: dispatchMarket,
-        distanceKm: _distanceKm,
-        durationMin: _estimatedDurationMin,
-        liveRule: livePricingRule,
+      final quoteDistanceKm = serverQuote.quoteDistanceKm ?? _quoteDistanceKmForRequest();
+      final quoteEtaMin = serverQuote.quoteEtaMin ?? _quoteEtaMinForRequest();
+      final pricingPayload = RiderBackendPricingQuote.buildRideCreatePricingPayload(
+        serverQuote,
+        dispatchMarket: dispatchMarket,
       );
+      if (serverQuote.routeStopsHash != null &&
+          serverQuote.routeStopsHash!.isNotEmpty) {
+        pricingPayload['route_stops_hash'] = serverQuote.routeStopsHash;
+        pricingPayload['quote_route_stops_hash'] = serverQuote.routeStopsHash;
+      }
+      RiderBackendPricingQuote.logClientQuoteUsedForCreate(
+        quote: serverQuote,
+        dispatchMarket: dispatchMarket,
+      );
+      final fareMetadata = <String, dynamic>{
+        'source': 'server_quote',
+        'distanceKm': quoteDistanceKm,
+        'durationMin': quoteEtaMin,
+        'totalFare': serverQuote.tripFareNgn,
+        'bookingFeeNgn': serverQuote.platformFeeNgn,
+        'finalFare': serverQuote.tripFareNgn,
+        if (serverQuote.quoteId != null) 'pricing_quote_id': serverQuote.quoteId,
+      };
       final pickupScope = _buildServiceAreaFields(city: dispatchMarket, area: '');
       final destinationScope =
           _buildServiceAreaFields(city: dispatchMarket, area: '');
@@ -9410,10 +11060,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'final_destination_address': destinationAddress,
         'stops': stops,
         'stop_count': stopCount,
-        'fare': fareBreakdown.totalFare,
-        'distance_km': fareBreakdown.distanceKm,
-        'duration_min': fareBreakdown.durationMin,
-        RtdbRideRequestFields.etaMin: fareBreakdown.durationMin,
+        'fare': serverQuote.tripFareNgn,
+        'distance_km': quoteDistanceKm,
+        'duration_min': quoteEtaMin,
+        RtdbRideRequestFields.etaMin: quoteEtaMin,
         'dropoff': destinationPayload,
         'payment_method': normalizedPaymentMethod,
         RtdbRideRequestFields.paymentStatus: 'pending',
@@ -9423,7 +11073,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'cancelled_at': null,
         'completed_at': null,
         'cancel_reason': '',
-        'fare_breakdown': fareBreakdown.toMap(),
+        'fare_breakdown': fareMetadata,
         'rider_trust_snapshot': <String, dynamic>{
           'verificationStatus':
               accessDecision.toMap()['restrictionCode'] == '' &&
@@ -9451,10 +11101,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'destination_address': destinationAddress,
           'stops': stops,
           'stop_count': stopCount,
-          'distance_km': fareBreakdown.distanceKm,
-          'duration_min': fareBreakdown.durationMin,
-          'fare_estimate': fareBreakdown.totalFare,
-          'fare_breakdown': fareBreakdown.toMap(),
+          'distance_km': quoteDistanceKm,
+          'duration_min': quoteEtaMin,
+          'fare_estimate': serverQuote.tripFareNgn,
+          'fare_breakdown': fareMetadata,
           'expected_route_points': expectedRoutePayload,
         },
         'created_at': rtdb.ServerValue.timestamp,
@@ -9552,7 +11202,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       debugPrint(
         'RIDER_CREATE_CALLABLE_START uid=${user.uid} market=$dispatchMarket '
-        'fare=${fareBreakdown.totalFare} payment=${searchingPayload['payment_method']}',
+        'fare=${serverQuote.tripFareNgn} payment=${searchingPayload['payment_method']}',
       );
       final isCardPaymentRequest =
           _isCardFamilyPaymentMethod(normalizedPaymentMethod);
@@ -9560,6 +11210,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _logRideFlow('CARD_AUTH_START rideId=pending_callable');
         _showSnackBar('Authorizing card…');
       }
+      final riderPhotoUrlForRequest =
+          await RiderProfileRequirement.photoUrlOf(user.uid);
+      final riderPhoneForRequest =
+          await RiderProfileRequirement.phoneOf(user.uid);
+      final riderNameForRequest = _firstNonEmptyText(
+        <dynamic>[
+          _trustSummary['displayName'],
+          _trustSummary['name'],
+          FirebaseAuth.instance.currentUser?.displayName,
+          FirebaseAuth.instance.currentUser?.email?.split('@').first,
+        ],
+        fallback: 'Rider',
+      );
       final createPayload = <String, dynamic>{
         'market': dispatchMarket,
         'market_pool': dispatchMarket,
@@ -9570,22 +11233,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           'rollout_city_id': _rolloutCityId!.trim(),
         },
         'rider_id': user.uid,
-        'rider_name': _firstNonEmptyText(
-          <dynamic>[
-            _trustSummary['displayName'],
-            _trustSummary['name'],
-            FirebaseAuth.instance.currentUser?.displayName,
-            FirebaseAuth.instance.currentUser?.email?.split('@').first,
-          ],
-          fallback: 'Rider',
-        ),
+        'rider_name': riderNameForRequest,
+        // camelCase mirror so portals/driver UI can read either convention.
+        'riderName': riderNameForRequest,
+        if (riderPhotoUrlForRequest.isNotEmpty) ...<String, dynamic>{
+          'rider_photo_url': riderPhotoUrlForRequest,
+          'riderPhotoUrl': riderPhotoUrlForRequest,
+        },
+        if (riderPhoneForRequest.isNotEmpty) ...<String, dynamic>{
+          'rider_phone': riderPhoneForRequest,
+          'riderPhone': riderPhoneForRequest,
+        },
         'pickup': pickupPayload,
         'dropoff': destinationPayload,
-        'fare': fareBreakdown.totalFare,
+        'stops': stops,
+        'stop_count': stopCount,
+        'quote_stops': stops,
+        ...pricingPayload,
         'currency': 'NGN',
-        'distance_km': fareBreakdown.distanceKm,
-        'eta_min': fareBreakdown.durationMin,
-        'eta_minutes': fareBreakdown.durationMin,
         'payment_method': normalizedPaymentMethod,
         'status': 'requesting',
         'trip_state': 'requesting',
@@ -9594,6 +11259,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'created_at': DateTime.now().millisecondsSinceEpoch,
         'ride_metadata': rideMetadataSubset(searchingPayload),
       };
+      RiderBackendPricingQuote.logCreateRidePayloadClient(
+        quote: serverQuote,
+        displayedTotalNgn: serverQuote.totalNgn,
+        createPayload: createPayload,
+        source: 'latest_server_quote',
+      );
+      _logPaymentAmountSelected(
+        source: 'create_ride_request',
+        payableTotalNgn: serverQuote.totalNgn,
+        tripFareNgn: serverQuote.tripFareNgn,
+      );
       debugCreatePayload = Map<String, dynamic>.from(createPayload);
       if (kDebugMode) {
         debugPrint(
@@ -9603,6 +11279,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         );
       }
       Map<String, dynamic> createRes;
+      var quoteRouteRetried = false;
       try {
         createRes = await _rideCloud
             .createRideRequest(createPayload)
@@ -9635,12 +11312,57 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         debugPrint('[RIDER_CREATE_DEBUG] callable_response=$createRes');
       }
       if (!riderRideCallableSucceeded(createRes)) {
-        if (_handleRideCreateStructuredFailure(
+        var reason = riderRideCallableReason(createRes);
+        if (reason == 'quote_route_changed' && !quoteRouteRetried) {
+          quoteRouteRetried = true;
+          await _ensureRouteMetrics();
+          final refreshedQuote = await _refreshRideServerPricingQuote(
+            source: 'quote_route_retry',
+            dispatchMarket: dispatchMarket,
+          );
+          if (refreshedQuote != null) {
+            createPayload.addAll(
+              RiderBackendPricingQuote.buildRideCreatePricingPayload(
+                refreshedQuote,
+                dispatchMarket: dispatchMarket,
+              ),
+            );
+            createPayload['dropoff_lat'] = finalStop['lat'];
+            createPayload['dropoff_lng'] = finalStop['lng'];
+            createPayload['quote_dropoff_lat'] = finalStop['lat'];
+            createPayload['quote_dropoff_lng'] = finalStop['lng'];
+            createPayload['stops'] = stops;
+            createPayload['stop_count'] = stopCount;
+            createPayload['quote_stops'] = stops;
+            if (refreshedQuote.routeStopsHash != null &&
+                refreshedQuote.routeStopsHash!.isNotEmpty) {
+              createPayload['route_stops_hash'] = refreshedQuote.routeStopsHash;
+              createPayload['quote_route_stops_hash'] = refreshedQuote.routeStopsHash;
+            }
+            debugPrint(
+              'ROUTE_QUOTE_RETRY_OK quote_id=${refreshedQuote.quoteId} '
+              'hash=${refreshedQuote.routeStopsHash ?? 'n/a'}',
+            );
+            try {
+              createRes = await _rideCloud
+                  .createRideRequest(createPayload)
+                  .timeout(const Duration(seconds: 45));
+              reason = riderRideCallableReason(createRes);
+            } catch (error) {
+              if (kDebugMode) {
+                debugPrint(
+                  '[RIDER_CREATE_DEBUG] quote_route_retry_exception error=$error',
+                );
+              }
+              rethrow;
+            }
+          }
+        }
+        if (await _handleRideCreateStructuredFailure(
           Map<String, dynamic>.from(createRes),
         )) {
           return;
         }
-        var reason = riderRideCallableReason(createRes);
         final recoveredRideId = _firstNonEmptyText(<dynamic>[
           createRes['rideId'],
           createRes['ride_id'],
@@ -9697,7 +11419,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 _logRideFlow(
                   '[RIDER_REQ] create_retry_failed reason=$retryReason',
                 );
-                if (_handleRideCreateStructuredFailure(
+                if (await _handleRideCreateStructuredFailure(
                   Map<String, dynamic>.from(createRes),
                 )) {
                   return;
@@ -9731,7 +11453,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             if (!riderRideCallableSucceeded(createRes)) {
               final retryReason = riderRideCallableReason(createRes);
               _logRideFlow('[RIDER_REQ] create_retry_failed reason=$retryReason');
-              if (_handleRideCreateStructuredFailure(
+              if (await _handleRideCreateStructuredFailure(
                 Map<String, dynamic>.from(createRes),
               )) {
                 return;
@@ -9745,7 +11467,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             ]);
           }
         } else {
-          if (_handleRideCreateStructuredFailure(
+          if (await _handleRideCreateStructuredFailure(
             Map<String, dynamic>.from(createRes),
           )) {
             return;
@@ -10009,6 +11731,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _resetRideState(clearDestination: true);
         return;
       }
+      debugPrint(
+        '[RIDE_CREATE_SUCCESS] rideId=$rideId '
+        'total_ngn=${serverQuote.totalNgn} '
+        'quote_id=${serverQuote.quoteId ?? 'n/a'}',
+      );
       _logRideFlow('REQUEST RIDE createRideRequest succeeded rideId=$rideId');
       _logRideFlow('RTDB snapshot confirmed rideId=$rideId');
       _logRideFlow(
@@ -10167,13 +11894,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Future<void> _clearStaleActiveTripArtifacts({
     required String rideId,
     required String reason,
-    bool clearRideRequestNode = true,
   }) async {
     final uid = _currentRiderUid?.trim() ?? '';
     final normalizedRideId = rideId.trim();
     _logRideFlow(
-      'ACTIVE_TRIP_CLEARED reason=$reason uid=${uid.isEmpty ? 'none' : uid} rideId=${normalizedRideId.isEmpty ? 'none' : normalizedRideId} '
-      'clearRideRequestNode=$clearRideRequestNode',
+      'ACTIVE_TRIP_CLEARED reason=$reason uid=${uid.isEmpty ? 'none' : uid} rideId=${normalizedRideId.isEmpty ? 'none' : normalizedRideId}',
     );
     _logRideFlow(
       'ACTIVE_TRIP_CLEANED reason=$reason uid=${uid.isEmpty ? 'none' : uid} rideId=${normalizedRideId.isEmpty ? 'none' : normalizedRideId}',
@@ -10202,22 +11927,38 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           await rtdb.FirebaseDatabase.instance
               .ref('$_riderActiveTripPointerPath/$uid')
               .remove();
+          debugPrint('RIDER_ACTIVE_TRIP_CLEARED uid=$uid reason=$reason');
         } catch (error) {
           _logRideFlow(
             'ACTIVE_TRIP_CLEARED pointer_clear_failed uid=$uid error=$error',
           );
         }
+        try {
+          await rtdb.FirebaseDatabase.instance.ref('users/$uid').update(<String, Object?>{
+            'activeRideId': null,
+            'active_ride_id': null,
+            'currentRideId': null,
+          });
+          await rtdb.FirebaseDatabase.instance.ref('riders/$uid').update(<String, Object?>{
+            'activeRideId': null,
+            'active_ride_id': null,
+          });
+        } catch (error) {
+          _logRideFlow(
+            'ACTIVE_TRIP_CLEARED user_pointer_clear_failed uid=$uid error=$error',
+          );
+        }
       }
     }
     if (normalizedRideId.isNotEmpty) {
-      if (clearRideRequestNode) {
-        try {
-          await _rideRequestsRef.child(normalizedRideId).remove();
-        } catch (error) {
-          _logRideFlow(
-            'ACTIVE_TRIP_CLEARED ride_request_clear_failed rideId=$normalizedRideId error=$error',
-          );
-        }
+      try {
+        await rtdb.FirebaseDatabase.instance
+            .ref('active_trips/$normalizedRideId')
+            .remove();
+      } catch (error) {
+        _logRideFlow(
+          'ACTIVE_TRIP_CLEARED active_trips_clear_failed rideId=$normalizedRideId error=$error',
+        );
       }
     }
   }
@@ -10234,7 +11975,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     await _clearStaleActiveTripArtifacts(
       rideId: '',
       reason: 'pointer_only_best_effort',
-      clearRideRequestNode: false,
     );
   }
 
@@ -10260,7 +12000,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _clearStaleActiveTripArtifacts(
           rideId: '',
           reason: 'precheck_missing_ride_id',
-          clearRideRequestNode: false,
         );
         return _ActiveTripPrecheckOutcome.staleCleared;
       }
@@ -10273,7 +12012,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _clearStaleActiveTripArtifacts(
           rideId: rideId,
           reason: 'precheck_missing_ride_node',
-          clearRideRequestNode: false,
         );
         return _ActiveTripPrecheckOutcome.staleCleared;
       }
@@ -10289,8 +12027,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await _clearStaleActiveTripArtifacts(
           rideId: rideId,
           reason: 'precheck_ride_not_hydratable',
-          clearRideRequestNode: false,
         );
+        debugPrint('RIDER_READY_FOR_NEW_REQUEST uid=$uid reason=precheck_stale_cleared');
         return _ActiveTripPrecheckOutcome.staleCleared;
       }
       final status = TripStateMachine.uiStatusFromSnapshot(rideData);
@@ -10403,6 +12141,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           rideData: data,
           source: 'ride_requests',
         );
+        _maybeLogQueuedDriverNotice(rideId, data);
         _logRideFlow(
           'RIDER_ACTIVE_RIDE_SNAPSHOT rideId=$rideId '
           'state=${_riderVisibleStatusFromRideData(data)} '
@@ -10582,7 +12321,43 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           _startRiderChatListener(rideId);
         }
         _syncRiderPaymentMethodFromRide(Map<String, dynamic>.from(data));
-        _driverData = nextDriverData ?? _extractDriverData(data);
+        _driverData = mergeDriverDataPreservingNonEmpty(
+          previous: _driverData,
+          next: nextDriverData ?? _extractDriverData(data),
+        );
+        _maybeScheduleRideIdentityRefresh(rideId: rideId, rideData: data);
+        if (_rideSnapshotShowsAssignedDriver(data)) {
+          final assignedDriverId = _firstNonEmptyText(<dynamic>[
+            data['driver_id'],
+            data['driverId'],
+            data['accepted_driver_id'],
+            data['matched_driver_id'],
+          ]);
+          final snapshotIdentity = DriverVehicleIdentity.merge(rideRecord: data);
+          debugPrint(
+            'RIDER_DRIVER_IDENTITY_HARD_TRACE rideId=$rideId '
+            'driverId=$assignedDriverId '
+            'ride_requests_plate=${snapshotIdentity.plateNumber.isEmpty ? "missing" : snapshotIdentity.plateNumber} '
+            'ride_requests_type=${snapshotIdentity.vehicleType.isEmpty ? "missing" : snapshotIdentity.vehicleType} '
+            'ride_requests_color=${snapshotIdentity.vehicleColor.isEmpty ? "missing" : snapshotIdentity.vehicleColor} '
+            'ride_requests_make=${snapshotIdentity.vehicleMake.isEmpty ? "missing" : snapshotIdentity.vehicleMake} '
+            'ride_requests_model=${snapshotIdentity.vehicleModel.isEmpty ? "missing" : snapshotIdentity.vehicleModel}',
+          );
+          if (assignedDriverId.isNotEmpty &&
+              (snapshotIdentity.name.isEmpty ||
+                  snapshotIdentity.phone.isEmpty ||
+                  snapshotIdentity.plateNumber.isEmpty ||
+                  snapshotIdentity.vehicleColor.isEmpty ||
+                  snapshotIdentity.vehicleMake.isEmpty ||
+                  snapshotIdentity.vehicleModel.isEmpty)) {
+            unawaited(
+              _mergeDriverPublicProfile(
+                assignedDriverId,
+                rideRecord: data,
+              ),
+            );
+          }
+        }
         _activeTripSessionService.updateFromRideSnapshot(
           rideId,
           visibleRideData,
@@ -10698,6 +12473,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             rideId: rideId,
             reason: 'ride_completed',
           );
+          debugPrint(
+            'RIDER_READY_FOR_NEW_REQUEST uid=${_currentRiderUid ?? 'none'} '
+            'reason=ride_completed',
+          );
           if (_currentRiderUid?.isNotEmpty ?? false) {
             unawaited(
               _trustRulesService.recordTripCompletion(
@@ -10780,6 +12559,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             rideId: rideId,
             reason: 'ride_terminal_$status',
           );
+          debugPrint(
+            'RIDER_READY_FOR_NEW_REQUEST uid=${_currentRiderUid ?? 'none'} '
+            'reason=ride_terminal_$status',
+          );
           await _resetRideState(clearDestination: true);
           final cancelReason = _valueAsText(data['cancel_reason']);
           _showSnackBar(
@@ -10798,6 +12581,63 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _logResourceCounts('ride_listener_attach');
   }
 
+  void _maybeScheduleRideIdentityRefresh({
+    required String rideId,
+    required Map<String, dynamic> rideData,
+  }) {
+    if (_rideIdentityRefreshScheduledForRideId == rideId) return;
+    if (!_rideSnapshotShowsAssignedDriver(rideData)) return;
+    final identity = DriverVehicleIdentity.merge(rideRecord: rideData);
+    final nameGap = identity.name.isEmpty ||
+        identity.name.trim().toLowerCase() == 'driver';
+    final needsRefresh = nameGap ||
+        identity.plateNumber.isEmpty ||
+        identity.vehicleColor.isEmpty ||
+        identity.vehicleMake.isEmpty ||
+        identity.vehicleModel.isEmpty;
+    if (!needsRefresh) return;
+    _rideIdentityRefreshScheduledForRideId = rideId;
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 1800), () async {
+        if (!mounted || _currentRideId != rideId) return;
+        try {
+          final snap = await _rideRequestsRef.child(rideId).get();
+          if (!mounted || !snap.exists || snap.value is! Map) return;
+          final refreshed = Map<String, dynamic>.from(snap.value as Map);
+          debugPrint(
+            'RIDER_DRIVER_IDENTITY_LISTENER_REFRESH rideId=$rideId '
+            'plate=${DriverVehicleIdentity.merge(rideRecord: refreshed).plateNumber.isEmpty ? "missing" : "present"}',
+          );
+          setState(() {
+            _currentRideSnapshot = refreshed;
+            _driverData = mergeDriverDataPreservingNonEmpty(
+              previous: _driverData,
+              next: _extractDriverData(refreshed),
+            );
+          });
+          final driverId = _firstNonEmptyText(<dynamic>[
+            refreshed['driver_id'],
+            refreshed['driverId'],
+            refreshed['accepted_driver_id'],
+            refreshed['matched_driver_id'],
+          ]);
+          final afterRefresh = DriverVehicleIdentity.merge(rideRecord: refreshed);
+          if (driverId.isNotEmpty &&
+              (afterRefresh.plateNumber.isEmpty ||
+                  afterRefresh.vehicleColor.isEmpty ||
+                  afterRefresh.vehicleMake.isEmpty ||
+                  afterRefresh.vehicleModel.isEmpty)) {
+            await _mergeDriverPublicProfile(driverId, rideRecord: refreshed);
+          }
+        } catch (error) {
+          debugPrint(
+            'RIDER_DRIVER_IDENTITY_LISTENER_REFRESH_FAIL rideId=$rideId error=$error',
+          );
+        }
+      }),
+    );
+  }
+
   Map<String, dynamic>? _extractDriverData(Map<String, dynamic> data) {
     final driverId = _firstNonEmptyText(<dynamic>[
       data['accepted_driver_id'],
@@ -10811,22 +12651,220 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       return null;
     }
 
+    final identity = DriverVehicleIdentity.merge(rideRecord: data);
+    final snapshotComplete = identity.plateNumber.isNotEmpty &&
+        identity.vehicleMake.isNotEmpty &&
+        identity.vehicleModel.isNotEmpty &&
+        identity.vehicleColor.isNotEmpty &&
+        identity.photoUrl.isNotEmpty;
+    if (!snapshotComplete && identity.photoUrl.isEmpty) {
+      unawaited(_resolveDriverPhotoUrl(driverId));
+    }
     return <String, dynamic>{
       'id': driverId,
-      'name': _firstNonEmptyText(<dynamic>[
-        data['driver_name'],
-        data['driverName'],
-        data['name'],
-      ]),
-      'phone': _firstNonEmptyText(<dynamic>[
-        data['driver_phone'],
-        data['driverPhone'],
-        data['phone'],
-      ]),
-      'car': data['car'],
-      'plate': data['plate'],
-      'rating': data['rating'],
+      'name': identity.name.isEmpty ? 'Your driver' : identity.name,
+      'driver_name': identity.name.isEmpty ? 'Your driver' : identity.name,
+      'phone': identity.phone,
+      'car': identity.vehicleSummary,
+      'plate': identity.plateNumber,
+      'plateNumber': identity.plateNumber,
+      'plate_number': identity.plateNumber,
+      'vehicle_plate': identity.plateNumber,
+      'vehicleType': identity.vehicleType,
+      'vehicle_type': identity.vehicleType,
+      'vehicleColor': identity.vehicleColor,
+      'vehicle_color': identity.vehicleColor,
+      'vehicleMake': identity.vehicleMake,
+      'vehicle_make': identity.vehicleMake,
+      'vehicleModel': identity.vehicleModel,
+      'vehicle_model': identity.vehicleModel,
+      'driver_verification_status': identity.verificationStatus,
+      'verificationStatus': identity.verificationStatus,
+      'rating': identity.rating ?? data['rating'] ?? data['driver_rating'],
+      if (identity.photoUrl.isNotEmpty) ...<String, dynamic>{
+        'photo_url': identity.photoUrl,
+        'driver_photo_url': identity.photoUrl,
+      },
     };
+  }
+
+  Future<void> _mergeDriverPublicProfile(
+    String driverId, {
+    Map<String, dynamic>? rideRecord,
+  }) async {
+    if (driverId.isEmpty || !mounted) {
+      return;
+    }
+    final rideId = _currentRideId?.trim() ?? '';
+    final riderId = _currentRiderUid ?? '';
+    debugPrint(
+      'RIDER_DRIVER_IDENTITY_TRACE_START rideId=$rideId driverId=$driverId',
+    );
+    Map<String, dynamic> rideRequest = Map<String, dynamic>.from(
+      rideRecord ?? _currentRideSnapshot ?? const <String, dynamic>{},
+    );
+    Map<String, dynamic>? activeTrip;
+    Map<String, dynamic>? riderActiveTrip;
+    if (rideId.isNotEmpty) {
+      try {
+        final activeSnap = await rtdb.FirebaseDatabase.instance
+            .ref('active_trips/$rideId')
+            .get()
+            .timeout(const Duration(seconds: 6));
+        if (activeSnap.exists && activeSnap.value is Map) {
+          activeTrip = Map<String, dynamic>.from(activeSnap.value as Map);
+          debugPrint(
+            'RIDER_DRIVER_IDENTITY_HYDRATE_SOURCE rideId=$rideId source=active_trips',
+          );
+        }
+      } catch (_) {}
+    }
+    if (riderId.isNotEmpty) {
+      try {
+        final riderTripSnap = await rtdb.FirebaseDatabase.instance
+            .ref('rider_active_trip/$riderId')
+            .get()
+            .timeout(const Duration(seconds: 6));
+        if (riderTripSnap.exists && riderTripSnap.value is Map) {
+          riderActiveTrip = Map<String, dynamic>.from(riderTripSnap.value as Map);
+          debugPrint(
+            'RIDER_DRIVER_IDENTITY_HYDRATE_SOURCE rideId=$rideId source=rider_active_trip',
+          );
+        }
+      } catch (_) {}
+    }
+    if (rideRequest.isNotEmpty) {
+      debugPrint(
+        'RIDER_DRIVER_IDENTITY_HYDRATE_SOURCE rideId=$rideId source=ride_snapshot',
+      );
+    }
+    Map<String, dynamic>? profile;
+    try {
+      final snap = await rtdb.FirebaseDatabase.instance
+          .ref('driver_public_profiles/$driverId')
+          .get()
+          .timeout(const Duration(seconds: 8));
+      if (snap.exists && snap.value is Map) {
+        profile = flattenDriverProfileForIdentity(
+          Map<String, dynamic>.from(snap.value as Map),
+        );
+        debugPrint(
+          'RIDER_DRIVER_IDENTITY_HYDRATE_SOURCE rideId=$rideId source=driver_public_profiles',
+        );
+      }
+    } catch (error) {
+      debugPrint(
+        'RIDER_DRIVER_PUBLIC_PROFILE_MERGE_FAIL driverId=$driverId error=$error',
+      );
+    }
+    try {
+      final identity = DriverVehicleIdentity.merge(
+        rideRecord: rideRequest,
+        activeTrip: activeTrip,
+        riderActiveTrip: riderActiveTrip,
+        driverProfile: profile,
+      );
+      DriverVehicleIdentity.traceRiderDriverIdentity(
+        rideId: rideId,
+        driverId: driverId,
+        rideRequest: rideRequest,
+        activeTrip: activeTrip,
+        riderActiveTrip: riderActiveTrip,
+        driverProfile: profile,
+        identity: identity,
+      );
+      DriverVehicleIdentity.logRiderIdentitySource(
+        driverId: driverId,
+        rideId: rideId,
+        rideRecord: buildMergedRideIdentityRecord(
+          rideRequest: rideRequest,
+          activeTrip: activeTrip,
+          riderActiveTrip: riderActiveTrip,
+          driverProfile: profile,
+        ),
+        driverProfile: profile,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _driverData = mergeDriverDataPreservingNonEmpty(
+          previous: _driverData,
+          next: <String, dynamic>{
+            'id': driverId,
+            'name': identity.name,
+            'driver_name': identity.name,
+            'driver_full_name': identity.name,
+            'phone': identity.phone,
+            'car': identity.vehicleSummary,
+            'plate': identity.plateNumber,
+            'plateNumber': identity.plateNumber,
+            'plate_number': identity.plateNumber,
+            'vehicle_plate': identity.plateNumber,
+            'vehicleType': identity.vehicleType,
+            'vehicle_type': identity.vehicleType,
+            'vehicleColor': identity.vehicleColor,
+            'vehicle_color': identity.vehicleColor,
+            'vehicleMake': identity.vehicleMake,
+            'vehicle_make': identity.vehicleMake,
+            'vehicleModel': identity.vehicleModel,
+            'vehicle_model': identity.vehicleModel,
+            'driver_verification_status': identity.verificationStatus,
+            'verificationStatus': identity.verificationStatus,
+            'rating': identity.rating,
+            if (identity.photoUrl.isNotEmpty) ...<String, dynamic>{
+              'photo_url': identity.photoUrl,
+              'driver_photo_url': identity.photoUrl,
+            },
+          },
+        );
+      });
+    } catch (error) {
+      debugPrint(
+        'RIDER_DRIVER_PUBLIC_PROFILE_MERGE_FAIL driverId=$driverId error=$error',
+      );
+    }
+  }
+
+  final Set<String> _driverPhotoFetchAttempted = <String>{};
+
+  /// Best-effort fetch of the assigned driver's face photo from rider-visible
+  /// `driver_public_profiles/{id}`. Never throws.
+  Future<void> _resolveDriverPhotoUrl(String driverId) async {
+    if (driverId.isEmpty || !_driverPhotoFetchAttempted.add(driverId)) {
+      return;
+    }
+    try {
+      Map<String, dynamic>? profile;
+      final publicSnap = await rtdb.FirebaseDatabase.instance
+          .ref('driver_public_profiles/$driverId')
+          .get()
+          .timeout(const Duration(seconds: 8));
+      if (publicSnap.exists && publicSnap.value is Map) {
+        profile = Map<String, dynamic>.from(publicSnap.value as Map);
+      }
+      if (profile == null) {
+        return;
+      }
+      final url = _firstNonEmptyText(<dynamic>[
+        profile['photo_url'],
+        profile['photoUrl'],
+        profile['profilePhotoUrl'],
+        profile['avatarUrl'],
+        profile['avatar_url'],
+      ]);
+      if (url.isEmpty || !mounted) {
+        return;
+      }
+      final current = _driverData;
+      if (current != null && current['id'] == driverId) {
+        setState(() {
+          current['photo_url'] = url;
+        });
+      }
+    } catch (_) {
+      // Photo is optional; ignore failures.
+    }
   }
 
   void _applyRideStatus(String status) {
@@ -11139,6 +13177,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       );
       return;
     }
+    if (!_hasRoutePreviewReady &&
+        !_hasActiveRide &&
+        !_isRiderRequestMatchingPhase) {
+      _logRideFlow(
+        'REQUEST RIDE blocked reason=server_pricing_quote_not_ready '
+        'loading=$_ridePricingQuoteLoading '
+        'hasQuote=${_latestServerPricingQuote != null}',
+      );
+      if (_ridePricingQuoteLoading) {
+        _showSnackBar('Confirming your fare…');
+      } else {
+        _showSnackBar(
+          'Could not confirm your fare yet. Check your connection and try again.',
+        );
+      }
+      return;
+    }
 
     _logRideFlow('REQUEST RIDE temporary bypass forcing request creation');
     _setSubmittingRideRequest(true);
@@ -11170,6 +13225,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _stopRiderChatListener();
     _callSubscription?.cancel();
     _callSubscription = null;
+    _rideCallMirrorSubscription?.cancel();
+    _rideCallMirrorSubscription = null;
+    _detachSharedCallListener();
     _callListenerRideId = null;
     await _performLocalCallCleanup(
       rideId: rideId,
@@ -11221,6 +13279,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (mounted) {
       setState(() {
         _currentRideId = null;
+        _recoverableActiveRideId = null;
         _currentRideSnapshot = null;
         _rideStatus = 'idle';
         _isCreatingRide = false;
@@ -11253,6 +13312,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _lastRiderImpliedSpeedKmh = null;
         _lastConsumedRiderSafetyAlertIssuedAt = null;
       });
+      debugPrint(
+        'RIDER_READY_FOR_NEW_REQUEST uid=${_currentRiderUid ?? 'none'} '
+        'reason=reset_ride_state',
+      );
     }
   }
 
@@ -12003,15 +14066,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
   }
 
-  void _loadDrivers() {
-    _driversSubscription?.cancel();
-    _driversSubscription = null;
-    // Root drivers/ is not readable for riders (rules: drivers/$uid only).
-    _logRideFlow(
-      'live drivers map listener skipped (drivers root not readable)',
-    );
-  }
-
   Future<void> _saveRiderTrip(
     String rideId,
     Map<String, dynamic> rideData,
@@ -12071,6 +14125,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 rideData['created_at'] ?? DateTime.now().millisecondsSinceEpoch,
             'timestamp': completedAt,
             'completed_at': completedAt,
+            'payment_method':
+                TripStateMachine.resolveRidePaymentMethodCanonical(rideData),
+            'paymentMethod':
+                TripStateMachine.ridePaymentMethodDisplayLabel(rideData),
           });
 
       _logRideFlow('trip saved to rider history');
@@ -12082,12 +14140,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   ShareTripLink _shareTripLinkFromToken({
     required String rideId,
     required String token,
+    String? shareUrlOverride,
   }) {
+    final url = shareUrlOverride?.trim().isNotEmpty == true
+        ? shareUrlOverride!.trim()
+        : 'https://nexride.africa/track/${Uri.encodeComponent(token)}';
     return ShareTripLink(
       token: token,
-      url: '${ShareTripRtdbService.shareBaseUrl}/'
-          '${Uri.encodeComponent(rideId)}'
-          '?token=${Uri.encodeQueryComponent(token)}',
+      url: url,
       expiresAt: DateTime.now()
           .add(ShareTripRtdbService.shareLifetime)
           .millisecondsSinceEpoch,
@@ -12114,10 +14174,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     try {
       final tokenResp = await _rideCloud.createTripShareToken(rideId: rideId);
       if (!riderRideCallableSucceeded(tokenResp)) {
+        final reason = riderRideCallableReason(tokenResp);
         _logRideFlow(
-          'SHARE_TRIP_CALLABLE_FAIL rideId=$rideId '
-          'reason=${riderRideCallableReason(tokenResp)}',
+          'SHARE_TRIP_CALLABLE_FAIL rideId=$rideId reason=$reason',
         );
+        if (mounted) {
+          _showSnackBar('Share link failed: $reason');
+        }
         return null;
       }
       final token = tokenResp['track_token']?.toString().trim() ?? '';
@@ -12125,9 +14188,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _logRideFlow(
           'SHARE_TRIP_CALLABLE_FAIL rideId=$rideId reason=missing_track_token',
         );
+        if (mounted) {
+          _showSnackBar('Share link failed: missing_track_token');
+        }
         return null;
       }
-      final link = _shareTripLinkFromToken(rideId: rideId, token: token);
+      final shareUrl = tokenResp['share_url']?.toString().trim();
+      final link = _shareTripLinkFromToken(
+        rideId: rideId,
+        token: token,
+        shareUrlOverride: shareUrl,
+      );
       _cachedShareLinkByRideId[rideId] = link;
       _logRideFlow('SHARE_TRIP_CALLABLE_OK rideId=$rideId');
       return link;
@@ -12282,6 +14353,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           rideId: rideId,
           riderId: riderId,
           driverId: driverId,
+          countryId: 'nigeria',
+          stateId: (_rolloutRegionId ?? 'default').trim().isEmpty
+              ? 'default'
+              : _rolloutRegionId!.trim(),
           tripStatus: _rideStatus,
           pickupLabel: _firstNonEmptyText(<dynamic>[
             pickup['address'],
@@ -12501,8 +14576,25 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         senderRole: 'rider',
         text: trimmed,
         type: messageType,
+        imageUrl: normalizedImageUrl,
         clientCreatedAtMs: clientCreatedAt,
       );
+      if (normalizedImageUrl.isNotEmpty) {
+        logRideChatThreadPath(
+          rideId: normalizedRideId,
+          messageId: messageId,
+          path: chatWritePath,
+          stage: 'pre_write',
+          canonicalPath: chatCollectionPath,
+        );
+        logRideChatImageMessageWrite(
+          rideId: normalizedRideId,
+          messageId: messageId,
+          senderId: user.uid,
+          imageUrl: normalizedImageUrl,
+          path: chatWritePath,
+        );
+      }
       unawaited(
         _persistRiderChatMessageToRtdb(
           normalizedRideId: normalizedRideId,
@@ -12549,17 +14641,29 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'CHAT_SEND_OK role=rider rideId=$normalizedRideId messageId=$messageId '
         'path=$chatWritePath',
       );
-    } on TimeoutException {
+    } on TimeoutException catch (error) {
       _markRiderOptimisticMessageFailed(
         rideId: normalizedRideId,
         messageId: messageId,
         senderId: senderId,
         text: text,
       );
+      final imageUrl = (payload['imageUrl'] ?? payload['image_url'])?.toString() ?? '';
+      if (imageUrl.isNotEmpty) {
+        logRideChatImageMessageWriteFail(
+          rideId: normalizedRideId,
+          messageId: messageId,
+          senderId: senderId,
+          imageUrl: imageUrl,
+          path: chatWritePath,
+          error: error,
+        );
+      }
       _logRideFlow(
         'CHAT_SEND_FAIL role=rider rideId=$normalizedRideId messageId=$messageId '
         'path=$chatWritePath reason=write_timeout',
       );
+      rethrow;
     } catch (error) {
       _markRiderOptimisticMessageFailed(
         rideId: normalizedRideId,
@@ -12567,6 +14671,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         senderId: senderId,
         text: text,
       );
+      final imageUrl = (payload['imageUrl'] ?? payload['image_url'])?.toString() ?? '';
+      if (imageUrl.isNotEmpty) {
+        logRideChatImageMessageWriteFail(
+          rideId: normalizedRideId,
+          messageId: messageId,
+          senderId: senderId,
+          imageUrl: imageUrl,
+          path: chatWritePath,
+          error: error,
+        );
+      }
       if (isPermissionDeniedError(error) ||
           isRealtimeDatabasePermissionDenied(error)) {
         logRtdbPermissionDenied(
@@ -12579,6 +14694,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'CHAT_SEND_FAIL role=rider rideId=$normalizedRideId messageId=$messageId '
         'path=$chatWritePath error=$error',
       );
+      rethrow;
     }
   }
 
@@ -12592,9 +14708,6 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }
     final normalizedRideId = rideId.trim();
     final useCamera = source == RideChatImageSource.camera;
-    _logRideFlow(
-      '[CHAT_IMAGE_PICK] role=rider rideId=$normalizedRideId uid=${user.uid} source=${useCamera ? 'camera' : 'gallery'}',
-    );
     if (useCamera) {
       final cameraPermission = await Permission.camera.request();
       if (!cameraPermission.isGranted) {
@@ -12609,8 +14722,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (picked == null) {
       return null;
     }
-    _logRideFlow(
-      '[CHAT_IMAGE_UPLOAD_START] role=rider rideId=$normalizedRideId uid=${user.uid}',
+    logChatImagePicked(
+      chatKind: 'ride_chat',
+      threadId: normalizedRideId,
+      source: useCamera ? 'camera' : 'gallery',
+      localPath: picked.path,
+      actorId: user.uid,
     );
     try {
       final uploaded = await _dispatchPhotoUploadService.uploadRideChatPhoto(
@@ -12634,21 +14751,21 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         imageUrl: uploaded.fileUrl,
         retryType: 'image',
       );
-      if (result == null) {
-        _logRideFlow(
-          '[CHAT_IMAGE_UPLOAD_OK] role=rider rideId=$normalizedRideId uid=${user.uid}',
-        );
-      } else {
-        _logRideFlow(
-          '[CHAT_IMAGE_UPLOAD_FAIL] role=rider rideId=$normalizedRideId uid=${user.uid} error=$result',
+      if (result != null) {
+        logRideChatImageUploadFail(
+          rideId: normalizedRideId,
+          senderId: user.uid,
+          reason: result,
         );
       }
       return result;
     } catch (error) {
-      _logRideFlow(
-        '[CHAT_IMAGE_UPLOAD_FAIL] role=rider rideId=$normalizedRideId uid=${user.uid} error=$error',
+      logRideChatImageUploadFail(
+        rideId: normalizedRideId,
+        senderId: user.uid,
+        reason: '$error',
       );
-      return 'Unable to send this image right now.';
+      rethrow;
     }
   }
 
@@ -12825,6 +14942,19 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (messageId.isEmpty) {
       return;
     }
+    final path = '${canonicalRideChatMessagesPath(normalizedRideId)}/$messageId';
+    final riderId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final driverId = _valueAsText(_currentRideSnapshot?['driver_id']);
+    logRtdbListenerRead(
+      context: RtdbReadContext(
+        path: path,
+        rideId: normalizedRideId,
+        riderId: riderId,
+        driverId: driverId,
+        source: 'rider_chat_listener',
+      ),
+      listenerEvent: event.type.name,
+    );
     _ingestRiderChatRtdbMessage(
       normalizedRideId: normalizedRideId,
       messageId: messageId,
@@ -12847,12 +14977,38 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (trimmedId.isEmpty) {
       return;
     }
-    final message = parseRideChatMessageEntry(
-      rideId: normalizedRideId,
-      messageId: trimmedId,
-      raw: raw,
-    );
+    RideChatMessage? message;
+    try {
+      message = parseRideChatMessageEntry(
+        rideId: normalizedRideId,
+        messageId: trimmedId,
+        raw: raw,
+      );
+    } catch (error) {
+      _logRideFlow(
+        'CHAT_IMAGE_PARSE_FAIL role=rider rideId=$normalizedRideId '
+        'messageId=$trimmedId source=$source error=$error',
+      );
+      rethrow;
+    }
     if (message == null) {
+      if (raw is Map) {
+        final map = <String, dynamic>{};
+        raw.forEach((key, value) {
+          if (key != null) {
+            map[key.toString()] = value;
+          }
+        });
+        final imageUrl = rawRideChatImageUrlFromMap(map);
+        if (imageUrl != null) {
+          _logRideFlow(
+            'CHAT_IMAGE_PARSE_FAIL role=rider rideId=$normalizedRideId '
+            'messageId=$trimmedId source=$source imageUrl=$imageUrl '
+            'reason=parse_returned_null',
+          );
+          throw StateError('ride_chat_image_parse_returned_null');
+        }
+      }
       return;
     }
 
@@ -12947,8 +15103,20 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     if (_riderChatHydrateCompletedGeneration == listenerGeneration) {
       return;
     }
+    final path = canonicalRideChatMessagesPath(normalizedRideId);
+    final riderId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final driverId = _valueAsText(_currentRideSnapshot?['driver_id']);
     try {
-      final snap = await _rideChatMessagesRef(normalizedRideId).get();
+      final snap = await runRtdbQueryGet(
+        query: _rideChatMessagesRef(normalizedRideId),
+        context: RtdbReadContext(
+          path: path,
+          rideId: normalizedRideId,
+          riderId: riderId,
+          driverId: driverId,
+          source: 'rider_map.chat_hydrate',
+        ),
+      );
       if (_riderChatListenerRideId != normalizedRideId ||
           listenerGeneration != _riderChatListenerGeneration) {
         return;
@@ -12986,6 +15154,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         'initial_snapshot_failed',
         error: error,
       );
+      rethrow;
     }
   }
 
@@ -13031,11 +15200,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       messagesRef.onChildAdded.listen(
         (event) => _onRiderChatChildEvent(normalizedRideId, event),
         onError: (Object error) {
+          logRtdbListenerRead(
+            context: RtdbReadContext(
+              path: canonicalRideChatMessagesPath(normalizedRideId),
+              rideId: normalizedRideId,
+              riderId: FirebaseAuth.instance.currentUser?.uid ?? '',
+              driverId: _valueAsText(_currentRideSnapshot?['driver_id']),
+              source: 'rider_chat_listener',
+            ),
+            listenerEvent: 'onChildAdded',
+            error: error,
+          );
           _reportRiderChatIssue(
             normalizedRideId,
             'listener_onchild_added_failed',
             error: error,
           );
+          Error.throwWithStackTrace(error, StackTrace.current);
         },
       ),
     );
@@ -13043,11 +15224,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       messagesRef.onChildChanged.listen(
         (event) => _onRiderChatChildEvent(normalizedRideId, event),
         onError: (Object error) {
+          logRtdbListenerRead(
+            context: RtdbReadContext(
+              path: canonicalRideChatMessagesPath(normalizedRideId),
+              rideId: normalizedRideId,
+              riderId: FirebaseAuth.instance.currentUser?.uid ?? '',
+              driverId: _valueAsText(_currentRideSnapshot?['driver_id']),
+              source: 'rider_chat_listener',
+            ),
+            listenerEvent: 'onChildChanged',
+            error: error,
+          );
           _reportRiderChatIssue(
             normalizedRideId,
             'listener_onchild_changed_failed',
             error: error,
           );
+          Error.throwWithStackTrace(error, StackTrace.current);
         },
       ),
     );
@@ -13058,6 +15251,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _hydrateRiderChatMessagesFromRtdb(
         normalizedRideId,
         listenerGeneration: listenerGeneration,
+      ),
+    );
+    unawaited(
+      probeRideChatThreadPaths(
+        root: messagesRef.root,
+        rideId: normalizedRideId,
+        riderId: FirebaseAuth.instance.currentUser?.uid ?? '',
+        driverId: _valueAsText(_currentRideSnapshot?['driver_id']),
       ),
     );
   }
@@ -13127,6 +15328,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           rideId: rideId,
           peerName: _rideChatDriverDisplayName(),
           peerSubtitle: _rideChatDriverSubtitle(),
+          peerPhotoUrl: _driverData?['photo_url']?.toString() ?? '',
           currentUserId: user.uid,
           messagesListenable: _riderChatMessages,
           onSendMessage: sendMessage,
@@ -13160,7 +15362,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                           .toLowerCase()
                           .replaceAll(RegExp(r'[\s-]+'), '_') ==
                       'bank_transfer'
-                  ? '₦${((_asDouble(_currentRideSnapshot?['fare']) ?? _fare)).toStringAsFixed(0)}'
+                  ? '₦${_payableTotalNgn(rideData: _currentRideSnapshot)}'
                   : '',
           bankTransferUsesFlutterwaveVa:
               _currentRideSnapshot?['bank_transfer_automated'] == true,
@@ -13337,10 +15539,32 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _pickupSearch() {
-    return NativePlacesAutocompleteField(
-      controller: _pickupController,
-      hintText: 'Pickup location',
+  Future<void> _openPlaceSearchSheet(
+    RiderPlaceSearchField field, {
+    int additionalStopIndex = 0,
+  }) async {
+    final String hintText;
+    final String initialQuery;
+    switch (field) {
+      case RiderPlaceSearchField.pickup:
+        hintText = 'Search pickup location';
+        initialQuery = _pickupController.text;
+        break;
+      case RiderPlaceSearchField.destination:
+        hintText = 'Search destination';
+        initialQuery = _destinationController.text;
+        break;
+      case RiderPlaceSearchField.additionalStop:
+        hintText = 'Search stop ${additionalStopIndex + 2}';
+        initialQuery = _additionalStopControllers[additionalStopIndex].text;
+        break;
+    }
+
+    await RiderPlaceSearchSheet.show(
+      context,
+      field: field,
+      hintText: hintText,
+      initialQuery: initialQuery,
       countryCode: RiderLaunchScope.countryCode,
       searchScopeLabel: RiderLaunchScope.launchCitiesLabel,
       queryTransform: (String query) => RiderLaunchScope.normalizeAddressQuery(
@@ -13348,75 +15572,173 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         preferredCity: _selectedLaunchCity,
       ),
       fallbackSuggestionsBuilder: _fallbackPlaceSuggestions,
-      onSelected: (suggestion) async {
-        await _handlePlaceSelection(suggestion: suggestion, isPickup: true);
+      additionalStopIndex: additionalStopIndex,
+      onCurrentLocation: field == RiderPlaceSearchField.pickup
+          ? _handleCurrentLocationFromSearchSheet
+          : null,
+      onSelected: (NativePlaceSuggestion suggestion) async {
+        switch (field) {
+          case RiderPlaceSearchField.pickup:
+            await _handlePlaceSelection(
+              suggestion: suggestion,
+              isPickup: true,
+            );
+            break;
+          case RiderPlaceSearchField.destination:
+            await _handlePlaceSelection(
+              suggestion: suggestion,
+              isPickup: false,
+            );
+            break;
+          case RiderPlaceSearchField.additionalStop:
+            await _handleAdditionalStopSelection(
+              suggestion: suggestion,
+              extraStopIndex: additionalStopIndex,
+            );
+            break;
+        }
       },
     );
   }
 
-  Widget _dropOffSearchField({
-    required TextEditingController controller,
-    required String hintText,
-    required Future<void> Function(NativePlaceSuggestion suggestion) onSelected,
-    VoidCallback? onRemove,
+  Future<void> _handleCurrentLocationFromSearchSheet() async {
+    final position = await Geolocator.getCurrentPosition();
+    await _applyCurrentLocationAsPickup(
+      position,
+      moveCamera: true,
+      autoFillPickup: true,
+    );
+    await _ensureRouteMetrics();
+  }
+
+  Widget _buildPlanRideLocationSummaryRow({
+    required Widget leading,
+    required String title,
+    required String placeholder,
+    required VoidCallback onTap,
   }) {
-    return Row(
-      children: [
-        Expanded(
-          child: NativePlacesAutocompleteField(
-            controller: controller,
-            hintText: hintText,
-            countryCode: RiderLaunchScope.countryCode,
-            searchScopeLabel: RiderLaunchScope.launchCitiesLabel,
-            queryTransform: (String query) =>
-                RiderLaunchScope.normalizeAddressQuery(
-                  query,
-                  preferredCity: _selectedLaunchCity,
+    final resolvedTitle = title.trim().isEmpty ? placeholder : title.trim();
+    final isPlaceholder = title.trim().isEmpty;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+          child: Row(
+            children: <Widget>[
+              leading,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  resolvedTitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: isPlaceholder
+                        ? const Color(0xFF74685B)
+                        : const Color(0xFF1E160D),
+                    fontSize: 15,
+                    fontWeight: isPlaceholder ? FontWeight.w500 : FontWeight.w700,
+                  ),
                 ),
-            fallbackSuggestionsBuilder: _fallbackPlaceSuggestions,
-            onSelected: (suggestion) async {
-              await onSelected(suggestion);
-            },
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: const Color(0xFF74685B).withValues(alpha: 0.7),
+              ),
+            ],
           ),
         ),
-        if (onRemove != null) ...[
-          const SizedBox(width: 8),
-          Material(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            child: IconButton(
-              onPressed: onRemove,
-              icon: const Icon(Icons.close, color: Colors.red),
+      ),
+    );
+  }
+
+  Widget _buildPlanRideSearchSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        _buildPlanRideLocationSummaryRow(
+          leading: Container(
+            width: 10,
+            height: 10,
+            decoration: const BoxDecoration(
+              color: Color(0xFF1B8A5A),
+              shape: BoxShape.circle,
+            ),
+          ),
+          title: _pickupAddress,
+          placeholder: 'Pickup location',
+          onTap: () => unawaited(
+            _openPlaceSearchSheet(RiderPlaceSearchField.pickup),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(left: 4, right: 4),
+          child: Container(height: 1, color: _panelBorder),
+        ),
+        _buildPlanRideLocationSummaryRow(
+          leading: Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E160D),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          title: _destinationAddress,
+          placeholder: 'Where to?',
+          onTap: () => unawaited(
+            _openPlaceSearchSheet(RiderPlaceSearchField.destination),
+          ),
+        ),
+        for (var i = 0; i < _extraStopFieldCount; i++) ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.only(left: 4, right: 4),
+            child: Container(height: 1, color: _panelBorder),
+          ),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _buildPlanRideLocationSummaryRow(
+                  leading: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: _gold,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  title: _additionalStopAddresses[i],
+                  placeholder: 'Stop ${i + 2}',
+                  onTap: () => unawaited(
+                    _openPlaceSearchSheet(
+                      RiderPlaceSearchField.additionalStop,
+                      additionalStopIndex: i,
+                    ),
+                  ),
+                ),
+              ),
+              IconButton(
+                onPressed: () => unawaited(_removeAdditionalStopField(i)),
+                icon: const Icon(Icons.close_rounded, color: Colors.red),
+              ),
+            ],
+          ),
+        ],
+        if (_extraStopFieldCount < _additionalStopControllers.length) ...<Widget>[
+          const SizedBox(height: 4),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: _addStopField,
+              icon: const Icon(Icons.add_location_alt_outlined),
+              label: const Text('Add stop'),
             ),
           ),
         ],
       ],
-    );
-  }
-
-  Widget _destinationSearch() {
-    return _dropOffSearchField(
-      controller: _destinationController,
-      hintText: 'Where to?',
-      onSelected: (suggestion) {
-        return _handlePlaceSelection(suggestion: suggestion, isPickup: false);
-      },
-    );
-  }
-
-  Widget _additionalStopSearch(int extraStopIndex) {
-    return _dropOffSearchField(
-      controller: _additionalStopControllers[extraStopIndex],
-      hintText: 'Stop ${extraStopIndex + 2}',
-      onSelected: (suggestion) {
-        return _handleAdditionalStopSelection(
-          suggestion: suggestion,
-          extraStopIndex: extraStopIndex,
-        );
-      },
-      onRemove: () {
-        unawaited(_removeAdditionalStopField(extraStopIndex));
-      },
     );
   }
 
@@ -13450,7 +15772,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _bottomPanel({bool collapsed = false}) {
+  Widget _bottomPanel({bool collapsed = false, bool showDragHandle = true}) {
     _logRequestUiState();
     final effectiveStatus = _effectiveRideStatus;
     final statusText = _rideStatusLabel(effectiveStatus);
@@ -13473,56 +15795,127 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: 46,
-            height: 5,
-            decoration: BoxDecoration(
-              color: _panelBorder,
-              borderRadius: BorderRadius.circular(999),
-            ),
-          ),
-          const SizedBox(height: 12),
-          _buildRideStatusHeroCard(statusText),
-          if (collapsed) ...[
-            const SizedBox(height: 10),
-            _buildPanelCard(
-              child: Row(
-                children: [
-                  _buildCollapsedMetric(label: 'Fare', value: '₦${_fare.toStringAsFixed(0)}'),
-                  _buildCollapsedMetric(
-                    label: 'ETA',
-                    value: _estimatedDurationMin > 0
-                        ? '${_estimatedDurationMin.toStringAsFixed(0)} min'
-                        : '--',
-                  ),
-                ],
+          if (showDragHandle) ...[
+            Container(
+              width: 46,
+              height: 5,
+              decoration: BoxDecoration(
+                color: _panelBorder,
+                borderRadius: BorderRadius.circular(999),
               ),
             ),
-            if (!_hidePrimaryRideDuringMatchingOnly) ...[
+            const SizedBox(height: 12),
+          ],
+          _buildRideStatusHeroCard(statusText),
+          if (_isQueuedDriverTripWaiting) ...[
+            const SizedBox(height: 10),
+            _buildQueuedDriverTripBanner(),
+          ],
+          if (collapsed) ...[
+            if (_showBoltRequestPreview) ...[
               const SizedBox(height: 10),
-              _buildPrimaryRideButton(),
+              RiderRequestPreviewFareSheet(
+                tripFareNgn: _displayTripFareNgn,
+                distanceKm: _distanceKm,
+                pricingQuote: _latestServerPricingQuote,
+                quoteLoading: _ridePricingQuoteLoading,
+                availableDiscounts: _rideDiscountOptions,
+                selectedDiscountId: _selectedRideDiscountId,
+                discountBusy: _rideDiscountsLoading,
+                onSelectDiscount: _handleSelectRideDiscount,
+                onClearDiscount: _handleClearRideDiscount,
+                paymentMethodLabel: _riderTripPaymentMethodLabel,
+                paymentMethodIcon: _riderTripPaymentMethodIcon,
+                paymentLocked: _isTripPaymentSelectionLocked,
+                selectEnabled: _primaryRideButtonEnabled,
+                selectBusy: _isPrimaryRideButtonBusy,
+                onPaymentTap: _showTripPaymentMethodPicker,
+                onSelectNexRide: () {
+                  unawaited(_handleSelectNexRideFromPreview());
+                },
+              ),
+            ] else ...[
+              const SizedBox(height: 10),
+              _buildPanelCard(
+                child: Row(
+                  children: [
+                    _buildCollapsedMetric(
+                      label: 'Total',
+                      value: _displayPayableTotalNgn > 0
+                          ? '₦$_displayPayableTotalNgn'
+                          : (_ridePricingQuoteLoading ? '…' : '--'),
+                    ),
+                    _buildCollapsedMetric(
+                      label: 'ETA',
+                      value: _estimatedDurationMin > 0
+                          ? '${_estimatedDurationMin.toStringAsFixed(0)} min'
+                          : '--',
+                    ),
+                  ],
+                ),
+              ),
+              if (!_hidePrimaryRideDuringMatchingOnly) ...[
+                const SizedBox(height: 10),
+                _buildPrimaryRideButton(),
+              ],
             ],
           ],
           if (!collapsed && _routePreviewError != null && !_hasActiveRide) ...[
             const SizedBox(height: 12),
             _buildRouteErrorCard(),
           ],
-          if (!collapsed)
+          if (!collapsed && showRouteSummary) ...[
+            const SizedBox(height: 12),
             _buildRouteSummaryCard(
               showRouteSummary: showRouteSummary,
               stopAddresses: stopAddresses,
             ),
-          if (!collapsed && _shouldShowAcceptedRideBankTransferDetails) ...[
+          ],
+          if (!collapsed && _showBoltRequestPreview) ...[
+            const SizedBox(height: 12),
+            RiderRequestPreviewFareSheet(
+              tripFareNgn: _displayTripFareNgn,
+              distanceKm: _distanceKm,
+              pricingQuote: _latestServerPricingQuote,
+              quoteLoading: _ridePricingQuoteLoading,
+              availableDiscounts: _rideDiscountOptions,
+              selectedDiscountId: _selectedRideDiscountId,
+              discountBusy: _rideDiscountsLoading,
+              onSelectDiscount: _handleSelectRideDiscount,
+              onClearDiscount: _handleClearRideDiscount,
+              paymentMethodLabel: _riderTripPaymentMethodLabel,
+              paymentMethodIcon: _riderTripPaymentMethodIcon,
+              paymentLocked: _isTripPaymentSelectionLocked,
+              selectEnabled: _primaryRideButtonEnabled,
+              selectBusy: _isPrimaryRideButtonBusy,
+              onPaymentTap: _showTripPaymentMethodPicker,
+              onSelectNexRide: () {
+                unawaited(_handleSelectNexRideFromPreview());
+              },
+            ),
+          ],
+          if (!collapsed &&
+              !_showBoltRequestPreview &&
+              _shouldShowAcceptedRideBankTransferDetails) ...[
             const SizedBox(height: 12),
             _buildAcceptedRideBankTransferDetailsCard(),
           ],
-          if (!collapsed && !_hasActiveRide && _hasRoutePreviewReady) ...[
+          if (!collapsed &&
+              !_showBoltRequestPreview &&
+              _shouldShowRidePaymentVerificationRetry) ...[
+            const SizedBox(height: 12),
+            _buildRidePaymentVerificationCard(),
+          ],
+          if (!collapsed &&
+              !_showBoltRequestPreview &&
+              !_hasActiveRide &&
+              _hasRoutePreviewReady) ...[
             const SizedBox(height: 12),
             _buildTripPaymentMethodSelectorCard(),
           ],
           if (!collapsed && _driverFound && _driverData != null) ...[
             const SizedBox(height: 12),
-            _buildDriverAssignmentCard(),
+            _buildDriverSafetyCard(),
           ],
           if (!collapsed && effectiveStatus == 'arrived') ...[
             const SizedBox(height: 12),
@@ -13557,7 +15950,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
             ),
           ],
           if (!(_hasActiveRide && collapsed)) ...[
-            if (!_hidePrimaryRideDuringMatchingOnly) ...[
+            if (!_hidePrimaryRideDuringMatchingOnly && !_showBoltRequestPreview) ...[
               const SizedBox(height: 12),
               _buildPrimaryRideButton(),
             ],
@@ -13613,27 +16006,46 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 ],
               ),
             ],
+            if (!collapsed && _hasActiveRide) ...[
+              const SizedBox(height: 10),
+              _buildSecondaryRideActionButton(
+                label: 'Help & Support',
+                icon: Icons.support_agent_outlined,
+                filled: false,
+                onPressed: () {
+                  unawaited(_openWhatsAppSupportFromMap());
+                },
+              ),
+            ],
           ],
         ],
       ),
     );
   }
 
-  Widget _buildPlanRideDraggablePanel() {
-    return Positioned.fill(
-      child: DraggableScrollableSheet(
-        initialChildSize: 0.40,
-        minChildSize: 0.22,
-        maxChildSize: 0.70,
-        snap: true,
-        snapSizes: const <double>[0.38, 0.60, 0.70],
-        builder: (BuildContext context, ScrollController scrollController) {
-          return SingleChildScrollView(
-            controller: scrollController,
-            physics: const ClampingScrollPhysics(),
-            child: _bottomPanel(),
-          );
-        },
+  Widget _buildPlanRideFixedPanel({double? heightFraction}) {
+    final fraction = heightFraction ?? _planRidePanelHeightFraction;
+    final viewInsets = MediaQuery.viewInsetsOf(context);
+    final maxPanelHeight = MediaQuery.sizeOf(context).height * fraction;
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: Padding(
+        padding: EdgeInsets.only(bottom: viewInsets.bottom),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxPanelHeight),
+          child: Material(
+            color: Colors.transparent,
+            child: SafeArea(
+              top: false,
+              child: SingleChildScrollView(
+                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                padding: EdgeInsets.only(bottom: viewInsets.bottom > 0 ? 8 : 0),
+                physics: const ClampingScrollPhysics(),
+                child: _bottomPanel(showDragHandle: false),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -13664,6 +16076,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       child: NotificationListener<DraggableScrollableNotification>(
         onNotification: (notification) {
           final expanded = notification.extent > 0.5;
+          if ((notification.extent - _planRideSheetExtent).abs() > 0.008 &&
+              mounted) {
+            setState(() {
+              _planRideSheetExtent = notification.extent;
+            });
+            _schedulePreviewEtaChipPositionSync();
+          }
           if (expanded != _isRiderTripSheetExpanded && mounted) {
             setState(() {
               _isRiderTripSheetExpanded = expanded;
@@ -13701,6 +16120,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         (_recoverableActiveRideId?.trim().isNotEmpty ?? false);
 
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       body: Stack(
         children: [
           ValueListenableBuilder<int>(
@@ -13749,6 +16169,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                       _scheduleIosMapStabilization(controller: controller);
                       _scheduleIosMapTileRecovery(controller: controller);
                     }
+                    _schedulePreviewEtaChipPositionSync();
                   } catch (e, st) {
                     if (kDebugMode) {
                       debugPrint('[RiderMap] onMapCreated error: $e');
@@ -13766,6 +16187,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   }
                 },
                 onCameraIdle: () {
+                  _schedulePreviewEtaChipPositionSync();
                   if (defaultTargetPlatform != TargetPlatform.iOS) {
                     return;
                   }
@@ -13845,6 +16267,26 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
+          if (_showBoltRequestPreview &&
+              _pickupEtaChipScreenOffset != null) ...[
+            _buildAnchoredPreviewEtaChip(
+              screenPosition: _pickupEtaChipScreenOffset!,
+              label: 'Pickup',
+              etaText: _pickupEtaPreviewLabel,
+              previewCaption: 'Not assigned yet',
+              accentColor: _gold,
+            ),
+          ],
+          if (_showBoltRequestPreview &&
+              _dropoffEtaChipScreenOffset != null) ...[
+            _buildAnchoredPreviewEtaChip(
+              screenPosition: _dropoffEtaChipScreenOffset!,
+              label: 'Dropoff',
+              etaText: _dropoffEtaPreviewLabel,
+              previewCaption: 'Route estimate',
+              accentColor: _routeGold,
+            ),
+          ],
           Positioned(
             top: 60,
             left: showSosButton ? 92 : 20,
@@ -14024,25 +16466,18 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   ),
                   const SizedBox(height: 10),
                 ],
-                _pickupSearch(),
-                const SizedBox(height: 10),
-                _destinationSearch(),
-                for (var i = 0; i < _extraStopFieldCount; i++) ...[
-                  const SizedBox(height: 10),
-                  _additionalStopSearch(i),
-                ],
-                if (!_hasActiveRide &&
-                    _extraStopFieldCount <
-                        _additionalStopControllers.length) ...[
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton.icon(
-                      onPressed: _addStopField,
-                      icon: const Icon(Icons.add_location_alt_outlined),
-                      label: const Text('Add stop'),
+                if (!_hasActiveRide) ...[
+                  Material(
+                    color: Colors.white.withValues(alpha: 0.96),
+                    borderRadius: BorderRadius.circular(16),
+                    elevation: 4,
+                    shadowColor: Colors.black.withValues(alpha: 0.12),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+                      child: _buildPlanRideSearchSection(),
                     ),
                   ),
+                  const SizedBox(height: 10),
                 ],
               ],
             ),
@@ -14124,10 +16559,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 ),
               ),
             ),
-          if (_hasActiveRide || _searchingDriver)
+          if (_hasActiveRide && !_shouldUseFixedMatchingBottomSheet)
             _buildActiveRideDraggablePanel()
           else
-            _buildPlanRideDraggablePanel(),
+            _buildPlanRideFixedPanel(
+              heightFraction: _shouldUseFixedMatchingBottomSheet
+                  ? _matchingRidePanelHeightFraction
+                  : _planRidePanelHeightFraction,
+            ),
         ],
       ),
     );
